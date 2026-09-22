@@ -1,6 +1,9 @@
 # CreativeSystem Nebula
-
+Made with ai until I become better at coding 
 Application de dessin PySide6/Qt 6 avec Canvas OpenGL et moteur de brush C++.
+
+<img width="2555" height="1430" alt="image" src="https://github.com/user-attachments/assets/71306f37-b3eb-48cf-967c-11c60c161338" />
+
 
 ## Outils
 
