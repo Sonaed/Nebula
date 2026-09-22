@@ -1,0 +1,2208 @@
+from typing import TypedDict
+
+from PySide6.QtWidgets import QWidget
+
+from PySide6.QtGui import (
+    QPainter,
+    QImage,
+    QTabletEvent,
+    QMouseEvent,
+    QWheelEvent,
+    QResizeEvent,
+    QPaintEvent,
+    QColor,
+    QPen,
+    QKeyEvent,
+    QEnterEvent,
+)
+
+from PySide6.QtCore import (
+    Qt,
+    QPoint,
+    QPointF,
+    QRectF,
+    QEvent,
+)
+
+from TOOLS.tool_manager import ToolManager
+from DOCUMENTS.document import Document
+from DOCUMENTS.layer import Layer
+
+
+class LayerSnapshot(TypedDict):
+    name: str
+    visible: bool
+    opacity: float
+    image: QImage
+
+
+class HistorySnapshot(TypedDict):
+    layers: list[LayerSnapshot]
+    active_layer_index: int
+
+
+class Canvas(QWidget):
+
+    def __init__(
+        self
+    ) -> None:
+
+        super().__init__()
+
+        self.document: Document = Document(
+            800,
+            600
+        )
+
+        background = (
+            self.document.get_active_layer()
+        )
+
+        if background is not None:
+
+            background.name = "Arrière-plan"
+
+            background.image.fill(
+                QColor(
+                    255,
+                    255,
+                    255
+                )
+            )
+
+        self.tools: ToolManager = ToolManager()
+
+        self.drawing: bool = False
+
+        self.last_point: QPoint = QPoint()
+
+        self.zoom: float = 1.0
+
+        self.min_zoom: float = 0.05
+
+        self.max_zoom: float = 8.0
+
+        self.offset: QPointF = QPointF(
+            0,
+            0
+        )
+
+        self.panning: bool = False
+
+        self.pan_start: QPointF = QPointF()
+
+        self.offset_start: QPointF = QPointF()
+
+        self.space_pressed: bool = False
+
+        self.cursor_position: QPointF = QPointF(
+            -1,
+            -1
+        )
+
+        self.cursor_visible: bool = False
+
+        # -----------------------------------------------------
+        # OUTIL TRANSFORMER
+        # -----------------------------------------------------
+
+        self.transforming: bool = False
+
+        self.transform_handle: str = ""
+
+        self.transform_start: QPointF = QPointF()
+
+        self.transform_scale_x: float = 1.0
+
+        self.transform_scale_y: float = 1.0
+
+        self.transform_original_scale_x: float = 1.0
+
+        self.transform_original_scale_y: float = 1.0
+
+        self.transform_move_delta: QPointF = QPointF(
+            0,
+            0
+        )
+
+        self.history: list[
+            HistorySnapshot
+        ] = []
+
+        self.history_index: int = -1
+
+        self.max_history: int = 30
+
+        self.save_history()
+
+        self.setAttribute(
+            Qt.WidgetAttribute.WA_OpaquePaintEvent
+        )
+
+        self.setMouseTracking(
+            True
+        )
+
+        self.setFocusPolicy(
+            Qt.FocusPolicy.StrongFocus
+        )
+
+    # =========================================================
+    # DOCUMENT
+    # =========================================================
+
+    def set_document(
+        self,
+        document: Document
+    ) -> None:
+
+        self.document = document
+
+        self.canvas_brush_end_stroke()
+
+
+        self.drawing = False
+
+        self.panning = False
+
+        self.tools.move_tool.end()
+
+        self.transforming = False
+
+        self.transform_handle = ""
+
+        self.last_point = QPoint()
+
+        self.history.clear()
+
+        self.history_index = -1
+
+        self.save_history()
+
+        self.fit_document()
+
+        self.update()
+
+    def create_new_image(
+        self,
+        width: int,
+        height: int,
+        dpi: int = 300,
+        background_color: QColor | None = None
+    ) -> None:
+
+        document = Document(
+            width,
+            height,
+            dpi,
+            background_color
+        )
+
+        self.set_document(
+            document
+        )
+
+    def load_image(
+        self,
+        file_path: str
+    ) -> bool:
+
+        image = QImage(
+            file_path
+        )
+
+        if image.isNull():
+            return False
+
+        image = image.convertToFormat(
+            QImage.Format.Format_ARGB32
+        )
+
+        document = Document(
+            image.width(),
+            image.height(),
+            300,
+            None
+        )
+
+        layer = document.get_active_layer()
+
+        if layer is None:
+            return False
+
+        layer.name = "Image"
+
+        layer.image = image
+
+        self.set_document(
+            document
+        )
+
+        return True
+
+    # =========================================================
+    # VIEW
+    # =========================================================
+
+    def canvas_brush_begin_stroke(
+        self
+    ) -> None:
+
+        if hasattr(
+            self.tools.brush,
+            "begin_stroke"
+        ):
+
+            self.tools.brush.begin_stroke()
+
+
+    def canvas_brush_end_stroke(
+        self
+    ) -> None:
+
+        if hasattr(
+            self.tools.brush,
+            "end_stroke"
+        ):
+
+            self.tools.brush.end_stroke()
+
+
+    def fit_document(
+        self
+    ) -> None:
+
+        if self.width() <= 1:
+            return
+
+        if self.height() <= 1:
+            return
+
+        document_width = (
+            self.document.width
+        )
+
+        document_height = (
+            self.document.height
+        )
+
+        if document_width <= 0:
+            return
+
+        if document_height <= 0:
+            return
+
+        margin = 40
+
+        available_width = max(
+            self.width() - margin,
+            1
+        )
+
+        available_height = max(
+            self.height() - margin,
+            1
+        )
+
+        zoom_x = (
+            available_width
+            / document_width
+        )
+
+        zoom_y = (
+            available_height
+            / document_height
+        )
+
+        self.zoom = min(
+            zoom_x,
+            zoom_y
+        )
+
+        self.zoom = max(
+            self.min_zoom,
+            min(
+                self.zoom,
+                self.max_zoom
+            )
+        )
+
+        scaled_width = (
+            document_width
+            * self.zoom
+        )
+
+        scaled_height = (
+            document_height
+            * self.zoom
+        )
+
+        self.offset = QPointF(
+            (
+                self.width()
+                - scaled_width
+            ) / 2,
+            (
+                self.height()
+                - scaled_height
+            ) / 2
+        )
+
+    def reset_view(
+        self
+    ) -> None:
+
+        self.fit_document()
+
+        self.update()
+
+    def get_document_rect(
+        self
+    ) -> QRectF:
+
+        return QRectF(
+            self.offset.x(),
+            self.offset.y(),
+            self.document.width * self.zoom,
+            self.document.height * self.zoom
+        )
+
+    # =========================================================
+    # LAYERS
+    # =========================================================
+
+    def get_active_layer(
+        self
+    ) -> Layer | None:
+
+        return self.document.get_active_layer()
+
+    def get_active_image(
+        self
+    ) -> QImage | None:
+
+        layer = self.get_active_layer()
+
+        if layer is None:
+            return None
+
+        return layer.image
+
+    # =========================================================
+    # HISTORY
+    # =========================================================
+
+    def create_history_snapshot(
+        self
+    ) -> HistorySnapshot:
+
+        snapshot_layers: list[
+            LayerSnapshot
+        ] = []
+
+        for layer in self.document.layers:
+
+            snapshot_layers.append(
+                {
+                    "name": layer.name,
+                    "visible": layer.visible,
+                    "opacity": layer.opacity,
+                    "image": layer.image.copy(),
+                }
+            )
+
+        return {
+            "layers": snapshot_layers,
+            "active_layer_index": (
+                self.document.active_layer_index
+            ),
+        }
+
+    def save_history(
+        self
+    ) -> None:
+
+        if self.history_index < (
+            len(self.history) - 1
+        ):
+
+            self.history = self.history[
+                :self.history_index + 1
+            ]
+
+        snapshot = (
+            self.create_history_snapshot()
+        )
+
+        self.history.append(
+            snapshot
+        )
+
+        self.history_index += 1
+
+        if len(self.history) > self.max_history:
+
+            self.history.pop(0)
+
+            self.history_index -= 1
+
+    def restore_history(
+        self,
+        snapshot: HistorySnapshot
+    ) -> None:
+
+        self.document.layers.clear()
+
+        for layer_data in snapshot["layers"]:
+
+            layer = self.document.add_layer(
+                layer_data["name"]
+            )
+
+            layer.image = (
+                layer_data["image"].copy()
+            )
+
+            layer.visible = (
+                layer_data["visible"]
+            )
+
+            layer.opacity = (
+                layer_data["opacity"]
+            )
+
+        self.document.active_layer_index = (
+            snapshot[
+                "active_layer_index"
+            ]
+        )
+
+        self.update()
+
+    def undo(
+        self
+    ) -> None:
+
+        if self.history_index <= 0:
+            return
+
+        self.history_index -= 1
+
+        self.restore_history(
+            self.history[
+                self.history_index
+            ]
+        )
+
+    def redo(
+        self
+    ) -> None:
+
+        if self.history_index >= (
+            len(self.history) - 1
+        ):
+
+            return
+
+        self.history_index += 1
+
+        self.restore_history(
+            self.history[
+                self.history_index
+            ]
+        )
+
+    # =========================================================
+    # TRANSFORMER
+    # =========================================================
+
+    def get_transform_rect(
+        self
+    ) -> QRectF:
+
+        width = (
+            self.document.width
+            * self.transform_scale_x
+        )
+
+        height = (
+            self.document.height
+            * self.transform_scale_y
+        )
+
+        center_x = (
+            self.document.width
+            / 2.0
+        )
+
+        center_y = (
+            self.document.height
+            / 2.0
+        )
+
+        return QRectF(
+            center_x - width / 2.0,
+            center_y - height / 2.0,
+            width,
+            height
+        )
+
+    def get_transform_handle(
+        self,
+        position: QPointF
+    ) -> str:
+
+        rect = self.get_transform_rect()
+
+        threshold = (
+            10.0
+            / max(
+                self.zoom,
+                0.01
+            )
+        )
+
+        left = rect.left()
+        right = rect.right()
+        top = rect.top()
+        bottom = rect.bottom()
+
+        center_x = (
+            left + right
+        ) / 2.0
+
+        center_y = (
+            top + bottom
+        ) / 2.0
+
+        if (
+            abs(
+                position.x() - left
+            ) <= threshold
+            and abs(
+                position.y() - top
+            ) <= threshold
+        ):
+            return "top_left"
+
+        if (
+            abs(
+                position.x() - center_x
+            ) <= threshold
+            and abs(
+                position.y() - top
+            ) <= threshold
+        ):
+            return "top"
+
+        if (
+            abs(
+                position.x() - right
+            ) <= threshold
+            and abs(
+                position.y() - top
+            ) <= threshold
+        ):
+            return "top_right"
+
+        if (
+            abs(
+                position.x() - right
+            ) <= threshold
+            and abs(
+                position.y() - center_y
+            ) <= threshold
+        ):
+            return "right"
+
+        if (
+            abs(
+                position.x() - right
+            ) <= threshold
+            and abs(
+                position.y() - bottom
+            ) <= threshold
+        ):
+            return "bottom_right"
+
+        if (
+            abs(
+                position.x() - center_x
+            ) <= threshold
+            and abs(
+                position.y() - bottom
+            ) <= threshold
+        ):
+            return "bottom"
+
+        if (
+            abs(
+                position.x() - left
+            ) <= threshold
+            and abs(
+                position.y() - bottom
+            ) <= threshold
+        ):
+            return "bottom_left"
+
+        if (
+            abs(
+                position.x() - left
+            ) <= threshold
+            and abs(
+                position.y() - center_y
+            ) <= threshold
+        ):
+            return "left"
+
+        if rect.contains(
+            position
+        ):
+
+            return "move"
+
+        return ""
+
+    def update_transform(
+        self,
+        position: QPointF
+    ) -> None:
+
+        center_x = (
+            self.document.width
+            / 2.0
+        )
+
+        center_y = (
+            self.document.height
+            / 2.0
+        )
+
+        min_scale = 0.05
+
+        handle = self.transform_handle
+
+        if handle in (
+            "left",
+            "right",
+            "top_left",
+            "top_right",
+            "bottom_left",
+            "bottom_right"
+        ):
+
+            width_half = max(
+                abs(
+                    position.x()
+                    - center_x
+                ),
+                self.document.width
+                * min_scale
+                / 2.0
+            )
+
+            self.transform_scale_x = max(
+                min_scale,
+                (
+                    width_half
+                    * 2.0
+                )
+                / self.document.width
+            )
+
+        if handle in (
+            "top",
+            "bottom",
+            "top_left",
+            "top_right",
+            "bottom_left",
+            "bottom_right"
+        ):
+
+            height_half = max(
+                abs(
+                    position.y()
+                    - center_y
+                ),
+                self.document.height
+                * min_scale
+                / 2.0
+            )
+
+            self.transform_scale_y = max(
+                min_scale,
+                (
+                    height_half
+                    * 2.0
+                )
+                / self.document.height
+            )
+
+        if handle == "move":
+
+            self.transform_move_delta = (
+                position
+                - self.transform_start
+            )
+
+    def apply_transform_to_layer(
+        self,
+        layer: Layer
+    ) -> None:
+
+        scale_x = self.transform_scale_x
+
+        scale_y = self.transform_scale_y
+
+        if (
+            abs(
+                scale_x - 1.0
+            ) < 0.0001
+            and abs(
+                scale_y - 1.0
+            ) < 0.0001
+        ):
+
+            return
+
+        image = layer.image
+
+        transformed = QImage(
+            image.size(),
+            QImage.Format.Format_ARGB32
+        )
+
+        transformed.fill(
+            0
+        )
+
+        painter = QPainter(
+            transformed
+        )
+
+        painter.setRenderHint(
+            QPainter.RenderHint.SmoothPixmapTransform
+        )
+
+        center_x = (
+            image.width()
+            / 2.0
+        )
+
+        center_y = (
+            image.height()
+            / 2.0
+        )
+
+        painter.translate(
+            center_x,
+            center_y
+        )
+
+        painter.scale(
+            scale_x,
+            scale_y
+        )
+
+        painter.translate(
+            -center_x,
+            -center_y
+        )
+
+        painter.drawImage(
+            0,
+            0,
+            image
+        )
+
+        painter.end()
+
+        layer.image = transformed
+
+    # =========================================================
+    # PAINT
+    # =========================================================
+
+    def draw_transparency_grid(
+        self,
+        painter: QPainter
+    ) -> None:
+
+        rect = self.get_document_rect()
+
+        if rect.width() <= 0:
+            return
+
+        if rect.height() <= 0:
+            return
+
+        tile_size = 12
+
+        left = int(
+            rect.left()
+        )
+
+        top = int(
+            rect.top()
+        )
+
+        right = int(
+            rect.right()
+        )
+
+        bottom = int(
+            rect.bottom()
+        )
+
+        painter.save()
+
+        painter.setClipRect(
+            rect
+        )
+
+        dark = QColor(
+            38,
+            38,
+            38
+        )
+
+        light = QColor(
+            54,
+            54,
+            54
+        )
+
+        for y in range(
+            top,
+            bottom + tile_size,
+            tile_size
+        ):
+
+            row = (
+                (y - top)
+                // tile_size
+            )
+
+            for x in range(
+                left,
+                right + tile_size,
+                tile_size
+            ):
+
+                column = (
+                    (x - left)
+                    // tile_size
+                )
+
+                if (
+                    (row + column)
+                    % 2
+                    == 0
+                ):
+
+                    color = light
+
+                else:
+
+                    color = dark
+
+                painter.fillRect(
+                    x,
+                    y,
+                    tile_size,
+                    tile_size,
+                    color
+                )
+
+        painter.restore()
+
+    def draw_transform_overlay(
+        self,
+        painter: QPainter
+    ) -> None:
+
+        if (
+            self.tools.current_tool
+            != "transform"
+        ):
+
+            return
+
+        rect = self.get_transform_rect()
+
+        left = (
+            self.offset.x()
+            + rect.left()
+            * self.zoom
+        )
+
+        top = (
+            self.offset.y()
+            + rect.top()
+            * self.zoom
+        )
+
+        right = (
+            self.offset.x()
+            + rect.right()
+            * self.zoom
+        )
+
+        bottom = (
+            self.offset.y()
+            + rect.bottom()
+            * self.zoom
+        )
+
+        center_x = (
+            left + right
+        ) / 2.0
+
+        center_y = (
+            top + bottom
+        ) / 2.0
+
+        painter.save()
+
+        pen = QPen(
+            QColor(
+                235,
+                235,
+                235,
+                230
+            ),
+            1
+        )
+
+        pen.setStyle(
+            Qt.PenStyle.DashLine
+        )
+
+        painter.setPen(
+            pen
+        )
+
+        painter.setBrush(
+            Qt.BrushStyle.NoBrush
+        )
+
+        painter.drawRect(
+            QRectF(
+                left,
+                top,
+                right - left,
+                bottom - top
+            )
+        )
+
+        handles = [
+            QPointF(
+                left,
+                top
+            ),
+            QPointF(
+                center_x,
+                top
+            ),
+            QPointF(
+                right,
+                top
+            ),
+            QPointF(
+                right,
+                center_y
+            ),
+            QPointF(
+                right,
+                bottom
+            ),
+            QPointF(
+                center_x,
+                bottom
+            ),
+            QPointF(
+                left,
+                bottom
+            ),
+            QPointF(
+                left,
+                center_y
+            ),
+        ]
+
+        painter.setPen(
+            QPen(
+                QColor(
+                    40,
+                    40,
+                    40
+                ),
+                1
+            )
+        )
+
+        painter.setBrush(
+            QColor(
+                235,
+                235,
+                235
+            )
+        )
+
+        handle_size = 8.0
+
+        for handle in handles:
+
+            painter.drawRect(
+                QRectF(
+                    handle.x()
+                    - handle_size / 2.0,
+                    handle.y()
+                    - handle_size / 2.0,
+                    handle_size,
+                    handle_size
+                )
+            )
+
+        painter.restore()
+
+    def draw_brush_cursor(
+        self,
+        painter: QPainter
+    ) -> None:
+
+        if self.tools.current_tool not in (
+            "brush",
+            "eraser"
+        ):
+
+            return
+
+        if not self.cursor_visible:
+            return
+
+        if not self.rect().contains(
+            int(
+                self.cursor_position.x()
+            ),
+            int(
+                self.cursor_position.y()
+            )
+        ):
+
+            return
+
+        if self.panning:
+            return
+
+        brush = self.tools.brush
+
+        size = max(
+            1.0,
+            brush.size
+        )
+
+        diameter = (
+            size
+            * self.zoom
+        )
+
+        radius = (
+            diameter
+            / 2.0
+        )
+
+        if diameter < 2.0:
+            return
+
+        painter.save()
+
+        center = self.cursor_position
+
+        if (
+            self.tools.current_tool
+            == "eraser"
+        ):
+
+            outer_color = QColor(
+                255,
+                255,
+                255,
+                220
+            )
+
+            inner_color = QColor(
+                20,
+                20,
+                20,
+                220
+            )
+
+        else:
+
+            outer_color = QColor(
+                20,
+                20,
+                20,
+                230
+            )
+
+            inner_color = QColor(
+                255,
+                255,
+                255,
+                210
+            )
+
+        painter.setPen(
+            QPen(
+                outer_color,
+                2
+            )
+        )
+
+        painter.setBrush(
+            Qt.BrushStyle.NoBrush
+        )
+
+        painter.drawEllipse(
+            center,
+            radius,
+            radius
+        )
+
+        if radius > 2.0:
+
+            painter.setPen(
+                QPen(
+                    inner_color,
+                    1
+                )
+            )
+
+            painter.drawEllipse(
+                center,
+                max(
+                    radius - 2.0,
+                    0.5
+                ),
+                max(
+                    radius - 2.0,
+                    0.5
+                )
+            )
+
+        painter.restore()
+
+    def paintEvent(
+        self,
+        event: QPaintEvent
+    ) -> None:
+
+        painter = QPainter(
+            self
+        )
+
+        painter.fillRect(
+            self.rect(),
+            QColor(
+                18,
+                18,
+                18
+            )
+        )
+
+        self.draw_transparency_grid(
+            painter
+        )
+
+        painter.save()
+
+        painter.translate(
+            self.offset
+        )
+
+        painter.scale(
+            self.zoom,
+            self.zoom
+        )
+
+        for index, layer in enumerate(
+            self.document.layers
+        ):
+
+            if not layer.visible:
+                continue
+
+            painter.setOpacity(
+                layer.opacity
+            )
+
+            is_transform_preview = (
+                self.transforming
+                and self.tools.current_tool
+                == "transform"
+                and index
+                == self.document.active_layer_index
+            )
+
+            if is_transform_preview:
+
+                center_x = (
+                    self.document.width
+                    / 2.0
+                )
+
+                center_y = (
+                    self.document.height
+                    / 2.0
+                )
+
+                painter.save()
+
+                painter.translate(
+                    center_x,
+                    center_y
+                )
+
+                painter.scale(
+                    self.transform_scale_x,
+                    self.transform_scale_y
+                )
+
+                painter.translate(
+                    -center_x,
+                    -center_y
+                )
+
+                painter.drawImage(
+                    0,
+                    0,
+                    layer.image
+                )
+
+                painter.restore()
+
+            else:
+
+                painter.drawImage(
+                    0,
+                    0,
+                    layer.image
+                )
+
+        painter.setOpacity(
+            1.0
+        )
+
+        painter.restore()
+
+        self.draw_transform_overlay(
+            painter
+        )
+
+        self.draw_brush_cursor(
+            painter
+        )
+
+        painter.end()
+
+    # =========================================================
+    # EVENTS VIEW
+    # =========================================================
+
+    def resizeEvent(
+        self,
+        event: QResizeEvent
+    ) -> None:
+
+        self.fit_document()
+
+        super().resizeEvent(
+            event
+        )
+
+        self.update()
+
+    def enterEvent(
+        self,
+        event: QEnterEvent
+    ) -> None:
+
+        self.cursor_visible = True
+
+        self.update()
+
+        super().enterEvent(
+            event
+        )
+
+    def leaveEvent(
+        self,
+        event: QEvent
+    ) -> None:
+
+        self.cursor_visible = False
+
+        self.update()
+
+        super().leaveEvent(
+            event
+        )
+
+    # =========================================================
+    # KEYBOARD
+    # =========================================================
+
+    def keyPressEvent(
+        self,
+        event: QKeyEvent
+    ) -> None:
+
+        if event.isAutoRepeat():
+            return
+
+        key = event.key()
+
+        if key == Qt.Key.Key_B:
+
+            self.tools.set_brush()
+
+            self.update()
+
+            event.accept()
+
+            return
+
+        if key == Qt.Key.Key_E:
+
+            self.tools.set_eraser()
+
+            self.update()
+
+            event.accept()
+
+            return
+
+        if key == Qt.Key.Key_M:
+
+            self.tools.set_move()
+
+            self.update()
+
+            event.accept()
+
+            return
+
+        if key == Qt.Key.Key_T:
+
+            self.tools.set_transform()
+
+            self.update()
+
+            event.accept()
+
+            return
+
+        if key == Qt.Key.Key_Space:
+
+            self.space_pressed = True
+
+            self.update()
+
+            event.accept()
+
+            return
+
+        super().keyPressEvent(
+            event
+        )
+
+    def keyReleaseEvent(
+        self,
+        event: QKeyEvent
+    ) -> None:
+
+        if event.isAutoRepeat():
+            return
+
+        if (
+            event.key()
+            == Qt.Key.Key_Space
+        ):
+
+            self.space_pressed = False
+
+            self.update()
+
+            event.accept()
+
+            return
+
+        super().keyReleaseEvent(
+            event
+        )
+
+    # =========================================================
+    # MOUSE
+    # =========================================================
+
+    def mousePressEvent(
+        self,
+        event: QMouseEvent
+    ) -> None:
+
+        self.setFocus()
+
+        # -----------------------------------------------------
+        # PAN
+        # -----------------------------------------------------
+
+        if (
+            event.button()
+            == Qt.MouseButton.MiddleButton
+        ):
+
+            self.panning = True
+
+            self.pan_start = (
+                event.position()
+            )
+
+            self.offset_start = (
+                self.offset
+            )
+
+            event.accept()
+
+            return
+
+        if (
+            event.button()
+            == Qt.MouseButton.LeftButton
+            and self.space_pressed
+        ):
+
+            self.panning = True
+
+            self.pan_start = (
+                event.position()
+            )
+
+            self.offset_start = (
+                self.offset
+            )
+
+            event.accept()
+
+            return
+
+        # -----------------------------------------------------
+        # OUTIL DÉPLACER
+        # -----------------------------------------------------
+
+        if (
+            event.button()
+            == Qt.MouseButton.LeftButton
+            and self.tools.current_tool
+            == "move"
+        ):
+
+            layer = (
+                self.get_active_layer()
+            )
+
+            if layer is None:
+                return
+
+            position = (
+                self.screen_to_image(
+                    event.position()
+                )
+            )
+
+            self.save_history()
+
+            self.tools.begin_move(
+                position
+            )
+
+            event.accept()
+
+            return
+
+        # -----------------------------------------------------
+        # OUTIL TRANSFORMER
+        # -----------------------------------------------------
+
+        if (
+            event.button()
+            == Qt.MouseButton.LeftButton
+            and self.tools.current_tool
+            == "transform"
+        ):
+
+            layer = (
+                self.get_active_layer()
+            )
+
+            if layer is None:
+                return
+
+            position = (
+                self.screen_to_image(
+                    event.position()
+                )
+            )
+
+            handle = (
+                self.get_transform_handle(
+                    position
+                )
+            )
+
+            if not handle:
+                return
+
+            self.save_history()
+
+            self.transforming = True
+
+            self.transform_handle = (
+                handle
+            )
+
+            self.transform_start = (
+                position
+            )
+
+            self.transform_original_scale_x = (
+                self.transform_scale_x
+            )
+
+            self.transform_original_scale_y = (
+                self.transform_scale_y
+            )
+
+            self.transform_move_delta = QPointF(
+                0,
+                0
+            )
+
+            event.accept()
+
+            return
+
+        # -----------------------------------------------------
+        # DESSIN
+        # -----------------------------------------------------
+
+        if (
+            event.button()
+            == Qt.MouseButton.LeftButton
+            and self.tools.current_tool
+            in (
+                "brush",
+                "eraser"
+            )
+        ):
+
+            layer = (
+                self.get_active_layer()
+            )
+
+            if layer is None:
+                return
+
+            self.save_history()
+
+            self.canvas_brush_begin_stroke()
+
+
+            self.drawing = True
+
+            self.last_point = (
+                self.screen_to_image(
+                    event.position()
+                )
+            )
+
+            self.tools.draw(
+                layer.image,
+                self.last_point,
+                self.last_point
+            )
+
+            self.update()
+
+            event.accept()
+
+    def mouseMoveEvent(
+        self,
+        event: QMouseEvent
+    ) -> None:
+
+        self.cursor_position = (
+            event.position()
+        )
+
+        self.cursor_visible = True
+
+        # -----------------------------------------------------
+        # PAN
+        # -----------------------------------------------------
+
+        if self.panning:
+
+            movement = (
+                event.position()
+                - self.pan_start
+            )
+
+            self.offset = (
+                self.offset_start
+                + movement
+            )
+
+            self.update()
+
+            event.accept()
+
+            return
+
+        # -----------------------------------------------------
+        # DÉPLACEMENT DU CALQUE
+        # -----------------------------------------------------
+
+        if (
+            self.tools.current_tool
+            == "move"
+            and self.tools.move_tool.is_active()
+        ):
+
+            layer = (
+                self.get_active_layer()
+            )
+
+            if layer is None:
+                return
+
+            current_point = (
+                self.screen_to_image(
+                    event.position()
+                )
+            )
+
+            self.tools.move(
+                layer.image,
+                current_point
+            )
+
+            self.update()
+
+            event.accept()
+
+            return
+
+        # -----------------------------------------------------
+        # TRANSFORMATION
+        # -----------------------------------------------------
+
+        if self.transforming:
+
+            position = (
+                self.screen_to_image(
+                    event.position()
+                )
+            )
+
+            if self.transform_handle == "move":
+
+                self.transform_move_delta = (
+                    position
+                    - self.transform_start
+                )
+
+            else:
+
+                self.update_transform(
+                    position
+                )
+
+            self.update()
+
+            event.accept()
+
+            return
+
+        # -----------------------------------------------------
+        # DESSIN
+        # -----------------------------------------------------
+
+        if self.drawing:
+
+            image = (
+                self.get_active_image()
+            )
+
+            if image is None:
+                return
+
+            current_point = (
+                self.screen_to_image(
+                    event.position()
+                )
+            )
+
+            self.tools.draw(
+                image,
+                self.last_point,
+                current_point
+            )
+
+            self.last_point = (
+                current_point
+            )
+
+        self.update()
+
+        event.accept()
+
+    def mouseReleaseEvent(
+        self,
+        event: QMouseEvent
+    ) -> None:
+
+        # -----------------------------------------------------
+        # PAN
+        # -----------------------------------------------------
+
+        if (
+            event.button()
+            == Qt.MouseButton.MiddleButton
+        ):
+
+            self.panning = False
+
+            self.update()
+
+            event.accept()
+
+            return
+
+        if (
+            event.button()
+            == Qt.MouseButton.LeftButton
+        ):
+
+            # -------------------------------------------------
+            # DÉPLACEMENT
+            # -------------------------------------------------
+
+            if (
+                self.tools.current_tool
+                == "move"
+                and self.tools.move_tool.is_active()
+            ):
+
+                self.tools.end_move()
+
+                self.save_history()
+
+                self.update()
+
+                event.accept()
+
+                return
+
+            # -------------------------------------------------
+            # TRANSFORMATION
+            # -------------------------------------------------
+
+            if self.transforming:
+
+                layer = (
+                    self.get_active_layer()
+                )
+
+                if layer is not None:
+
+                    if (
+                        self.transform_handle
+                        == "move"
+                    ):
+
+                        delta = (
+                            self.transform_move_delta
+                        )
+
+                        image = layer.image
+
+                        moved = QImage(
+                            image.size(),
+                            QImage.Format.Format_ARGB32
+                        )
+
+                        moved.fill(
+                            0
+                        )
+
+                        painter = QPainter(
+                            moved
+                        )
+
+                        painter.drawImage(
+                            int(
+                                round(
+                                    delta.x()
+                                )
+                            ),
+                            int(
+                                round(
+                                    delta.y()
+                                )
+                            ),
+                            image
+                        )
+
+                        painter.end()
+
+                        layer.image = moved
+
+                    else:
+
+                        self.apply_transform_to_layer(
+                            layer
+                        )
+
+                self.transforming = False
+
+                self.transform_handle = ""
+
+                self.transform_scale_x = 1.0
+
+                self.transform_scale_y = 1.0
+
+                self.transform_original_scale_x = 1.0
+
+                self.transform_original_scale_y = 1.0
+
+                self.transform_move_delta = QPointF(
+                    0,
+                    0
+                )
+
+                self.save_history()
+
+                self.update()
+
+                event.accept()
+
+                return
+
+            # -------------------------------------------------
+            # DESSIN
+            # -------------------------------------------------
+
+            if self.drawing:
+
+                self.save_history()
+
+            self.canvas_brush_end_stroke()
+
+
+            self.drawing = False
+
+            self.update()
+
+            event.accept()
+
+    # =========================================================
+    # ZOOM
+    # =========================================================
+
+    def wheelEvent(
+        self,
+        event: QWheelEvent
+    ) -> None:
+
+        delta = (
+            event.angleDelta().y()
+        )
+
+        if delta == 0:
+            return
+
+        mouse_position = (
+            event.position()
+        )
+
+        old_zoom = self.zoom
+
+        if delta > 0:
+
+            self.zoom *= 1.1
+
+        else:
+
+            self.zoom /= 1.1
+
+        self.zoom = max(
+            self.min_zoom,
+            min(
+                self.zoom,
+                self.max_zoom
+            )
+        )
+
+        if old_zoom != self.zoom:
+
+            image_position = (
+                mouse_position
+                - self.offset
+            ) / old_zoom
+
+            self.offset = (
+                mouse_position
+                - image_position
+                * self.zoom
+            )
+
+        self.update()
+
+        event.accept()
+
+    # =========================================================
+    # TABLET XP-PEN
+    # =========================================================
+
+    def tabletEvent(
+        self,
+        event: QTabletEvent
+    ) -> None:
+
+        self.setFocus()
+
+        self.tools.brush.pressure = (
+            event.pressure()
+        )
+
+        self.cursor_position = (
+            event.position()
+        )
+
+        self.cursor_visible = True
+
+        # -----------------------------------------------------
+        # ESPACE = PAN
+        # -----------------------------------------------------
+
+        if self.space_pressed:
+
+            if (
+                event.type()
+                == QTabletEvent.Type.TabletPress
+            ):
+
+                self.panning = True
+
+                self.pan_start = (
+                    event.position()
+                )
+
+                self.offset_start = (
+                    self.offset
+                )
+
+            elif (
+                event.type()
+                == QTabletEvent.Type.TabletMove
+            ):
+
+                if self.panning:
+
+                    movement = (
+                        event.position()
+                        - self.pan_start
+                    )
+
+                    self.offset = (
+                        self.offset_start
+                        + movement
+                    )
+
+            elif (
+                event.type()
+                == QTabletEvent.Type.TabletRelease
+            ):
+
+                self.panning = False
+
+            self.update()
+
+            event.accept()
+
+            return
+
+        # -----------------------------------------------------
+        # OUTIL DÉPLACER
+        # -----------------------------------------------------
+
+        if self.tools.current_tool == "move":
+
+            position = (
+                self.screen_to_image(
+                    event.position()
+                )
+            )
+
+            if (
+                event.type()
+                == QTabletEvent.Type.TabletPress
+            ):
+
+                layer = (
+                    self.get_active_layer()
+                )
+
+                if layer is None:
+                    return
+
+                self.save_history()
+
+                self.tools.begin_move(
+                    position
+                )
+
+            elif (
+                event.type()
+                == QTabletEvent.Type.TabletMove
+            ):
+
+                layer = (
+                    self.get_active_layer()
+                )
+
+                if layer is None:
+                    return
+
+                self.tools.move(
+                    layer.image,
+                    position
+                )
+
+            elif (
+                event.type()
+                == QTabletEvent.Type.TabletRelease
+            ):
+
+                self.tools.end_move()
+
+                self.save_history()
+
+            self.update()
+
+            event.accept()
+
+            return
+
+        # -----------------------------------------------------
+        # DESSIN XP-PEN
+        # -----------------------------------------------------
+
+        position = (
+            self.screen_to_image(
+                event.position()
+            )
+        )
+
+        if (
+            event.type()
+            == QTabletEvent.Type.TabletPress
+        ):
+
+            layer = (
+                self.get_active_layer()
+            )
+
+            if layer is None:
+                return
+
+            self.save_history()
+
+            self.drawing = True
+
+            self.last_point = position
+
+            self.tools.draw(
+                layer.image,
+                position,
+                position
+            )
+
+            self.update()
+
+        elif (
+            event.type()
+            == QTabletEvent.Type.TabletMove
+        ):
+
+            if not self.drawing:
+                return
+
+            image = (
+                self.get_active_image()
+            )
+
+            if image is None:
+                return
+
+            self.tools.draw(
+                image,
+                self.last_point,
+                position
+            )
+
+            self.last_point = position
+
+            self.update()
+
+        elif (
+            event.type()
+            == QTabletEvent.Type.TabletRelease
+        ):
+
+            if self.drawing:
+                self.save_history()
+
+            self.canvas_brush_end_stroke()
+
+
+            self.drawing = False
+
+            self.update()
+
+        event.accept()
+
+    # =========================================================
+    # COORDONNÉES
+    # =========================================================
+
+    def screen_to_image(
+        self,
+        position: QPointF
+    ) -> QPoint:
+
+        image_position = (
+            position
+            - self.offset
+        ) / self.zoom
+
+        return QPoint(
+            round(
+                image_position.x()
+            ),
+            round(
+                image_position.y()
+            )
+        )
