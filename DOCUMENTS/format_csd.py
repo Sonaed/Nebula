@@ -177,7 +177,7 @@ class CSDFormat:
                     "layers": [],
                     "blend_presets": document.blend_presets,
                     "layer_groups": [{
-                        "id": group.id, "name": group.name,
+                        "id": group.id, "name": group.name, "parent_id": group.parent_id,
                         "layer_ids": list(group.layer_ids), "visible": group.visible,
                         "opacity": group.opacity, "blend_mode": group.blend_mode,
                         "blend_parameters": group.blend_parameters,
@@ -467,12 +467,11 @@ class CSDFormat:
                 )
                 from DOCUMENTS.layer_group import LayerGroup
                 layer_ids = {layer.id for layer in document.layers}
-                grouped_ids = set()
                 for entry in document_data.get("layer_groups", []):
                     if not isinstance(entry, dict):
                         continue
                     members = [str(layer_id) for layer_id in entry.get("layer_ids", [])
-                               if str(layer_id) in layer_ids and str(layer_id) not in grouped_ids]
+                               if str(layer_id) in layer_ids]
                     indices = [next(i for i, layer in enumerate(document.layers)
                                     if layer.id == layer_id) for layer_id in members]
                     if not members or indices != list(range(min(indices), max(indices) + 1)):
@@ -485,6 +484,8 @@ class CSDFormat:
                         opacity=max(0.0, min(1.0, float(entry.get("opacity", 1.0)))),
                         blend_mode=str(entry.get("blend_mode", "normal")),
                     )
+                    parent_id = entry.get("parent_id")
+                    group.parent_id = str(parent_id) if parent_id else None
                     params = entry.get("blend_parameters", {})
                     if isinstance(params, dict):
                         group.blend_parameters = {
@@ -492,7 +493,18 @@ class CSDFormat:
                             if isinstance(value, (int, float)) and math.isfinite(float(value))
                         }
                     document.layer_groups.append(group)
-                    grouped_ids.update(members)
+                groups_by_id = {group.id: group for group in document.layer_groups}
+                if len(groups_by_id) != len(document.layer_groups):
+                    raise ValueError("Identifiants de groupes CSD dupliqués")
+                for group in document.layer_groups:
+                    if group.parent_id is not None:
+                        parent = groups_by_id.get(group.parent_id)
+                        if parent is None or not set(group.layer_ids).issubset(parent.layer_ids):
+                            raise ValueError("Hiérarchie de groupes CSD invalide")
+                    elif any(group is not other and other.parent_id is None
+                             and set(group.layer_ids).intersection(other.layer_ids)
+                             for other in document.layer_groups):
+                        raise ValueError("Groupes racine CSD chevauchants")
                 presets = document_data.get("blend_presets", {})
                 if isinstance(presets, dict):
                     document.blend_presets = presets
@@ -544,6 +556,7 @@ class CSDFormat:
                         str(item.get("id") or EditableText("", QPointF()).id),
                     ))
 
+                document.sync_native_state()
                 return document
 
         except Exception as error:

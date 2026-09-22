@@ -15,6 +15,10 @@ class LayerGroup:
     name: str = "Groupe"
     id: str = field(default_factory=lambda: str(uuid4()))
     layer_ids: list[str] = field(default_factory=list)
+    # ``None`` designates a root group.  A nested group still lists its leaf
+    # layers so tile storage remains flat, but its compositing scope is owned
+    # by the parent group.
+    parent_id: str | None = None
     visible: bool = True
     opacity: float = 1.0
     blend_mode: str = "normal"

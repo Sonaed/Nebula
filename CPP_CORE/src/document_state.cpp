@@ -46,6 +46,30 @@ bool DocumentState::createGroup(const std::vector<int>& indices,
             return false;
         normalized = indices;
     } else if (!normalizeLayerGroup(layerCount(), indices, grouped, normalized)) {
+        // Wrapping one complete root group is the only overlap allowed.  It
+        // makes a new parent without giving any leaf layer two siblings.
+        std::vector<int> requested = indices;
+        std::sort(requested.begin(), requested.end());
+        requested.erase(std::unique(requested.begin(), requested.end()), requested.end());
+        auto child = std::find_if(groups_.begin(), groups_.end(),
+            [&requested](const NativeGroupState& group) {
+                auto members = group.layerIndices;
+                std::sort(members.begin(), members.end());
+                return group.parentGroup < 0 && members == requested;
+            });
+        if (child == groups_.end()) return false;
+        normalized = std::move(requested);
+        const int childIndex = static_cast<int>(std::distance(groups_.begin(), child));
+        NativeGroupState group;
+        group.id = nextGroupId_++;
+        group.name = name;
+        group.layerIndices = normalized;
+        groups_.push_back(std::move(group));
+        groupIndex = static_cast<int>(groups_.size()) - 1;
+        groups_[static_cast<std::size_t>(childIndex)].parentGroup = groupIndex;
+        return true;
+    }
+    if (normalized.empty()) {
         return false;
     }
     NativeGroupState group;
@@ -88,6 +112,8 @@ int DocumentState::groupForLayer(int layerIndex) const
     if (layerIndex < 0 || layerIndex >= layerCount()) return -1;
     for (int group = 0; group < groupCount(); ++group) {
         const auto& indices = groups_[static_cast<std::size_t>(group)].layerIndices;
+        // Groups are stored children-first, so the first matching group is
+        // the direct (deepest) owner exposed to UI commands.
         if (std::find(indices.begin(), indices.end(), layerIndex) != indices.end())
             return group;
     }

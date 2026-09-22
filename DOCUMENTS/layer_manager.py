@@ -34,6 +34,26 @@ class LayerManager:
 
         return layer
 
+    def add_alpha_mask(self, index: int) -> bool:
+        """Create the active layer's sparse native alpha-mask store."""
+        if index < 0 or index >= len(self.document.layers):
+            return False
+        layer = self.document.layers[index]
+        if layer.alpha_mask_store is not None:
+            return False
+        layer.ensure_alpha_mask()
+        return True
+
+    def remove_alpha_mask(self, index: int) -> bool:
+        """Drop a layer mask without mutating the colour tile store."""
+        if index < 0 or index >= len(self.document.layers):
+            return False
+        layer = self.document.layers[index]
+        if layer.alpha_mask_store is None:
+            return False
+        layer.set_alpha_mask(None)
+        return True
+
     def remove_layer(
         self,
         index: int

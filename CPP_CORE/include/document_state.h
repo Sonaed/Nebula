@@ -22,6 +22,7 @@ struct NativeGroupState {
     std::uint64_t id = 0;
     std::string name;
     std::vector<int> layerIndices;
+    int parentGroup = -1;
     bool visible = true;
     float opacity = 1.0f;
 };

@@ -1,5 +1,14 @@
 # Matrice de validation manuelle Nebula
 
+## Validation utilisateur — 22 septembre 2026
+
+Le parcours ci-dessous a été exécuté et validé manuellement par l’utilisateur
+dans l’application : peinture souris/stylet, outils, Undo/Redo,
+enregistrement/réouverture et contrôle visuel du canvas. Cette validation
+confirme le comportement de la configuration graphique et du périphérique
+réels utilisés. La matrice reste conservée comme protocole reproductible pour
+toute nouvelle machine, pilote graphique ou tablette.
+
 Cette fiche complète les tests automatisés. Elle doit être exécutée avec une
 session graphique réelle et un périphérique de pointage disponible.
 

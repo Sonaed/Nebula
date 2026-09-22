@@ -47,6 +47,18 @@ class LayerGroupTests(unittest.TestCase):
         self.assertTrue(manager.toggle_clipping(0))
         self.assertFalse(manager.toggle_clipping(0))
 
+    def test_layer_manager_adds_and_removes_sparse_editable_mask(self):
+        document = Document(32, 32)
+        manager = LayerManager(document)
+        layer = document.layers[0]
+        self.assertTrue(manager.add_alpha_mask(0))
+        self.assertIsNotNone(layer.alpha_mask_store)
+        self.assertEqual(layer.alpha_mask_store.occupied_keys, set())
+        self.assertFalse(manager.add_alpha_mask(0))
+        self.assertTrue(manager.remove_alpha_mask(0))
+        self.assertIsNone(layer.alpha_mask_store)
+        self.assertFalse(manager.remove_alpha_mask(0))
+
     def test_layer_property_commands_do_not_fallback_to_python(self):
         document = Document(16, 16)
         manager = LayerManager(document)
@@ -174,6 +186,50 @@ class LayerGroupTests(unittest.TestCase):
         self.assertEqual(len(document.layers), 1)
         self.assertEqual(document.layer_groups, [])
         self.assertEqual(document.layers[0].image.pixelColor(0, 0), expected)
+
+    def test_group_can_wrap_a_complete_group_and_composes_hierarchically(self):
+        document = Document(2, 1)
+        document.layers[0].image.fill(QtTransparent)
+        red = document.add_layer("Red")
+        red.image.fill(QColor(255, 0, 0, 255))
+        blue = document.add_layer("Blue")
+        blue.image.fill(QColor(0, 0, 255, 255))
+        inner = document.group_layers([1, 2], "Inner")
+        self.assertIsNotNone(inner)
+        inner.opacity = 0.5
+        outer = document.group_layers([1, 2], "Outer")
+        self.assertIsNotNone(outer)
+        self.assertEqual(inner.parent_id, outer.id)
+        outer.opacity = 0.5
+
+        pixel = composite_document(document).pixelColor(0, 0)
+        self.assertEqual((pixel.red(), pixel.green(), pixel.blue()), (0, 0, 255))
+        self.assertIn(pixel.alpha(), (63, 64))
+
+        with tempfile.TemporaryDirectory() as directory:
+            from DOCUMENTS.format_nebula import NebulaFormat
+            path = os.path.join(directory, "nested.nebula")
+            self.assertTrue(NebulaFormat.save(document, path))
+            restored = NebulaFormat.load(path)
+            self.assertIsNotNone(restored)
+            restored_inner = next(group for group in restored.layer_groups
+                                  if group.name == "Inner")
+            restored_outer = next(group for group in restored.layer_groups
+                                  if group.name == "Outer")
+            self.assertEqual(restored_inner.parent_id, restored_outer.id)
+            restored_pixel = composite_document(restored).pixelColor(0, 0)
+            self.assertIn(restored_pixel.alpha(), (63, 64))
+
+            csd_path = os.path.join(directory, "nested.csd")
+            self.assertTrue(CSDFormat.save(document, csd_path))
+            restored_csd = CSDFormat.load(csd_path)
+            self.assertIsNotNone(restored_csd)
+            csd_inner = next(group for group in restored_csd.layer_groups
+                             if group.name == "Inner")
+            csd_outer = next(group for group in restored_csd.layer_groups
+                             if group.name == "Outer")
+            self.assertEqual(csd_inner.parent_id, csd_outer.id)
+            self.assertIn(composite_document(restored_csd).pixelColor(0, 0).alpha(), (63, 64))
 
     def test_document_composite_run_plan_is_native_and_rejects_broken_groups(self):
         from CORE.native_bridge import plan_layer_composite_runs

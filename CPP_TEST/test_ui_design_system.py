@@ -9,7 +9,7 @@ from pathlib import Path
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtGui import QImage, QResizeEvent
+from PySide6.QtGui import QImage, QResizeEvent, QMouseEvent
 from PySide6.QtCore import QSize, QPoint, QPointF, QRect, QSettings, QEventLoop, QTimer, Qt
 from PySide6.QtWidgets import QApplication, QLabel, QMainWindow
 from PySide6.QtTest import QTest
@@ -100,6 +100,19 @@ class UIDesignSystemTests(unittest.TestCase):
                         * canvas.document.get_active_layer().tile_store.rows)
         self.assertTrue(all(0 <= tx < 13 and 0 <= ty < 10 for tx, ty in keys))
         canvas.close()
+
+    def test_canvas_mouse_move_callback_has_its_geometry_types_loaded(self) -> None:
+        canvas = Canvas()
+        try:
+            event = QMouseEvent(
+                QMouseEvent.Type.MouseMove, QPointF(40, 40),
+                Qt.MouseButton.NoButton, Qt.MouseButton.NoButton,
+                Qt.KeyboardModifier.NoModifier,
+            )
+            canvas.mouseMoveEvent(event)
+            self.assertEqual(canvas.cursor_position, QPointF(40, 40))
+        finally:
+            canvas.close()
 
     def test_tool_rail_zoom_and_hand_control_canvas_view_only(self) -> None:
         canvas = Canvas()

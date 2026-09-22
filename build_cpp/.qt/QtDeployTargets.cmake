@@ -1,8 +1,0 @@
-set(__QT_DEPLOY_TARGET_CreativeCore_FILE /home/deanos/Documents/CreativeSystem v0.2/build_cpp/libCreativeCore.a)
-set(__QT_DEPLOY_TARGET_CreativeCore_TYPE STATIC_LIBRARY)
-set(__QT_DEPLOY_TARGET_CreativeCoreBridge_FILE /home/deanos/Documents/CreativeSystem v0.2/build_cpp/libCreativeCoreBridge.so)
-set(__QT_DEPLOY_TARGET_CreativeCoreBridge_TYPE SHARED_LIBRARY)
-set(__QT_DEPLOY_TARGET_CreativeCoreTest_FILE /home/deanos/Documents/CreativeSystem v0.2/build_cpp/CreativeCoreTest)
-set(__QT_DEPLOY_TARGET_CreativeCoreTest_TYPE EXECUTABLE)
-set(__QT_DEPLOY_TARGET_CreativeCoreUnitTests_FILE /home/deanos/Documents/CreativeSystem v0.2/build_cpp/CreativeCoreUnitTests)
-set(__QT_DEPLOY_TARGET_CreativeCoreUnitTests_TYPE EXECUTABLE)

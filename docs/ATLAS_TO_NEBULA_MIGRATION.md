@@ -18,6 +18,11 @@ reste intact comme référence et ses projets sources ne sont jamais écrasés.
 
 ## Import des projets Atlas
 
+> Validation différée : la validation sur des projets Atlas utilisateurs est
+> reportée jusqu’à ce que l’application Atlas soit construite et permette de
+> fournir ces fichiers. Les tests automatisés de fixtures v2/v3, de fichiers
+> tronqués et de conservation de la source restent obligatoires entre-temps.
+
 L’ouverture d’un fichier `.atlas` lit sa signature `ATLS` et ses versions 2 ou 3
 dans le pont C++. Le parseur borne les dimensions, le nombre de calques, les
 chaînes et les blocs zlib ; les pixels compressés restent sur disque jusqu’à la
