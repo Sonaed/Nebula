@@ -1,0 +1,126 @@
+from dataclasses import dataclass
+
+
+@dataclass(frozen=True)
+class BrushPreset:
+    name: str
+    size: float
+    opacity: float
+    hardness: float
+    spacing: float
+    pressure_size: float
+    pressure_opacity: float
+
+
+BRUSH_PRESETS: list[BrushPreset] = [
+
+    # =========================================================
+    # BRUSH PRINCIPAL
+    # =========================================================
+
+    BrushPreset(
+        name="Basic Round",
+        size=25.0,
+        opacity=1.0,
+        hardness=0.78,
+        spacing=0.10,
+        pressure_size=0.82,
+        pressure_opacity=0.18,
+    ),
+
+    # =========================================================
+    # SOFT ROUND
+    # =========================================================
+
+    BrushPreset(
+        name="Soft Round",
+        size=40.0,
+        opacity=1.0,
+        hardness=0.35,
+        spacing=0.12,
+        pressure_size=0.75,
+        pressure_opacity=0.25,
+    ),
+
+    # =========================================================
+    # HARD ROUND
+    # =========================================================
+
+    BrushPreset(
+        name="Hard Round",
+        size=25.0,
+        opacity=1.0,
+        hardness=0.96,
+        spacing=0.08,
+        pressure_size=0.70,
+        pressure_opacity=0.10,
+    ),
+
+    # =========================================================
+    # PENCIL
+    # =========================================================
+
+    BrushPreset(
+        name="Pencil",
+        size=8.0,
+        opacity=0.75,
+        hardness=0.86,
+        spacing=0.07,
+        pressure_size=0.35,
+        pressure_opacity=0.65,
+    ),
+
+    # =========================================================
+    # INK
+    # =========================================================
+
+    BrushPreset(
+        name="Ink",
+        size=12.0,
+        opacity=1.0,
+        hardness=1.0,
+        spacing=0.05,
+        pressure_size=0.55,
+        pressure_opacity=0.05,
+    ),
+
+    # =========================================================
+    # AIRBRUSH
+    # =========================================================
+
+    BrushPreset(
+        name="Airbrush",
+        size=100.0,
+        opacity=0.25,
+        hardness=0.02,
+        spacing=0.08,
+        pressure_size=0.35,
+        pressure_opacity=0.75,
+    ),
+
+    # =========================================================
+    # CHALK
+    # =========================================================
+
+    BrushPreset(
+        name="Chalk",
+        size=45.0,
+        opacity=0.65,
+        hardness=0.55,
+        spacing=0.16,
+        pressure_size=0.45,
+        pressure_opacity=0.55,
+    ),
+]
+
+
+def get_preset(
+    name: str
+) -> BrushPreset | None:
+
+    for preset in BRUSH_PRESETS:
+
+        if preset.name == name:
+            return preset
+
+    return None

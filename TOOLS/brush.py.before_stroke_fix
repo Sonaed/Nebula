@@ -1,0 +1,552 @@
+import math
+
+from PySide6.QtGui import (
+    QPainter,
+    QRadialGradient,
+    QBrush,
+    QColor,
+    QImage,
+)
+
+from PySide6.QtCore import (
+    Qt,
+    QPoint,
+    QPointF,
+)
+
+from TOOLS.brush_smoothing import BrushSmoothing
+
+
+class Brush:
+
+    def __init__(
+        self
+    ) -> None:
+
+        self.color: QColor = QColor(
+            0,
+            0,
+            0
+        )
+
+        self.size: float = 10.0
+        self.opacity: float = 1.0
+        self.pressure: float = 1.0
+        self.pressure_size: float = 1.0
+        self.pressure_opacity: float = 0.0
+        self.minimum_size: float = 0.1
+        self.spacing: float = 0.15
+
+        # 0.0 = très doux
+        # 1.0 = très dur
+        self.hardness: float = 0.35
+
+        # Débit de peinture
+        self.flow: float = 1.0
+
+        self.eraser: bool = False
+        self.antialiasing: bool = True
+
+        # -------------------------------------------------
+        # LISSAGE DU TRAIT
+        # -------------------------------------------------
+
+        self.smoothing: float = 0.0
+
+        self.smoother = BrushSmoothing(
+            strength=self.smoothing,
+            buffer_size=6
+        )
+
+    # =========================================================
+    # LISSAGE
+    # =========================================================
+
+    def set_smoothing(
+        self,
+        strength: float
+    ) -> None:
+
+        self.smoothing = self.clamp(
+            strength,
+            0.0,
+            1.0
+        )
+
+        self.smoother.set_strength(
+            self.smoothing
+        )
+
+    def reset_smoothing(
+        self
+    ) -> None:
+
+        self.smoother.reset()
+
+    # =========================================================
+    # UTILITAIRES
+    # =========================================================
+
+    @staticmethod
+    def clamp(
+        value: float,
+        minimum: float,
+        maximum: float
+    ) -> float:
+
+        return max(
+            minimum,
+            min(
+                maximum,
+                value
+            )
+        )
+
+    # =========================================================
+    # TAILLE
+    # =========================================================
+
+    def get_size(
+        self
+    ) -> float:
+
+        pressure = self.clamp(
+            self.pressure,
+            0.0,
+            1.0
+        )
+
+        pressure_size = self.clamp(
+            self.pressure_size,
+            0.0,
+            1.0
+        )
+
+        pressure_factor = (
+            (1.0 - pressure_size)
+            + pressure * pressure_size
+        )
+
+        size = (
+            self.size
+            * pressure_factor
+        )
+
+        minimum = (
+            self.size
+            * self.minimum_size
+        )
+
+        return max(
+            0.1,
+            size,
+            minimum
+        )
+
+    # =========================================================
+    # OPACITÉ
+    # =========================================================
+
+    def get_opacity(
+        self
+    ) -> float:
+
+        pressure = self.clamp(
+            self.pressure,
+            0.0,
+            1.0
+        )
+
+        pressure_opacity = self.clamp(
+            self.pressure_opacity,
+            0.0,
+            1.0
+        )
+
+        flow = self.clamp(
+            self.flow,
+            0.0,
+            1.0
+        )
+
+        pressure_factor = (
+            (1.0 - pressure_opacity)
+            + pressure * pressure_opacity
+        )
+
+        opacity = (
+            self.opacity
+            * pressure_factor
+            * flow
+        )
+
+        return self.clamp(
+            opacity,
+            0.0,
+            1.0
+        )
+
+    # =========================================================
+    # COULEUR
+    # =========================================================
+
+    def get_color(
+        self
+    ) -> QColor:
+
+        color = QColor(
+            self.color
+        )
+
+        color.setAlphaF(
+            self.get_opacity()
+        )
+
+        return color
+
+    # =========================================================
+    # DÉGRADÉ DE PEINTURE
+    # =========================================================
+
+    def create_gradient(
+        self,
+        center: QPointF,
+        radius: float
+    ) -> QRadialGradient:
+
+        gradient = QRadialGradient(
+            center,
+            radius
+        )
+
+        hardness = self.clamp(
+            self.hardness,
+            0.0,
+            1.0
+        )
+
+        color = self.get_color()
+
+        if hardness <= 0.05:
+
+            gradient.setColorAt(
+                0.0,
+                color
+            )
+
+            soft = QColor(
+                color
+            )
+
+            soft.setAlphaF(
+                color.alphaF() * 0.65
+            )
+
+            gradient.setColorAt(
+                0.35,
+                soft
+            )
+
+            softer = QColor(
+                color
+            )
+
+            softer.setAlphaF(
+                color.alphaF() * 0.25
+            )
+
+            gradient.setColorAt(
+                0.70,
+                softer
+            )
+
+        else:
+
+            gradient.setColorAt(
+                0.0,
+                color
+            )
+
+            gradient.setColorAt(
+                hardness * 0.85,
+                color
+            )
+
+            gradient.setColorAt(
+                hardness,
+                color
+            )
+
+            edge_color = QColor(
+                color
+            )
+
+            edge_color.setAlphaF(
+                color.alphaF() * 0.55
+            )
+
+            gradient.setColorAt(
+                hardness
+                + (1.0 - hardness) * 0.30,
+                edge_color
+            )
+
+        outer_color = QColor(
+            color
+        )
+
+        outer_color.setAlphaF(
+            0.0
+        )
+
+        gradient.setColorAt(
+            1.0,
+            outer_color
+        )
+
+        return gradient
+
+    # =========================================================
+    # DÉGRADÉ DE GOMME
+    # =========================================================
+
+    def create_eraser_gradient(
+        self,
+        center: QPointF,
+        radius: float
+    ) -> QRadialGradient:
+
+        gradient = QRadialGradient(
+            center,
+            radius
+        )
+
+        hardness = self.clamp(
+            self.hardness,
+            0.0,
+            1.0
+        )
+
+        gradient.setColorAt(
+            0.0,
+            QColor(
+                0,
+                0,
+                0,
+                255
+            )
+        )
+
+        inner_stop = max(
+            0.05,
+            hardness * 0.80
+        )
+
+        gradient.setColorAt(
+            inner_stop,
+            QColor(
+                0,
+                0,
+                0,
+                255
+            )
+        )
+
+        gradient.setColorAt(
+            inner_stop
+            + (1.0 - inner_stop) * 0.35,
+            QColor(
+                0,
+                0,
+                0,
+                150
+            )
+        )
+
+        gradient.setColorAt(
+            1.0,
+            QColor(
+                0,
+                0,
+                0,
+                0
+            )
+        )
+
+        return gradient
+
+    # =========================================================
+    # DAB
+    # =========================================================
+
+    def draw_dab(
+        self,
+        painter: QPainter,
+        position: QPointF,
+        radius: float
+    ) -> None:
+
+        if radius <= 0.0:
+            return
+
+        if self.eraser:
+
+            painter.setCompositionMode(
+                QPainter.CompositionMode.CompositionMode_Clear
+            )
+
+            gradient = (
+                self.create_eraser_gradient(
+                    position,
+                    radius
+                )
+            )
+
+        else:
+
+            painter.setCompositionMode(
+                QPainter.CompositionMode.CompositionMode_SourceOver
+            )
+
+            gradient = self.create_gradient(
+                position,
+                radius
+            )
+
+        painter.setBrush(
+            QBrush(
+                gradient
+            )
+        )
+
+        painter.setPen(
+            Qt.PenStyle.NoPen
+        )
+
+        painter.drawEllipse(
+            position,
+            radius,
+            radius
+        )
+
+    # =========================================================
+    # DESSIN
+    # =========================================================
+
+    def draw(
+        self,
+        image: QImage,
+        start_point: QPoint,
+        end_point: QPoint
+    ) -> None:
+
+        if image.isNull():
+            return
+
+        painter = QPainter(
+            image
+        )
+
+        painter.setRenderHint(
+            QPainter.RenderHint.Antialiasing,
+            self.antialiasing
+        )
+
+        size = max(
+            0.1,
+            self.get_size()
+        )
+
+        radius = (
+            size / 2.0
+        )
+
+        spacing_factor = self.clamp(
+            self.spacing,
+            0.01,
+            2.0
+        )
+
+        spacing_distance = max(
+            0.5,
+            size * spacing_factor
+        )
+
+        start = QPointF(
+            start_point
+        )
+
+        end = QPointF(
+            end_point
+        )
+
+        # -------------------------------------------------
+        # LISSAGE DU POINT D'ARRIVÉE
+        # -------------------------------------------------
+
+        if self.smoothing > 0.0:
+
+            start = self.smoother.add_point(
+                start
+            )
+
+            end = self.smoother.add_point(
+                end
+            )
+
+        dx = (
+            end.x()
+            - start.x()
+        )
+
+        dy = (
+            end.y()
+            - start.y()
+        )
+
+        distance = math.hypot(
+            dx,
+            dy
+        )
+
+        if distance <= 0.0:
+
+            self.draw_dab(
+                painter,
+                start,
+                radius
+            )
+
+            painter.end()
+
+            return
+
+        steps = max(
+            1,
+            math.ceil(
+                distance
+                / spacing_distance
+            )
+        )
+
+        for index in range(
+            steps + 1
+        ):
+
+            t = (
+                index
+                / steps
+            )
+
+            position = QPointF(
+                start.x() + dx * t,
+                start.y() + dy * t
+            )
+
+            self.draw_dab(
+                painter,
+                position,
+                radius
+            )
+
+        painter.end()

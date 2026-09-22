@@ -1,0 +1,552 @@
+import math
+
+from PySide6.QtCore import QPointF, Qt
+from PySide6.QtGui import (
+    QBrush,
+    QColor,
+    QImage,
+    QPainter,
+    QRadialGradient,
+)
+
+
+class BrushEngine:
+
+    def __init__(
+        self,
+        antialiasing: bool = True,
+    ) -> None:
+
+        self.antialiasing = antialiasing
+
+    # =========================================================
+    # UTILITAIRES
+    # =========================================================
+
+    @staticmethod
+    def clamp(
+        value: float,
+        minimum: float,
+        maximum: float,
+    ) -> float:
+
+        return max(
+            minimum,
+            min(
+                maximum,
+                value,
+            ),
+        )
+
+    @staticmethod
+    def distance(
+        first: QPointF,
+        second: QPointF,
+    ) -> float:
+
+        return math.hypot(
+            second.x() - first.x(),
+            second.y() - first.y(),
+        )
+
+    # =========================================================
+    # PRESSION
+    # =========================================================
+
+    def pressure_factor(
+        self,
+        pressure: float,
+        amount: float,
+    ) -> float:
+
+        pressure = self.clamp(
+            pressure,
+            0.0,
+            1.0,
+        )
+
+        amount = self.clamp(
+            amount,
+            0.0,
+            1.0,
+        )
+
+        return (
+            (1.0 - amount)
+            + pressure * amount
+        )
+
+    def dynamic_size(
+        self,
+        base_size: float,
+        pressure: float,
+        pressure_size: float,
+        minimum_size: float,
+    ) -> float:
+
+        factor = self.pressure_factor(
+            pressure,
+            pressure_size,
+        )
+
+        size = (
+            base_size
+            * factor
+        )
+
+        minimum = (
+            base_size
+            * max(
+                0.0,
+                minimum_size,
+            )
+        )
+
+        return max(
+            0.1,
+            size,
+            minimum,
+        )
+
+    def dynamic_opacity(
+        self,
+        base_opacity: float,
+        pressure: float,
+        pressure_opacity: float,
+        flow: float,
+    ) -> float:
+
+        factor = self.pressure_factor(
+            pressure,
+            pressure_opacity,
+        )
+
+        return self.clamp(
+            base_opacity
+            * factor
+            * self.clamp(
+                flow,
+                0.0,
+                1.0,
+            ),
+            0.0,
+            1.0,
+        )
+
+    # =========================================================
+    # POINTE DE BROSSE
+    # =========================================================
+
+    def create_tip(
+        self,
+        center: QPointF,
+        radius: float,
+        color: QColor,
+        hardness: float,
+    ) -> QRadialGradient:
+
+        hardness = self.clamp(
+            hardness,
+            0.0,
+            1.0,
+        )
+
+        gradient = QRadialGradient(
+            center,
+            radius,
+        )
+
+        transparent = QColor(
+            color,
+        )
+
+        transparent.setAlpha(
+            0,
+        )
+
+        # -----------------------------------------------------
+        # BROSSE TRÈS DURE
+        # -----------------------------------------------------
+
+        if hardness >= 0.98:
+
+            gradient.setColorAt(
+                0.0,
+                color,
+            )
+
+            gradient.setColorAt(
+                0.985,
+                color,
+            )
+
+            gradient.setColorAt(
+                1.0,
+                transparent,
+            )
+
+            return gradient
+
+        # -----------------------------------------------------
+        # BROSSE TRÈS SOUPLE
+        # -----------------------------------------------------
+
+        if hardness <= 0.02:
+
+            middle = QColor(
+                color,
+            )
+
+            middle.setAlphaF(
+                color.alphaF() * 0.45
+            )
+
+            edge = QColor(
+                color,
+            )
+
+            edge.setAlphaF(
+                color.alphaF() * 0.08
+            )
+
+            gradient.setColorAt(
+                0.0,
+                color,
+            )
+
+            gradient.setColorAt(
+                0.30,
+                middle,
+            )
+
+            gradient.setColorAt(
+                0.72,
+                edge,
+            )
+
+            gradient.setColorAt(
+                1.0,
+                transparent,
+            )
+
+            return gradient
+
+        # -----------------------------------------------------
+        # BROSSE INTERMÉDIAIRE
+        # -----------------------------------------------------
+
+        edge_start = hardness
+
+        edge_middle = (
+            hardness
+            + (1.0 - hardness) * 0.55
+        )
+
+        edge = QColor(
+            color,
+        )
+
+        edge.setAlphaF(
+            color.alphaF() * 0.50
+        )
+
+        gradient.setColorAt(
+            0.0,
+            color,
+        )
+
+        gradient.setColorAt(
+            max(
+                0.0,
+                edge_start - 0.02,
+            ),
+            color,
+        )
+
+        gradient.setColorAt(
+            edge_start,
+            color,
+        )
+
+        gradient.setColorAt(
+            edge_middle,
+            edge,
+        )
+
+        gradient.setColorAt(
+            1.0,
+            transparent,
+        )
+
+        return gradient
+
+    # =========================================================
+    # RENDU D'UNE EMPREINTE
+    # =========================================================
+
+    def draw_tip(
+        self,
+        painter: QPainter,
+        position: QPointF,
+        radius: float,
+        color: QColor,
+        hardness: float,
+        eraser: bool,
+    ) -> None:
+
+        if radius <= 0.0:
+            return
+
+        if eraser:
+
+            painter.setCompositionMode(
+                QPainter.CompositionMode.CompositionMode_Clear,
+            )
+
+        else:
+
+            painter.setCompositionMode(
+                QPainter.CompositionMode.CompositionMode_SourceOver,
+            )
+
+        gradient = self.create_tip(
+            position,
+            radius,
+            color,
+            hardness,
+        )
+
+        painter.setPen(
+            Qt.PenStyle.NoPen,
+        )
+
+        painter.setBrush(
+            QBrush(
+                gradient,
+            ),
+        )
+
+        painter.drawEllipse(
+            position,
+            radius,
+            radius,
+        )
+
+    # =========================================================
+    # RENDU D'UN SEGMENT
+    # =========================================================
+
+    def draw_segment(
+        self,
+        image: QImage,
+        start: QPointF,
+        end: QPointF,
+        start_pressure: float,
+        end_pressure: float,
+        color: QColor,
+        base_size: float,
+        opacity: float,
+        pressure_size: float,
+        pressure_opacity: float,
+        minimum_size: float,
+        hardness: float,
+        spacing: float,
+        flow: float,
+        eraser: bool = False,
+    ) -> None:
+
+        if image.isNull():
+            return
+
+        start_pressure = self.clamp(
+            start_pressure,
+            0.0,
+            1.0,
+        )
+
+        end_pressure = self.clamp(
+            end_pressure,
+            0.0,
+            1.0,
+        )
+
+        painter = QPainter(
+            image,
+        )
+
+        painter.setRenderHint(
+            QPainter.RenderHint.Antialiasing,
+            self.antialiasing,
+        )
+
+        dx = (
+            end.x()
+            - start.x()
+        )
+
+        dy = (
+            end.y()
+            - start.y()
+        )
+
+        length = math.hypot(
+            dx,
+            dy,
+        )
+
+        # -----------------------------------------------------
+        # TAILLES DE DÉPART / ARRIVÉE
+        # -----------------------------------------------------
+
+        start_size = self.dynamic_size(
+            base_size,
+            start_pressure,
+            pressure_size,
+            minimum_size,
+        )
+
+        end_size = self.dynamic_size(
+            base_size,
+            end_pressure,
+            pressure_size,
+            minimum_size,
+        )
+
+        average_size = (
+            start_size
+            + end_size
+        ) * 0.5
+
+        spacing = self.clamp(
+            spacing,
+            0.01,
+            2.0,
+        )
+
+        spacing_distance = max(
+            0.5,
+            average_size * spacing,
+        )
+
+        # -----------------------------------------------------
+        # POINT UNIQUE
+        # -----------------------------------------------------
+
+        if length <= 0.0:
+
+            actual_opacity = self.dynamic_opacity(
+                opacity,
+                end_pressure,
+                pressure_opacity,
+                flow,
+            )
+
+            actual_color = QColor(
+                color,
+            )
+
+            actual_color.setAlphaF(
+                actual_opacity,
+            )
+
+            self.draw_tip(
+                painter,
+                start,
+                end_size * 0.5,
+                actual_color,
+                hardness,
+                eraser,
+            )
+
+            painter.end()
+
+            return
+
+        # -----------------------------------------------------
+        # NOMBRE D'EMPREINTES
+        # -----------------------------------------------------
+
+        steps = max(
+            1,
+            math.ceil(
+                length
+                / spacing_distance,
+            ),
+        )
+
+        # -----------------------------------------------------
+        # INTERPOLATION DU TRAIT
+        # -----------------------------------------------------
+
+        for index in range(
+            steps + 1,
+        ):
+
+            t = (
+                index
+                / steps
+            )
+
+            position = QPointF(
+                start.x()
+                + dx * t,
+                start.y()
+                + dy * t,
+            )
+
+            # -------------------------------------------------
+            # PRESSION INTERPOLÉE
+            # -------------------------------------------------
+
+            pressure = (
+                start_pressure
+                + (
+                    end_pressure
+                    - start_pressure
+                ) * t
+            )
+
+            # -------------------------------------------------
+            # TAILLE
+            # -------------------------------------------------
+
+            size = self.dynamic_size(
+                base_size,
+                pressure,
+                pressure_size,
+                minimum_size,
+            )
+
+            # -------------------------------------------------
+            # OPACITÉ
+            # -------------------------------------------------
+
+            actual_opacity = self.dynamic_opacity(
+                opacity,
+                pressure,
+                pressure_opacity,
+                flow,
+            )
+
+            actual_color = QColor(
+                color,
+            )
+
+            actual_color.setAlphaF(
+                actual_opacity,
+            )
+
+            # -------------------------------------------------
+            # EMPREINTE
+            # -------------------------------------------------
+
+            self.draw_tip(
+                painter,
+                position,
+                size * 0.5,
+                actual_color,
+                hardness,
+                eraser,
+            )
+
+        painter.end()

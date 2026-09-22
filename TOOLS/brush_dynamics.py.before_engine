@@ -1,0 +1,90 @@
+class BrushDynamics:
+    """
+    Gestion des dynamiques de brosse :
+    pression, vitesse, tilt et variation.
+    """
+
+    def __init__(self) -> None:
+        self.pressure_size: float = 1.0
+        self.pressure_opacity: float = 0.0
+        self.pressure_flow: float = 0.0
+
+        self.speed_size: float = 0.0
+        self.speed_opacity: float = 0.0
+        self.speed_flow: float = 0.0
+
+        self.tilt_size: float = 0.0
+        self.tilt_opacity: float = 0.0
+
+    @staticmethod
+    def clamp(
+        value: float,
+        minimum: float = 0.0,
+        maximum: float = 1.0,
+    ) -> float:
+        return max(
+            minimum,
+            min(
+                maximum,
+                value,
+            ),
+        )
+
+    def pressure_factor(
+        self,
+        pressure: float,
+        amount: float,
+    ) -> float:
+        pressure = self.clamp(pressure)
+        amount = self.clamp(amount)
+
+        return (
+            (1.0 - amount)
+            + pressure * amount
+        )
+
+    def apply(
+        self,
+        pressure: float,
+        speed: float = 0.0,
+        tilt: float = 0.0,
+    ) -> dict[str, float]:
+
+        pressure = self.clamp(pressure)
+        speed = self.clamp(speed)
+        tilt = self.clamp(tilt)
+
+        return {
+            "size": self.pressure_factor(
+                pressure,
+                self.pressure_size,
+            ),
+            "opacity": self.pressure_factor(
+                pressure,
+                self.pressure_opacity,
+            ),
+            "flow": self.pressure_factor(
+                pressure,
+                self.pressure_flow,
+            ),
+            "speed_size": self.pressure_factor(
+                speed,
+                self.speed_size,
+            ),
+            "speed_opacity": self.pressure_factor(
+                speed,
+                self.speed_opacity,
+            ),
+            "speed_flow": self.pressure_factor(
+                speed,
+                self.speed_flow,
+            ),
+            "tilt_size": self.pressure_factor(
+                tilt,
+                self.tilt_size,
+            ),
+            "tilt_opacity": self.pressure_factor(
+                tilt,
+                self.tilt_opacity,
+            ),
+        }

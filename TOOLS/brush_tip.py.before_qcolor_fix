@@ -1,0 +1,159 @@
+from __future__ import annotations
+
+import math
+
+from PySide6.QtGui import QRadialGradient
+
+
+class BrushTip:
+
+    def __init__(self) -> None:
+
+        self.shape = "circle"
+
+        self.hardness = 0.80
+
+        self.roundness = 1.0
+
+        self.angle = 0.0
+
+        self.aspect_ratio = 1.0
+
+        self.scatter = 0.0
+
+        self.rotation_jitter = 0.0
+
+        self.size_jitter = 0.0
+
+    @staticmethod
+    def clamp(
+        value: float,
+        minimum: float = 0.0,
+        maximum: float = 1.0,
+    ) -> float:
+
+        return max(
+            minimum,
+            min(
+                maximum,
+                value,
+            ),
+        )
+
+    def effective_radius(
+        self,
+        radius: float,
+    ) -> tuple[float, float]:
+
+        roundness = self.clamp(
+            self.roundness
+        )
+
+        aspect = max(
+            0.05,
+            self.aspect_ratio,
+        )
+
+        rx = radius
+
+        ry = (
+            radius
+            * roundness
+            / aspect
+        )
+
+        return (
+            rx,
+            ry,
+        )
+
+    def create_gradient(
+        self,
+        radius: float,
+        hardness: float | None = None,
+    ) -> QRadialGradient:
+
+        if hardness is None:
+            hardness = self.hardness
+
+        hardness = self.clamp(
+            hardness
+        )
+
+        radius = max(
+            0.01,
+            radius,
+        )
+
+        gradient = QRadialGradient(
+            0.0,
+            0.0,
+            radius,
+        )
+
+        inner = self.clamp(
+            hardness,
+            0.0,
+            0.98,
+        )
+
+        # QGradient demande des couleurs réelles.
+        # Le moteur de rendu recolorera ensuite le gradient
+        # avec la couleur de la brosse.
+
+        gradient.setColorAt(
+            0.0,
+            QColor(
+                255,
+                255,
+                255,
+                255,
+            ),
+        )
+
+        gradient.setColorAt(
+            inner,
+            QColor(
+                255,
+                255,
+                255,
+                255,
+            ),
+        )
+
+        gradient.setColorAt(
+            1.0,
+            QColor(
+                255,
+                255,
+                255,
+                0,
+            ),
+        )
+
+        return gradient
+
+    def rotation(
+        self,
+        stroke_angle: float,
+        random_value: float = 0.0,
+    ) -> float:
+
+        base = (
+            math.radians(
+                self.angle
+            )
+        )
+
+        jitter = (
+            random_value
+            * math.radians(
+                self.rotation_jitter
+            )
+        )
+
+        return (
+            stroke_angle
+            + base
+            + jitter
+        )
