@@ -1,0 +1,116 @@
+CREATIVESYSTEM v1.0 — COMPTE RENDU TECHNIQUE
+============================================
+
+1. ARCHITECTURE GENERALE
+-------------------------
+CANVAS : canvas et rendu OpenGL, gpu_renderer.py, gpu_instanced_stroke.py.
+CORE : orchestration application et gestion mémoire.
+DOCUMENTS : document, layer.py, TileStore et historique.
+CPP_CORE : CreativeCore C++ (brush, outils raster, projection native).
+UI : docks, fenêtres, préférences, thème et icônes.
+TOOLS / INPUT / EVENTS : outils et gestion des entrées.
+
+Le bridge partagé expose CreativeCoreBridge via ctypes. Les fonctions couvrent
+les strokes, fill, baguette magique, alpha lock et projection native.
+Pipeline : événement stylet -> stroke GPU ou CreativeCore -> FBO/tuiles ->
+readback dirty rect en fin de stroke -> TileStore/undo -> upload texture ->
+QOpenGLTextureBlitter.
+
+2. MOTEUR DE RENDU OPENGL
+-------------------------
+gpu_instanced_stroke.py crée un FBO temporaire par stroke et regroupe les dabs
+éligibles en draw calls instanciés. Le FBO est lu uniquement sur le dirty rect.
+Les textures de calques utilisent dirty rect + glTexSubImage2D, PBO double buffer
+si disponible et génération de mipmaps.
+texture_atlas.py fournit un shelf packer RGBA et des UV normalisées, mais son
+chargement automatique des assets n'est pas encore branché au renderer.
+La compression BC4/BC7 est détectée via les extensions OpenGL; aucun transcodage
+ou upload compressé n'est activé.
+Le renderer restaure viewport, blend et framebuffer après le stroke. Les appels
+OpenGL restent confinés au thread possédant le contexte Qt.
+
+3. BRUSH ENGINE CREATIVECORE
+----------------------------
+brush_engine.cpp compose les dabs dans QImage et gère dureté, pression, texture,
+clone et modes de fusion. brush_wet.cpp implémente le smudge par échantillonnage
+pondéré circulaire.
+Kernel SIMD 1 implémenté : chemin Normal opaque avec copie RGBA AVX2 (8 pixels),
+SSE4/SSSE3 (4 pixels) et fallback scalaire. cs_simd_backend() sélectionne le
+backend au runtime.
+Les kernels composition (2) et wet brush (3) restent différés : la validation
+pixel-perfect des accumulations flottantes et de l'alpha prémultipliée n'est pas
+encore obtenue.
+
+4. SYSTEME DE TUILES
+--------------------
+Canvas découpé en tuiles 64x64 via DOCUMENTS/tile_store.py. Les tuiles sont
+sparse, versionnées, chargées et écrites sur scratch disk de façon asynchrone.
+Un cache LRU C++ (unordered_map + list) existe avec limite en octets et test
+CTest; il n'est pas encore la politique maître du TileStore Python.
+tile_compression.py fournit compression/décompression LZ4 optionnelle avec
+fallback brut; l'intégration automatique au cycle d'éviction reste à brancher.
+Undo utilise des snapshots/diffs de tuiles et un step par stroke complet.
+
+5. THREAD DE PROJECTION C++
+---------------------------
+projection_engine.cpp copie les snapshots de calques, traite une queue protégée
+par mutex/condition_variable et compose les tuiles en workers persistants.
+API ctypes : cs_projection_start/stop, set_callback, set_threads,
+invalidate et invalidate_batch.
+Le gain mesuré précédemment est x2,7 sur le chemin tuiles contre la version
+Python. thread_pool.h/cpp fournit un pool fixe (cores-1 par défaut). object_pool
+fournit la réutilisation de blocs jusqu'à 256 octets. Ces composants sont testés,
+mais le ProjectionEngine conserve actuellement son propre pool de workers.
+
+6. UNDO / REDO
+--------------
+TileHistory stocke les modifications par tuiles. Un stroke complet produit un
+seul step. Les écritures scratch d'historique sont asynchrones et la restauration
+réinvalide les tuiles et la projection.
+
+7. OUTILS
+---------
+Pinceau et gomme : brush engine C++ ou renderer instancié GPU selon éligibilité.
+Smudge : brush_wet.cpp. Fill et baguette magique : fonctions CreativeCore.
+Lasso, rectangle, ligne, gradient et sélection : modules Python/Qt dédiés.
+
+8. CALQUES
+----------
+layer.py combine métadonnées, visibilité, opacité et TileStore. Les modes de
+fusion Normal, Multiply, Screen, Overlay et autres modes paramétrables sont
+composés par projection. Alpha lock est disponible et son rectangle de restauration
+est vectorisé. Le cache d'opacité/occlusion existe dans gpu_renderer.py; le cache
+composite complet par groupe n'est pas généralisé.
+
+9. UI ACTUELLE
+--------------
+Docks principaux : calques, couleur et brushes, avec fenêtres préférences et
+outils. Les icônes Phosphor SVG sont utilisées dans le design system. Thème dark :
+fond #1e1e1e, panneaux #252525, bordures #333333, accent #9B1F35, hover #B52840.
+Les raccourcis clavier sont définis dans UI/menus et canvas.
+
+10. FORMATS FICHIERS
+--------------------
+.csd : document CreativeSystem avec manifest versionné, calques, tuiles,
+thumbnail et historique selon le chemin de sauvegarde utilisé.
+.csbr : archive de brush avec paramètres JSON, texture et preview.
+.csbl : structure de presets de blend avec paramètres et thumbnails; export/import
+complet dépend du gestionnaire de presets UI.
+
+11. BUGS CONNUS OUVERTS
+-----------------------
+Segmentation fault possible lors du undock du panneau calques; destruction de
+textures sans contexte OpenGL a été observée et reste à reproduire/corriger.
+Le retournement vertical du stroke et l'état OpenGL fuyant ont été corrigés par
+sélection d'origine BottomLeft pour le FBO et restauration d'état.
+Les kernels SIMD 2 et 3 restent différés.
+
+12. TESTS
+---------
+Suite Python : 19 modules unittest contenant des classes de tests, plus des
+smoke tests GPU et tests d'intégration conditionnels.
+Suite CTest C++ : 5 tests actuellement : brush, projection, SIMD, TileCache et
+ThreadPool. Dernière exécution : 5/5 réussis.
+Smoke GPU : CPP_TEST/smoke_gpu_instanced_stroke.py; nécessite un DISPLAY et un
+contexte OpenGL/Wayland fonctionnel.
+============================================
