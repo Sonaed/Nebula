@@ -44,3 +44,11 @@ Acceleration Nebula par GPU
 Séparation des tache GPU / CPU 
 
 L'upload GPU ne sera disponnible que lorsqu'il sera stable
+
+Actuellement l'accélération à l'air de marcher, teste réel en cours.
+Refonte du dock Layers en cours aussi
+
+Existence et Atlas auront des updates avant nebula le temps de validé les modifications effectué 
+  -Atlas First
+  -Extistence Second
+  -Retour a nebula quand les teste terrain sont réussi
