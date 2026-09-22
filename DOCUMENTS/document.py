@@ -94,9 +94,16 @@ class Document:
 
     def group_layers(self, indices, name: str = "Groupe") -> LayerGroup | None:
         requested = [int(index) for index in indices]
-        grouped = [any(layer.id in group.layer_ids for group in self.layer_groups)
+        requested_members = [self.layers[index].id for index in sorted(set(requested))
+                             if 0 <= index < len(self.layers)]
+        wrapping = next((candidate for candidate in self.layer_groups
+                         if candidate.parent_id is None
+                         and candidate.layer_ids == requested_members), None)
+        grouped = [any(layer.id in group.layer_ids for group in self.layer_groups
+                       if group.parent_id is None)
                    for layer in self.layers]
-        selected = normalize_layer_group(requested, grouped)
+        selected = (sorted(set(requested)) if wrapping is not None
+                    else normalize_layer_group(requested, grouped))
         if selected is None:
             raise RuntimeError("CreativeCore is required to validate layer groups")
         if selected is False:
@@ -104,9 +111,15 @@ class Document:
         group_name = str(name).strip() or "Groupe"
         if self._native_state.create_group(selected, group_name) is None:
             raise RuntimeError("CreativeCore a refusé la création du groupe")
-        group = LayerGroup(name=group_name,
-                           layer_ids=[self.layers[index].id for index in selected])
+        members = [self.layers[index].id for index in selected]
+        # CreativeCore accepts an exact root-group selection as a wrapping
+        # operation.  Keep the Qt mirror hierarchical as well.
+        child = wrapping
+        group = LayerGroup(name=group_name, layer_ids=members)
         self.layer_groups.append(group)
+        if child is not None:
+            child.parent_id = group.id
+            child.invalidate()
         return group
 
     def ungroup_layers(self, group_id: str) -> bool:
@@ -116,6 +129,10 @@ class Document:
                     raise RuntimeError("CreativeCore a refusé la suppression du groupe")
                 group.invalidate()
                 del self.layer_groups[index]
+                for child in self.layer_groups:
+                    if child.parent_id == group_id:
+                        child.parent_id = None
+                        child.invalidate()
                 return True
         return False
 

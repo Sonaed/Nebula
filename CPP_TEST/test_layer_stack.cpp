@@ -128,7 +128,12 @@ int main()
     assert(grouped.setGroupProperty(0, 1, 0.35, groupValue));
     assert(std::abs(groupValue - 0.35) < 0.0001);
     assert(!grouped.setGroupProperty(0, 9, 0.0, groupValue));
+    // A complete root group can be wrapped without making any leaf a
+    // sibling of itself.  This is the native hierarchy used by the UI model.
+    assert(grouped.createGroup({1, 2}, "Folder", groupIndex));
+    assert(groupIndex == 1 && grouped.groupCount() == 2);
+    assert(grouped.groupForLayer(1) == 0);
     assert(!grouped.createGroup({0, 2}, "Invalid", groupIndex));
-    assert(grouped.removeGroup(0) && grouped.groupCount() == 0);
+    assert(grouped.removeGroup(0) && grouped.groupCount() == 1);
     return 0;
 }

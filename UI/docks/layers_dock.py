@@ -40,6 +40,8 @@ class LayersDock(QDockWidget):
     group_selected_requested = Signal()
     ungroup_selected_requested = Signal()
     group_visibility_requested = Signal()
+    add_mask_requested = Signal()
+    remove_mask_requested = Signal()
 
     def __init__(
         self,
@@ -252,6 +254,17 @@ class LayersDock(QDockWidget):
         group_opacity_row.addWidget(self.group_opacity_label)
         group_opacity_row.addWidget(self.group_opacity_slider, 1)
         layout.addLayout(group_opacity_row)
+
+        mask_row = QHBoxLayout()
+        self.add_mask_button = QPushButton("+ Masque")
+        self.remove_mask_button = QPushButton("− Masque")
+        self.add_mask_button.setToolTip("Ajouter un masque alpha éditable au calque actif")
+        self.remove_mask_button.setToolTip("Supprimer le masque alpha du calque actif")
+        self.add_mask_button.clicked.connect(self.add_mask_requested)
+        self.remove_mask_button.clicked.connect(self.remove_mask_requested)
+        mask_row.addWidget(self.add_mask_button)
+        mask_row.addWidget(self.remove_mask_button)
+        layout.addLayout(mask_row)
 
         self.remove_layer_button = QPushButton(
             "Supprimer"

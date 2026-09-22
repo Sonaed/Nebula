@@ -4,18 +4,20 @@ Mis à jour le 22 septembre 2026. Ce document suit l’exécution des cinq
 priorités sans confondre une suite de tests verte avec une validation manuelle
 complète ou une migration C++ terminée.
 
-Estimation de la migration totale : **99,999 %**. C’est une estimation de portée
-fonctionnelle et architecturale, pas le taux de tests passants : le stockage,
-les outils et plusieurs opérations d’historique sont natifs, mais l’orchestration
-document/calques et les objets Qt riches restent partiellement en Python.
-La parité manuelle complète avec la V1, la validation sur un document Atlas
-utilisateur et l’audit final des adaptateurs de compatibilité restent à achever.
+Les pixels, le stockage tuilé, les outils, les règles structurelles et le
+curseur d’historique sont autoritaires dans CreativeCore. Python/PySide6 reste
+limité aux objets miroir des docks, aux événements Qt et à la présentation ; le
+test d’architecture interdit tout fallback de rasterisation dans les adaptateurs.
+La validation manuelle du parcours courant a été confirmée par l’utilisateur le
+22 septembre 2026. La validation sur un document Atlas utilisateur est différée
+jusqu’à la construction d’Atlas ; l’audit final des adaptateurs de compatibilité
+et la migration architecturale complète restent à achever.
 
 ## Avancement vérifié
 
 ### 1. Fiabilité des workflows
 
-- Validation actuelle : 264 tests Python via `unittest discover` et 11 cibles
+- Validation actuelle : 268 tests Python via `unittest discover` et 11 cibles
   C++ via CTest passent. `pytest` n'est pas installé, mais l'ensemble des tests
   Python du dossier CPP_TEST a pu être exécuté par le runner standard.
 - `build_cpp_native` est l’arbre C++ de référence et porte les 11 cibles ; un
@@ -111,7 +113,7 @@ utilisateur et l’audit final des adaptateurs de compatibilité restent à ache
   legacy ne subsiste dans l’application.
 - Les six modules Python orphelins de cet ancien moteur (`brush_engine` et ses
   composants de dynamique/tip/texture/couleur/peinture) ont été supprimés après
-  audit des imports; les 264 tests et le smoke test restent verts.
+  audit des imports; les 266 tests et le smoke test restent verts.
 - Les copies de sauvegarde de l’ancien canvas, du brush engine et du dock outils
   ont été supprimées de l’arbre source : il ne reste plus de doublon éditable
   pouvant être repris par erreur comme architecture active. Les références

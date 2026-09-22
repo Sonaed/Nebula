@@ -230,6 +230,7 @@ class NebulaFormat:
             "layers": layers,
             "layer_groups": [{
                 "id": group.id, "name": group.name, "layer_ids": list(group.layer_ids),
+                "parent_id": group.parent_id,
                 "visible": group.visible, "opacity": group.opacity,
                 "blend_mode": group.blend_mode,
                 "blend_parameters": _json_value(group.blend_parameters),
@@ -483,10 +484,9 @@ class NebulaFormat:
                     QColor(*[max(0, min(255, int(value))) for value in color[:4]]), font,
                     str(item.get("id") or EditableText("", QPointF()).id)))
             layer_ids = {layer.id for layer in document.layers}
-            grouped = set()
             for entry in metadata.get("layer_groups", []):
                 members = [str(value) for value in entry.get("layer_ids", [])
-                           if str(value) in layer_ids and str(value) not in grouped]
+                           if str(value) in layer_ids]
                 indices = [next(i for i, layer in enumerate(document.layers) if layer.id == value)
                            for value in members]
                 if members and indices == list(range(min(indices), max(indices) + 1)):
@@ -495,9 +495,23 @@ class NebulaFormat:
                         layer_ids=members, visible=entry.get("visible") is not False,
                         opacity=max(0.0, min(1.0, float(entry.get("opacity", 1.0)))),
                         blend_mode=str(entry.get("blend_mode", "normal")))
+                    parent_id = entry.get("parent_id")
+                    group.parent_id = str(parent_id) if parent_id else None
                     group.blend_parameters = dict(entry.get("blend_parameters", {}))
                     document.layer_groups.append(group)
-                    grouped.update(members)
+            groups_by_id = {group.id: group for group in document.layer_groups}
+            if len(groups_by_id) != len(document.layer_groups):
+                raise ValueError("Identifiants de groupes Nebula dupliqués")
+            for group in document.layer_groups:
+                if group.parent_id is not None:
+                    parent = groups_by_id.get(group.parent_id)
+                    if parent is None or not set(group.layer_ids).issubset(parent.layer_ids):
+                        raise ValueError("Hiérarchie de groupes Nebula invalide")
+                elif any(group is not other and other.parent_id is None
+                         and set(group.layer_ids).intersection(other.layer_ids)
+                         for other in document.layer_groups):
+                    raise ValueError("Groupes racine Nebula chevauchants")
+            document.sync_native_state()
             return document
         except Exception as error:
             print(f"Erreur ouverture Nebula : {error}")

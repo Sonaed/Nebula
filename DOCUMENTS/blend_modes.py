@@ -119,36 +119,77 @@ def composite_document_layers(document, rect: QRect | None = None) -> QImage:
     """Composite document layers/groups, optionally limited to one tile rect."""
     width, height = ((document.width, document.height) if rect is None
                      else (rect.width(), rect.height()))
-    group_indices = {group.id: index for index, group in enumerate(document.layer_groups)}
-    layer_groups = []
-    for layer in document.layers:
-        memberships = [group_indices[group.id] for group in document.layer_groups
-                       if layer.id in group.layer_ids]
-        if len(memberships) > 1:
-            raise ValueError(f"Layer {layer.id} belongs to multiple groups")
-        layer_groups.append(memberships[0] if memberships else -1)
-    runs = plan_layer_composite_runs(layer_groups)
-    if runs is None:
-        raise RuntimeError("CreativeCore is required to plan document composition")
-    if runs is False:
-        raise ValueError("Layer groups must be contiguous and unambiguous")
-    entries = []
-    for start, end, group_index in runs:
-        if group_index < 0:
-            entries.append(_document_layer_entry(document.layers[start], rect))
-            continue
-        group = document.layer_groups[group_index]
-        members = document.layers[start:end]
-        member_entries = [_document_layer_entry(member, rect) for member in members]
-        group_image = composite_layers(width, height, member_entries)
-        entries.append(SimpleNamespace(
-            image=group_image,
-            visible=bool(group.visible),
-            opacity=float(group.opacity),
+    groups = {group.id: group for group in document.layer_groups}
+    children = {group_id: [] for group_id in groups}
+    roots = []
+    for group in document.layer_groups:
+        if group.parent_id is None:
+            roots.append(group)
+        elif group.parent_id in groups and group.parent_id != group.id:
+            children[group.parent_id].append(group)
+        else:
+            raise ValueError("Layer group parent is invalid")
+    positions = {layer.id: index for index, layer in enumerate(document.layers)}
+
+    def ordered_members(group):
+        member_positions = [positions[layer_id] for layer_id in group.layer_ids
+                            if layer_id in positions]
+        if not member_positions or member_positions != list(range(min(member_positions), max(member_positions) + 1)):
+            raise ValueError("Layer groups must be contiguous and unambiguous")
+        return member_positions
+
+    def group_entry(group):
+        member_positions = ordered_members(group)
+        child_groups = sorted(children[group.id], key=lambda item: min(ordered_members(item)))
+        child_starts = {}
+        covered = set()
+        for child in child_groups:
+            child_positions = ordered_members(child)
+            if not set(child_positions).issubset(member_positions) or covered.intersection(child_positions):
+                raise ValueError("Nested layer groups must be disjoint children")
+            covered.update(child_positions)
+            child_starts[min(child_positions)] = child
+        entries = []
+        position = min(member_positions)
+        end = max(member_positions) + 1
+        while position < end:
+            child = child_starts.get(position)
+            if child is not None:
+                entries.append(group_entry(child))
+                position = max(ordered_members(child)) + 1
+            elif position not in covered:
+                entries.append(_document_layer_entry(document.layers[position], rect))
+                position += 1
+            else:
+                position += 1
+        group_image = composite_layers(width, height, entries)
+        return SimpleNamespace(
+            image=group_image, visible=bool(group.visible), opacity=float(group.opacity),
             blend_mode=str(group.blend_mode),
             blend_parameters=dict(getattr(group, "blend_parameters", {}) or {}),
             clipping=False,
-        ))
+        )
+
+    root_by_start = {}
+    covered_by_root = set()
+    for group in roots:
+        member_positions = ordered_members(group)
+        if covered_by_root.intersection(member_positions):
+            raise ValueError("Layer belongs to multiple root groups")
+        covered_by_root.update(member_positions)
+        root_by_start[min(member_positions)] = group
+    entries = []
+    index = 0
+    while index < len(document.layers):
+        group = root_by_start.get(index)
+        if group is not None:
+            entries.append(group_entry(group))
+            index = max(ordered_members(group)) + 1
+        elif index not in covered_by_root:
+            entries.append(_document_layer_entry(document.layers[index], rect))
+            index += 1
+        else:
+            index += 1
     return composite_layers(width, height, entries)
 
 

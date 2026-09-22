@@ -3153,57 +3153,99 @@ class Canvas(QOpenGLWidget):
     def _tile_projection_layers(self, tx: int, ty: int, rect: QRect):
         """Build projection entries, isolating and caching each layer group."""
         document = self.document
-        groups = {layer_id: group for group in document.layer_groups
-                  for layer_id in group.layer_ids}
-        entries = []
-        missing = False
-        index = 0
-        while index < len(document.layers):
-            layer = document.layers[index]
-            group = groups.get(layer.id)
-            if group is None:
-                items, pending = self._projection_tile_for_layer(layer, tx, ty, rect)
-                missing |= pending
-                entries.extend(items)
-                index += 1
-                continue
+        group_by_id = {group.id: group for group in document.layer_groups}
+        children = {group_id: [] for group_id in group_by_id}
+        roots = []
+        for group in document.layer_groups:
+            if group.parent_id is None:
+                roots.append(group)
+            elif group.parent_id in children and group.parent_id != group.id:
+                children[group.parent_id].append(group)
+            else:
+                raise ValueError("Hiérarchie de groupes invalide")
+        positions = {layer.id: index for index, layer in enumerate(document.layers)}
 
-            member_layers = [candidate for candidate in document.layers
-                             if candidate.id in group.layer_ids]
-            member_indices = [document.layers.index(candidate) for candidate in member_layers]
-            if index != min(member_indices):
-                index += 1
-                continue
-            children = []
-            group_missing = False
-            signature = [group.visible, float(group.opacity), group.blend_mode,
-                         tuple(sorted((str(k), repr(v)) for k, v in group.blend_parameters.items()))]
-            for child in member_layers:
-                tiles, pending = self._projection_tile_for_layer(child, tx, ty, rect)
-                missing |= pending
-                group_missing |= pending
-                children.extend(tiles)
-                signature.append((child.id, child.visible, float(child.opacity), child.blend_mode,
-                                  bool(getattr(child, "clipping", False)),
-                                  tuple(sorted((str(k), repr(v)) for k, v in child.blend_parameters.items())),
-                                  child.tile_store.tile_revision(tx, ty),
-                                  (getattr(getattr(child, "alpha_mask_store", None),
-                                           "tile_revision", lambda *_: 0)(tx, ty))))
-            if not group.visible:
-                index = max(member_indices) + 1
-                continue
-            if group_missing:
-                index = max(member_indices) + 1
-                continue
+        def members(group):
+            result = [positions[layer_id] for layer_id in group.layer_ids if layer_id in positions]
+            if not result or result != list(range(min(result), max(result) + 1)):
+                raise ValueError("Les groupes doivent contenir une plage contiguë")
+            return result
+
+        def render_group(group):
+            group_members = members(group)
+            child_groups = sorted(children[group.id], key=lambda item: min(members(item)))
+            child_starts = {}
+            covered = set()
+            for child in child_groups:
+                child_members = members(child)
+                if (not set(child_members).issubset(group_members)
+                        or covered.intersection(child_members)):
+                    raise ValueError("Les groupes enfants doivent être disjoints")
+                child_starts[min(child_members)] = child
+                covered.update(child_members)
+            tiles, pending, signature = [], False, [group.id, group.visible,
+                float(group.opacity), group.blend_mode,
+                tuple(sorted((str(k), repr(v)) for k, v in group.blend_parameters.items()))]
+            position = min(group_members)
+            while position <= max(group_members):
+                child = child_starts.get(position)
+                if child is not None:
+                    child_tile, child_pending, child_signature = render_group(child)
+                    tiles.append(child_tile)
+                    pending |= child_pending
+                    signature.append(child_signature)
+                    position = max(members(child)) + 1
+                    continue
+                if position not in covered:
+                    layer = document.layers[position]
+                    child_tiles, child_pending = self._projection_tile_for_layer(layer, tx, ty, rect)
+                    tiles.extend(child_tiles)
+                    pending |= child_pending
+                    signature.append((layer.id, layer.visible, float(layer.opacity), layer.blend_mode,
+                                      bool(getattr(layer, "clipping", False)),
+                                      tuple(sorted((str(k), repr(v)) for k, v in layer.blend_parameters.items())),
+                                      layer.tile_store.tile_revision(tx, ty),
+                                      getattr(getattr(layer, "alpha_mask_store", None),
+                                              "tile_revision", lambda *_: 0)(tx, ty)))
+                position += 1
+            if pending or not group.visible:
+                return ProjectionLayer(QImage(), False, 0.0, "normal", {}), pending, tuple(signature)
             tile_key = (tx, ty)
             group_signature = tuple(signature)
             image = group.cached_tile(tile_key, group_signature)
             if image is None:
-                image = composite_layers(rect.width(), rect.height(), children)
+                image = composite_layers(rect.width(), rect.height(), tiles)
                 group.store_tile(tile_key, group_signature, image)
-            entries.append(ProjectionLayer(image, True, float(group.opacity),
-                                           str(group.blend_mode), dict(group.blend_parameters)))
-            index = max(member_indices) + 1
+            return ProjectionLayer(image, True, float(group.opacity), str(group.blend_mode),
+                                   dict(group.blend_parameters)), False, group_signature
+
+        roots_by_start = {}
+        root_coverage = set()
+        for group in roots:
+            group_members = members(group)
+            if root_coverage.intersection(group_members):
+                raise ValueError("Un calque appartient à plusieurs groupes racine")
+            roots_by_start[min(group_members)] = group
+            root_coverage.update(group_members)
+        entries = []
+        missing = False
+        index = 0
+        while index < len(document.layers):
+            group = roots_by_start.get(index)
+            if group is None and index not in root_coverage:
+                items, pending = self._projection_tile_for_layer(document.layers[index], tx, ty, rect)
+                missing |= pending
+                entries.extend(items)
+                index += 1
+                continue
+            if group is not None:
+                entry, pending, _signature = render_group(group)
+                missing |= pending
+                if entry.visible:
+                    entries.append(entry)
+                index = max(members(group)) + 1
+            else:
+                index += 1
         return entries, missing
 
     def _projection_tile_for_layer(self, layer, tx: int, ty: int, rect: QRect):

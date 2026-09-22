@@ -438,6 +438,8 @@ class CreativeSystem(QMainWindow):
         self.ui.layer_opacity_slider.actionTriggered.connect(self._layer_opacity_action)
         self.ui.layers_dock.lock_requested.connect(self.toggle_layer_lock)
         self.ui.layers_dock.lock_alpha_requested.connect(self.toggle_layer_alpha_lock)
+        self.ui.layers_dock.add_mask_requested.connect(self.add_active_layer_mask)
+        self.ui.layers_dock.remove_mask_requested.connect(self.remove_active_layer_mask)
         self.ui.layers_dock.group_selected_requested.connect(self.group_selected_layers)
         self.ui.layers_dock.ungroup_selected_requested.connect(self.ungroup_selected_layers)
         self.ui.layers_dock.group_visibility_requested.connect(self.toggle_active_group_visibility)
@@ -1258,6 +1260,34 @@ class CreativeSystem(QMainWindow):
             return
         self.canvas.begin_history_action(dirty_only=True)
         if not self.canvas.document.set_group_visibility(group.id, not group.visible):
+            self.canvas.cancel_history_action()
+            return
+        self.canvas.commit_history_action()
+        self.canvas._projection_tile_signatures.clear()
+        self.refresh_layers()
+        self.canvas.update()
+
+    def add_active_layer_mask(self) -> None:
+        """Attach a sparse, fully opaque editable mask to the active layer."""
+        index = self.canvas.document.active_layer_index
+        if index < 0:
+            return
+        self.canvas.begin_history_action(dirty_only=True)
+        if not self.layer_manager.add_alpha_mask(index):
+            self.canvas.cancel_history_action()
+            return
+        self.canvas.commit_history_action()
+        self.canvas._projection_tile_signatures.clear()
+        self.refresh_layers()
+        self.canvas.update()
+
+    def remove_active_layer_mask(self) -> None:
+        """Remove the active layer mask as one structural undoable action."""
+        index = self.canvas.document.active_layer_index
+        if index < 0:
+            return
+        self.canvas.begin_history_action(dirty_only=True)
+        if not self.layer_manager.remove_alpha_mask(index):
             self.canvas.cancel_history_action()
             return
         self.canvas.commit_history_action()
