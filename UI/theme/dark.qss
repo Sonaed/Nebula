@@ -1,0 +1,50 @@
+QWidget {{ color: {text}; font-family: "Inter", "Noto Sans", sans-serif; font-size: 11px; }}
+QMainWindow, QDialog, QStackedWidget {{ background: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 {window}, stop:1 #0C1425); }}
+QWidget#dockContent, QScrollArea, QScrollArea > QWidget > QWidget {{ background: {panel}; }}
+QMenuBar {{ background: {window}; color: {text_muted}; padding: 2px 6px; border-bottom: 1px solid {border_soft}; }}
+QMenuBar::item {{ padding: 6px 10px; border-radius: 4px; }}
+QMenuBar::item:selected {{ background: {control}; color: {text}; }}
+QMenu {{ background: {panel_raised}; border: 1px solid {border}; padding: 5px; }}
+QMenu::item {{ padding: 6px 30px 6px 10px; border-radius: 4px; }}
+QMenu::item:selected {{ background: {accent}; color: white; }}
+QToolBar {{ background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 {panel_raised}, stop:1 {panel}); border: 0; border-bottom: 1px solid {border}; spacing: 4px; padding: 4px 7px; }}
+QToolBar::separator {{ width: 1px; background: {border}; margin: 5px; }}
+QToolButton, QPushButton {{ background: transparent; border: 1px solid transparent; border-radius: 5px; padding: 5px 9px; min-height: 18px; }}
+QToolButton:hover, QPushButton:hover {{ background: {control_hover}; }}
+QToolButton:checked, QPushButton:checked {{ background: {accent_soft}; border-color: {accent}; color: {text}; }}
+QToolButton:pressed, QPushButton:pressed {{ background: {control}; }}
+QToolButton:disabled, QPushButton:disabled {{ color: {disabled}; }}
+QLineEdit, QSpinBox, QDoubleSpinBox, QComboBox {{ background: {window}; border: 1px solid {border_soft}; border-radius: 5px; padding: 4px 7px; min-height: 19px; selection-background-color: {accent}; }}
+QLineEdit:hover, QSpinBox:hover, QDoubleSpinBox:hover, QComboBox:hover {{ border-color: {border}; }}
+QLineEdit:focus, QSpinBox:focus, QDoubleSpinBox:focus, QComboBox:focus {{ border-color: {cyan}; }}
+QComboBox::drop-down {{ border: 0; width: 20px; }}
+QSlider::groove:horizontal {{ height: 4px; background: {control}; border-radius: 2px; }}
+QSlider::sub-page:horizontal {{ background: {accent}; border-radius: 2px; }}
+QSlider::handle:horizontal {{ width: 10px; margin: -4px 0; background: {text}; border: 1px solid {border}; border-radius: 5px; }}
+QSlider::handle:horizontal:hover {{ background: {accent_hover}; }}
+QCheckBox {{ spacing: 6px; color: {text_muted}; }}
+QCheckBox::indicator {{ width: 14px; height: 14px; border: 1px solid {border}; border-radius: 4px; background: {window}; }}
+QCheckBox::indicator:checked {{ background: {accent}; border-color: {accent}; }}
+QDockWidget {{ background: {panel}; color: {text}; }}
+QDockWidget::title {{ background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 {panel_raised}, stop:1 {panel}); padding: 7px 9px; border-bottom: 1px solid {border_soft}; font-weight: 600; }}
+QDockWidget::separator {{ background: {border_soft}; width: 3px; height: 3px; }}
+QTabBar::tab {{ background: {window}; color: {text_muted}; padding: 6px 10px; border: 0; }}
+QTabBar::tab:selected {{ background: {panel_raised}; color: {text}; border-bottom: 2px solid {accent}; }}
+QScrollBar:vertical {{ width: 9px; background: transparent; margin: 2px; }}
+QScrollBar:horizontal {{ height: 9px; background: transparent; margin: 2px; }}
+QScrollBar::handle:vertical, QScrollBar::handle:horizontal {{ background: {border}; min-width: 24px; min-height: 24px; border-radius: 4px; }}
+QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{ height: 0; }}
+QListView, QListWidget, QTreeView {{ background: {window}; border: 1px solid {border_soft}; border-radius: 5px; outline: 0; alternate-background-color: {panel}; }}
+QListView::item, QListWidget::item, QTreeView::item {{ padding: 5px; border-radius: 3px; }}
+QListView::item:hover, QListWidget::item:hover, QTreeView::item:hover {{ background: {control}; }}
+QListView::item:selected, QListWidget::item:selected, QTreeView::item:selected {{ background: {accent_soft}; color: {text}; border-left: 2px solid {accent}; }}
+QStatusBar {{ background: {window}; color: {text_muted}; border-top: 1px solid {border_soft}; }}
+QToolTip {{ background: {panel_raised}; color: {text}; border: 1px solid {border}; padding: 5px 7px; }}
+QLabel#dockTitle {{ color: {text_muted}; font-size: 10px; font-weight: 600; letter-spacing: .5px; }}
+QLabel#parameterLabel {{ color: {text_muted}; font-size: 10px; }}
+QLabel#parameterValue {{ color: {text}; font-size: 10px; font-weight: 600; }}
+QPushButton#sectionHeader {{ text-align: left; padding: 6px 5px; color: {text}; border-radius: 4px; border-bottom: 1px solid {border_soft}; }}
+QPushButton#sectionHeader:checked {{ color: {accent_hover}; }}
+QWidget#dockTitleBar {{ background: {panel}; border-bottom: 1px solid {border_soft}; }}
+QLabel#nebulaEyebrow {{ color: {gold}; font-size: 9px; font-weight: 700; letter-spacing: 2px; }}
+QLabel#nebulaAccent {{ color: {cyan}; }}
