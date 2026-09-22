@@ -1,0 +1,2 @@
+/usr/bin/ar qc libCreativeCore.a CMakeFiles/CreativeCore.dir/CreativeCore_autogen/mocs_compilation.cpp.o CMakeFiles/CreativeCore.dir/CPP_CORE/src/brush_engine.cpp.o CMakeFiles/CreativeCore.dir/CPP_CORE/src/brush_random.cpp.o CMakeFiles/CreativeCore.dir/CPP_CORE/src/brush_tip.cpp.o CMakeFiles/CreativeCore.dir/CPP_CORE/src/brush_texture.cpp.o CMakeFiles/CreativeCore.dir/CPP_CORE/src/brush_color.cpp.o CMakeFiles/CreativeCore.dir/CPP_CORE/src/brush_paint.cpp.o CMakeFiles/CreativeCore.dir/CPP_CORE/src/brush_wet.cpp.o
+/usr/bin/ranlib libCreativeCore.a

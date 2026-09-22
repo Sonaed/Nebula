@@ -1,0 +1,12 @@
+CreativeCoreUnitTests 275 7.70933e-05
+CreativeCoreProjectionTests 274 3.36346e-05
+CreativeCoreSimdTests 260 3.37531e-05
+CreativeCoreTileCacheTests 258 3.122e-05
+CreativeCoreThreadPoolTests 256 3.28988e-05
+CreativeCoreWetReferenceTests 254 3.45831e-05
+CreativeCoreProjectionKernelDispatchTests 253 3.27438e-05
+CreativeCoreTileStoreTests 193 4.02812e-05
+CreativeCoreLayerStackTests 182 3.84521e-05
+CreativeCoreHistoryCursorTests 140 7.83661e-05
+CreativeCoreTextureAtlasTests 41 0.000212491
+---
