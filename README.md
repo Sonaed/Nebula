@@ -55,3 +55,6 @@ Existence et Atlas auront des updates avant nebula le temps de validé les modif
   -Atlas First
   -Extistence Second
   -Retour a nebula quand les teste terrain sont réussi
+
+  -----------------------------------------------------
+  Grosse Update sur la totalité de l'application
