@@ -58,3 +58,5 @@ Existence et Atlas auront des updates avant nebula le temps de validé les modif
 
   -----------------------------------------------------
   Grosse Update sur la totalité de l'application
+  Preview Update:
+<img width="2560" height="1408" alt="image" src="https://github.com/user-attachments/assets/e745e5b1-5193-45e0-b364-43e2ac7a9273" />
