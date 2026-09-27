@@ -1,0 +1,39 @@
+
+*.a
+_avant*/
+*.avant-renommage/
+_backup*/
+*_backup.py
+*.before_*
+build*/
+build-*/
+build/
+build_*/
+# Build products and generated native libraries
+Claude outputs/
+.compat_test_py313/
+.directory
+dist/
+*.dll
+*.dylib
+.idea/
+# Local pre-migration snapshots, not active source files.
+# Local recovery, logs and editor state
+*.log
+.mypy_cache/
+.nebula-git/
+*.o
+phosphor-icons.zip
+# Private Git database used when the host mounts its own .git directory
+*.pyc
+__pycache__/
+*.py[cod]
+.pytest_cache/
+# Python and Qt runtime data
+*.so
+# Source archive kept locally; the application uses extracted SVG resources.
+stardust_state.json
+*.swp
+*.tmp
+.venv/
+.vscode/

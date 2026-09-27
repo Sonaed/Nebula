@@ -1,0 +1,110 @@
+
+===== PAR TEMPS PROPRE (où le CPU est brûlé) =====
+         8367254 function calls (7993083 primitive calls) in 28.563 seconds
+
+   Ordered by: internal time
+   List reduced from 2758 to 45 due to restriction <45>
+
+   ncalls  tottime  percall  cumtime  percall filename:lineno(function)
+        1   10.358   10.358   26.997   26.997 {built-in method exec}
+        1    5.909    5.909    5.921    5.921 {method 'exec' of 'PySide6.QtWidgets.QDialog' objects}
+      353    2.645    0.007    2.645    0.007 /home/deanos/Documents/Nebula/CANVAS/gpu_safe_blitter.py:114(draw_tiles)
+        1    1.040    1.040    1.052    1.052 {staticmethod(<built-in method exec of Shiboken.ObjectType object at 0x5598dc480c80>)}
+      399    0.839    0.002    0.842    0.002 /home/deanos/Documents/Nebula/CANVAS/canvas.py:911(_cpp_draw_segment_once)
+      572    0.790    0.001    0.791    0.001 /home/deanos/Documents/Nebula/CORE/native_bridge.py:622(key_revisions)
+      572    0.411    0.001    2.225    0.004 /home/deanos/Documents/Nebula/CANVAS/gpu_renderer.py:352(_layer_opaque_tiles)
+  1838017    0.323    0.000    0.323    0.000 {method 'get' of 'dict' objects}
+    19685    0.274    0.000    0.392    0.000 /home/deanos/Documents/Nebula/CORE/native_bridge.py:648(_image_call)
+        6    0.232    0.039    0.347    0.058 /home/deanos/Documents/Nebula/TOOLS/brush_preset_manager.py:313(_render_builtin_bitmap_tip)
+     7670    0.200    0.000    0.200    0.000 {method 'tobytes' of 'memoryview' objects}
+      353    0.193    0.001    4.259    0.012 /home/deanos/Documents/Nebula/CANVAS/gpu_renderer.py:904(_draw_tiled_layer_cached)
+   432701    0.192    0.000    0.192    0.000 {method 'textureId' of 'PySide6.QtOpenGL.QOpenGLTexture' objects}
+    19706    0.171    0.000    0.357    0.000 /home/deanos/Documents/Nebula/CORE/native_bridge.py:1977(fill_image_native)
+      219    0.160    0.001    0.345    0.002 /home/deanos/Documents/Nebula/CANVAS/gpu_renderer.py:289(<genexpr>)
+     7670    0.156    0.000    0.325    0.000 /home/deanos/Documents/Nebula/CANVAS/gpu_renderer.py:563(_upload_with_pbo)
+    19648    0.136    0.000    0.945    0.000 /home/deanos/Documents/Nebula/DOCUMENTS/tile_store.py:251(tile)
+      572    0.135    0.000    0.137    0.000 /home/deanos/Documents/Nebula/CANVAS/gpu_renderer.py:643(prune_layers)
+    13310    0.097    0.000    1.204    0.000 /home/deanos/Documents/Nebula/CANVAS/gpu_renderer.py:858(sync_tile)
+      435    0.095    0.000    0.101    0.000 /home/deanos/Documents/Nebula/CORE/native_bridge.py:682(write_image)
+   396830    0.093    0.000    0.160    0.000 /home/deanos/Documents/Nebula/CANVAS/gpu_renderer.py:65(revision)
+    23050    0.089    0.000    0.099    0.000 {method 'convertToFormat' of 'PySide6.QtGui.QImage' objects}
+353336/3160    0.080    0.000    0.183    0.000 /usr/lib/python3.14/copy.py:110(deepcopy)
+   383724    0.075    0.000    0.075    0.000 /home/deanos/Documents/Nebula/CANVAS/gpu_renderer.py:371(<genexpr>)
+     7670    0.073    0.000    0.622    0.000 /home/deanos/Documents/Nebula/CANVAS/gpu_renderer.py:687(_create_texture)
+     2824    0.072    0.000    0.173    0.000 /usr/lib/python3.14/copy.py:198(_deepcopy_dict)
+     7671    0.072    0.000    0.079    0.000 {method 'allocateStorage' of 'PySide6.QtOpenGL.QOpenGLTexture' objects}
+    44314    0.070    0.000    0.117    0.000 /home/deanos/Documents/Nebula/CANVAS/gpu_instanced_stroke.py:236(_effective_opacity)
+    44198    0.069    0.000    0.069    0.000 /usr/lib/python3.14/ctypes/__init__.py:613(cast)
+    44198    0.069    0.000    0.188    0.000 /home/deanos/Documents/Nebula/CORE/native_bridge.py:2349(qimage_pointer)
+   394110    0.066    0.000    0.066    0.000 {method 'add' of 'set' objects}
+        1    0.065    0.065    0.065    0.065 {method 'menuBar' of 'PySide6.QtWidgets.QMainWindow' objects}
+     1007    0.062    0.000    0.216    0.000 /home/deanos/Documents/Nebula/CANVAS/gpu_instanced_stroke.py:247(_append_segment)
+   173902    0.058    0.000    0.082    0.000 /usr/lib/python3.14/enum.py:187(__get__)
+    32958    0.057    0.000    0.068    0.000 /home/deanos/Documents/Nebula/DOCUMENTS/tile_store.py:172(tile_rect)
+       16    0.055    0.003    0.058    0.004 /home/deanos/Documents/Nebula/CORE/native_bridge.py:1469(composite_layers_advanced)
+     9632    0.054    0.000    0.071    0.000 /home/deanos/Documents/Nebula/CANVAS/view_state.py:8(transform_point)
+        1    0.049    0.049   28.564   28.564 /home/deanos/Documents/Nebula/main.py:28(main)
+363843/358219    0.048    0.000    0.055    0.000 {built-in method builtins.max}
+297171/291547    0.045    0.000    0.053    0.000 {built-in method builtins.min}
+     1445    0.045    0.000    0.045    0.000 {method 'fillRect' of 'PySide6.QtGui.QPainter' objects}
+      572    0.043    0.000    7.481    0.013 /home/deanos/Documents/Nebula/CANVAS/canvas.py:2996(_paint_gl_frame)
+     1803    0.041    0.000    0.118    0.000 /home/deanos/Documents/Nebula/CANVAS/canvas.py:3482(_screen_rect_for_document_rect)
+        5    0.040    0.008    0.040    0.008 {method 'tabifyDockWidget' of 'PySide6.QtWidgets.QMainWindow' objects}
+     2595    0.039    0.000    0.039    0.000 /usr/lib/python3.14/json/decoder.py:351(raw_decode)
+
+
+
+===== PAR TEMPS CUMULÉ (qui appelle le coût) =====
+         8367254 function calls (7993083 primitive calls) in 28.563 seconds
+
+   Ordered by: cumulative time
+   List reduced from 2758 to 45 due to restriction <45>
+
+   ncalls  tottime  percall  cumtime  percall filename:lineno(function)
+        1    0.000    0.000   28.566   28.566 <frozen runpy>:269(run_path)
+    290/2    0.014    0.000   28.564   14.282 {built-in method builtins.exec}
+        1    0.000    0.000   28.564   28.564 <frozen runpy>:91(_run_module_code)
+        1    0.000    0.000   28.564   28.564 <frozen runpy>:65(_run_code)
+        1    0.000    0.000   28.564   28.564 /home/deanos/Documents/Nebula/main.py:1(<module>)
+        1    0.049    0.049   28.564   28.564 /home/deanos/Documents/Nebula/main.py:28(main)
+        1   10.358   10.358   26.997   26.997 {built-in method exec}
+      572    0.004    0.000    7.522    0.013 /home/deanos/Documents/Nebula/CANVAS/canvas.py:2981(paintGL)
+      572    0.043    0.000    7.481    0.013 /home/deanos/Documents/Nebula/CANVAS/canvas.py:2996(_paint_gl_frame)
+        1    0.000    0.000    6.497    6.497 /home/deanos/Documents/Nebula/CORE/application.py:803(new_file)
+        1    5.909    5.909    5.921    5.921 {method 'exec' of 'PySide6.QtWidgets.QDialog' objects}
+      572    0.005    0.000    4.667    0.008 /home/deanos/Documents/Nebula/CANVAS/gpu_renderer.py:1149(draw_layer)
+      353    0.038    0.000    4.300    0.012 /home/deanos/Documents/Nebula/CANVAS/gpu_renderer.py:994(_draw_tiled_layer)
+      353    0.193    0.001    4.259    0.012 /home/deanos/Documents/Nebula/CANVAS/gpu_renderer.py:904(_draw_tiled_layer_cached)
+      353    2.645    0.007    2.645    0.007 /home/deanos/Documents/Nebula/CANVAS/gpu_safe_blitter.py:114(draw_tiles)
+      572    0.015    0.000    2.256    0.004 /home/deanos/Documents/Nebula/CANVAS/gpu_renderer.py:403(compute_occlusion)
+      572    0.411    0.001    2.225    0.004 /home/deanos/Documents/Nebula/CANVAS/gpu_renderer.py:352(_layer_opaque_tiles)
+    13310    0.097    0.000    1.204    0.000 /home/deanos/Documents/Nebula/CANVAS/gpu_renderer.py:858(sync_tile)
+      733    0.019    0.000    1.154    0.002 /home/deanos/Documents/Nebula/CANVAS/canvas.py:4779(mouseMoveEvent)
+        1    0.001    0.001    1.080    1.080 /home/deanos/Documents/Nebula/CORE/application.py:76(__init__)
+        1    0.000    0.000    1.053    1.053 /home/deanos/Documents/Nebula/UI/context/context_menu_manager.py:56(show_canvas_menu)
+        1    1.040    1.040    1.052    1.052 {staticmethod(<built-in method exec of Shiboken.ObjectType object at 0x5598dc480c80>)}
+      399    0.011    0.000    0.955    0.002 /home/deanos/Documents/Nebula/CANVAS/canvas.py:815(_cpp_draw_segment)
+    19648    0.136    0.000    0.945    0.000 /home/deanos/Documents/Nebula/DOCUMENTS/tile_store.py:251(tile)
+      399    0.839    0.002    0.842    0.002 /home/deanos/Documents/Nebula/CANVAS/canvas.py:911(_cpp_draw_segment_once)
+    14235    0.010    0.000    0.824    0.000 /home/deanos/Documents/Nebula/CANVAS/gpu_renderer.py:327(_frame_tile_state)
+      572    0.014    0.000    0.808    0.001 /home/deanos/Documents/Nebula/CANVAS/gpu_renderer.py:40(__init__)
+      572    0.003    0.000    0.794    0.001 /home/deanos/Documents/Nebula/DOCUMENTS/tile_store.py:139(resident_revisions)
+      572    0.790    0.001    0.791    0.001 /home/deanos/Documents/Nebula/CORE/native_bridge.py:622(key_revisions)
+     1008    0.030    0.000    0.664    0.001 /home/deanos/Documents/Nebula/CANVAS/canvas.py:5299(tabletEvent)
+     7670    0.073    0.000    0.622    0.000 /home/deanos/Documents/Nebula/CANVAS/gpu_renderer.py:687(_create_texture)
+        4    0.000    0.000    0.569    0.142 /home/deanos/Documents/Nebula/TOOLS/brush_preset_manager.py:42(__init__)
+        4    0.002    0.000    0.568    0.142 /home/deanos/Documents/Nebula/TOOLS/brush_preset_manager.py:463(create_builtin_presets)
+        1    0.001    0.001    0.561    0.561 /home/deanos/Documents/Nebula/UI/ui.py:54(__init__)
+        1    0.000    0.000    0.559    0.559 /home/deanos/Documents/Nebula/UI/ui.py:510(show_workspace)
+        2    0.000    0.000    0.548    0.274 /home/deanos/Documents/Nebula/CANVAS/canvas.py:4000(resizeEvent)
+        2    0.004    0.002    0.548    0.274 {function Canvas.resizeEvent at 0x7f767cf63690}
+       43    0.012    0.000    0.519    0.012 {method 'setVisible' of 'PySide6.QtWidgets.QWidget' objects}
+        1    0.036    0.036    0.512    0.512 /home/deanos/Documents/Nebula/CANVAS/canvas.py:98(__init__)
+     1006    0.003    0.000    0.395    0.000 /home/deanos/Documents/Nebula/CANVAS/canvas.py:1196(_queue_instanced_stroke_segment)
+    294/6    0.001    0.000    0.394    0.066 <frozen importlib._bootstrap>:1360(_find_and_load)
+    294/6    0.001    0.000    0.393    0.066 <frozen importlib._bootstrap>:1308(_find_and_load_unlocked)
+    288/9    0.001    0.000    0.392    0.044 <frozen importlib._bootstrap>:914(_load_unlocked)
+    19685    0.274    0.000    0.392    0.000 /home/deanos/Documents/Nebula/CORE/native_bridge.py:648(_image_call)
+   765/18    0.001    0.000    0.391    0.022 <frozen importlib._bootstrap>:483(_call_with_frames_removed)
+
+

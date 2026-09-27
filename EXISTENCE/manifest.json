@@ -1,0 +1,67 @@
+{
+  "ecosystem_id": "existence",
+  "id": "nebula",
+  "name": "Nebula",
+  "version": "26.0",
+  "app_kind": "universe",
+  "description": "Univers raster pour peindre, composer et exporter des images.",
+  "installed": true,
+  "lifecycle_state": "available",
+  "exec_path": "python",
+  "exec_args": [
+    "main.py"
+  ],
+  "working_dir": "/home/deanos/Documents/Nebula",
+  "resource_namespace": "resource://existence/nebula",
+  "resource_types": [
+    "image",
+    "file",
+    "selection",
+    "project"
+  ],
+  "capabilities": [
+    "raster_painting",
+    "brush_engine_cpp",
+    "tablet_pressure",
+    "layer_composition",
+    "receive_vector",
+    "send_resource"
+  ],
+  "accepted_messages": [
+    "ping",
+    "get_state",
+    "describe",
+    "open_as_raster",
+    "send_resource"
+  ],
+  "emitted_messages": [
+    "send_resource",
+    "state_changed"
+  ],
+  "permissions": [
+    "read_resource",
+    "write_resource",
+    "reference_resource",
+    "send_message"
+  ],
+  "dependencies": [],
+  "existence_min_version": "26.0",
+  "protocol": {
+    "transport": "json-lines",
+    "entrypoint": "python -m EXISTENCE.adapter",
+    "commands": [
+      "manifest",
+      "handshake",
+      "message"
+    ],
+    "unix_socket": {
+      "path_policy": "lifecycle_manager_owned",
+      "permissions": "0600"
+    }
+  },
+  "view": {
+    "embeddable": true,
+    "mode": "qt_widget",
+    "protocol": "existence.view.v1"
+  }
+}

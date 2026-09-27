@@ -1,0 +1,4 @@
+PySide6>=6.11
+numpy>=1.24
+# Optional but recommended for layered PSD import and effect metadata.
+psd-tools>=1.9
