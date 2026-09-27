@@ -336,10 +336,11 @@ class CreativeSystemUI(QObject):
             if name in existing and manager.settings.value(f"workspaces/{name}/visibility") is not None:
                 continue
             for dock, visible in zip(self._workspace_docks(), visibility):
-                dock.setVisible(visible)
+                dock.setVisible(bool(visible))
             manager.save(name)
-        for dock, visible in zip(self._workspace_docks(), original):
-            dock.setVisible(visible)
+        for dock in self._workspace_docks():
+            if dock.objectName() in original:
+                dock.setVisible(bool(original[dock.objectName()]))
 
     def _workspace_docks(self):
         docks = (self.tool_rail_dock, self.brush_panel_dock, self.color_dock,
