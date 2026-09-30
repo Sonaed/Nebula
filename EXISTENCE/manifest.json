@@ -2,7 +2,7 @@
   "ecosystem_id": "existence",
   "id": "nebula",
   "name": "Nebula",
-  "version": "26.3.0",
+  "version": "26.3.1",
   "app_kind": "universe",
   "description": "Univers raster pour peindre, composer et exporter des images.",
   "installed": true,

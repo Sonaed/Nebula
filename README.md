@@ -116,6 +116,15 @@ La correspondance fonctionnelle Atlas/Nebula, les limites d’import et les
 stubs Atlas non repris sont décrits dans
 [`docs/ATLAS_TO_NEBULA_MIGRATION.md`](docs/ATLAS_TO_NEBULA_MIGRATION.md).
 
+## Nebula 26.3.1 — qualification et fiabilisation
+
+La 26.3.1 supprime les anciennes structures C++ non reliées au moteur,
+fiabilise le redémarrage du dispatcher scratch après fermeture de document et
+isole les doublures de tests. Les tests Existence se placent automatiquement
+en mode hors-ligne lorsque les sockets Unix sont interdits par l’environnement.
+Nebula ne charge aucun plugin : les ressources et extensions restent sous la
+responsabilité d’Existence.
+
 La progression vers la version stable est suivie dans
 [`ROADMAP_v1.0.md`](ROADMAP_v1.0.md). L'audit v0.3 reste conservé comme
 référence historique dans [`ROADMAP_v0.3.md`](ROADMAP_v0.3.md).

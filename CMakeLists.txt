@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 3.20)
 
 project(
     CreativeSystemCore
-    VERSION 26.3.0
+    VERSION 26.3.1
     LANGUAGES CXX
 )
 
