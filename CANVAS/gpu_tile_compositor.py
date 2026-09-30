@@ -194,6 +194,11 @@ class GPUTileCompositor:
         for layer in document.layers:
             if not layer.visible:
                 continue
+            # Clipping sets follow Photoshop's isolated "atop" rule, which only
+            # the CPU/native projection (DOCUMENTS.blend_modes.resolve_stack)
+            # implements.
+            if bool(getattr(layer, "clipping", False)):
+                return False
             if (getattr(layer, "blend_parameters", None)
                     or getattr(layer, "layer_kind", "raster") != "raster"
                     or not supported_mode(getattr(layer, "blend_mode", "normal"))):
@@ -452,7 +457,12 @@ class GPUTileCompositor:
         try:
             self._initialize(); revision = self._revision(document, tx, ty, static)
             cached = self.tiles.get((tx, ty))
-            if cached is not None and cached.revision == revision: return cached.texture_id
+            if cached is not None and cached.revision == revision:
+                # Refresh LRU order so later misses cannot evict a texture
+                # already queued for drawing in the current viewport.
+                self.tiles.pop((tx, ty))
+                self.tiles[(tx, ty)] = cached
+                return cached.texture_id
             tile_size = next((layer.tile_store.tile_size for layer in document.layers if layer.visible), 0)
             if tile_size <= 0: return None
             if cached is None:

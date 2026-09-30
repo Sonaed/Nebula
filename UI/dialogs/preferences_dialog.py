@@ -52,7 +52,8 @@ class PreferencesDialog(QDialog):
             ("check", "brush/show_cursor_preview", "Show brush cursor preview", True),
         ],
         "Performance": [
-            ("number", "performance/memory_limit_mb", "Application RAM limit (MB)", 256, 65536, 2048),
+            ("choice", "performance/memory_profile", "Memory profile", ["Prudent", "Équilibré", "Performance", "Manuel"], "Équilibré"),
+            ("number", "performance/memory_limit_mb", "Nebula memory limit (MB)", 256, 65536, 2048),
             ("number", "performance/undo_steps", "Undo history steps", 1, 1000, 100),
             ("path", "performance/scratch_directory", "Tile scratch directory", ""),
             ("check", "performance/use_gpu", "Use GPU canvas when available", True),
@@ -143,7 +144,7 @@ class PreferencesDialog(QDialog):
                 form.addRow(label, control)
         layout.addLayout(form)
         if name == "Performance":
-            fixed_tiles = QLabel("Tile size: 64 × 64 px (fixed for document and undo compatibility)")
+            fixed_tiles = QLabel("Prudent: 35% RAM · Équilibré: 60% · Performance: 75% · Manuel garde la limite en MiB.\nTile size: 64 × 64 px (fixed for document and undo compatibility)")
             fixed_tiles.setObjectName("mutedLabel")
             layout.addWidget(fixed_tiles)
         layout.addStretch()

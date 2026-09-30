@@ -184,9 +184,10 @@ class DocumentGroupTests(unittest.TestCase):
 
     def make(self, names, groups):
         doc = SimpleNamespace(layers=[SimpleNamespace(id=n) for n in names], layer_groups=groups,
-                              _native_state=mock.Mock())
+                              _native_state=mock.Mock(), _group_repair_cache=None)
         doc.move = self.Document.move_layer_to_group.__get__(doc)
         doc.repair = self.Document.repair_layer_groups.__get__(doc)
+        doc._group_structure_signature = self.Document._group_structure_signature.__get__(doc)
         return doc
 
     def test_layer_joins_a_group_and_membership_follows_stack_order(self):

@@ -1249,6 +1249,41 @@ def _configure_canvas_api(library) -> None:
         shape_mask.restype = ctypes.c_int
 
 
+class _NebulaStoreTile(ctypes.Structure):
+    _fields_ = [("store", ctypes.c_void_p), ("id", ctypes.c_uint32),
+                ("x", ctypes.c_int), ("y", ctypes.c_int),
+                ("width", ctypes.c_int), ("height", ctypes.c_int)]
+
+
+def nebula_store_tiles_io(codec, document, records, *, writing=False):
+    """True/False for direct native I/O, None when the adapter is required."""
+    name = ("cs_nebula_writer_add_store_tiles" if writing
+            else "cs_nebula_reader_read_store_tiles")
+    function = getattr(codec._library, name, None)
+    if function is None or any(r["role"] not in {"layer", "layer_mask"} for r in records):
+        return None
+    stores = {}
+    for record in records:
+        key = (record["role"], int(record["owner"]))
+        if key not in stores:
+            layer = document.layers[key[1]]
+            store = layer.tile_store if key[0] == "layer" else layer.ensure_alpha_mask()
+            if not store._native_handle or store._swapped:
+                return None
+            stores[key] = store
+    entries = (_NebulaStoreTile * len(records))()
+    for i, record in enumerate(records):
+        store = stores[(record["role"], int(record["owner"]))]
+        entries[i] = _NebulaStoreTile(store._native_handle._handle, int(record["id"]),
+                                     int(record["x"]), int(record["y"]),
+                                     int(record["width"]), int(record["height"]))
+    success = bool(function(codec._handle, entries, len(entries)))
+    if not writing:
+        for store in stores.values():
+            store._mutation_count += 1
+    return success
+
+
 def _configure_document_codecs(library) -> None:
     """Configure Nebula serialization and read-only Atlas import ABI."""
     handle = ctypes.c_void_p
@@ -1282,6 +1317,11 @@ def _configure_document_codecs(library) -> None:
     library.cs_nebula_reader_next_tile.restype = ctypes.c_int
     library.cs_nebula_reader_close.argtypes = [handle]
     library.cs_nebula_reader_close.restype = None
+    for name in ("cs_nebula_writer_add_store_tiles", "cs_nebula_reader_read_store_tiles"):
+        function = getattr(library, name, None)
+        if function is not None:
+            function.argtypes = [handle, ctypes.POINTER(_NebulaStoreTile), ctypes.c_uint32]
+            function.restype = ctypes.c_int
     library.cs_nebula_validate_manifest.argtypes = [byte_ptr,
         ctypes.c_uint32, ctypes.c_uint32, ctypes.POINTER(ctypes.c_int),
         ctypes.POINTER(ctypes.c_int), ctypes.POINTER(ctypes.c_int)]
@@ -1843,7 +1883,9 @@ class NebulaReaderHandle:
         )
         if status != 1 or raw_size.value > maximum_bytes:
             return None
-        return int(chunk_id.value), bytes(buffer[:raw_size.value])
+        # string_at copies natively; slicing a ctypes array built a Python
+        # list of ints first (seconds for a large document).
+        return int(chunk_id.value), ctypes.string_at(buffer, raw_size.value)
 
     def close(self) -> None:
         if self._handle:

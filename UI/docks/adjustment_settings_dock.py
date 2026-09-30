@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 from PySide6.QtCore import QTimer, Signal
+from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
-    QCheckBox, QComboBox, QDoubleSpinBox, QDockWidget, QFormLayout,
-    QLabel, QScrollArea, QSpinBox, QVBoxLayout, QWidget,
+    QCheckBox, QColorDialog, QComboBox, QDoubleSpinBox, QDockWidget, QFileDialog,
+    QFormLayout, QHBoxLayout, QLabel, QMessageBox, QPushButton, QScrollArea, QSpinBox,
+    QVBoxLayout, QWidget,
 )
 from UI.dialogs.adjustment_layer_dialog import CurveEditor
 
@@ -36,11 +38,17 @@ class AdjustmentSettingsDock(QDockWidget):
         self._show_empty()
 
     def _clear(self):
-        while self._layout.count():
-            item = self._layout.takeAt(0)
-            widget = item.widget()
-            if widget is not None:
-                widget.deleteLater()
+        # Replace the whole body widget: nested row layouts and their widgets
+        # go with it, detached synchronously (no deleteLater on live wrappers).
+        old = self._scroll.takeWidget() if getattr(self, "_scroll", None) is not None else None
+        self._body = QWidget(self)
+        self._layout = QVBoxLayout(self._body)
+        self._layout.setContentsMargins(10, 10, 10, 10)
+        self._scroll.setWidget(self._body)
+        if old is not None:
+            old.hide()
+            old.setParent(None)
+            self._old_bodies = [old]
 
     def _show_empty(self):
         self._clear()
@@ -99,6 +107,10 @@ class AdjustmentSettingsDock(QDockWidget):
             values = dict(self._spec.get("exposure", {}))
             for key, label, low, high, step in (("exposure", "Exposition", -5, 5, .01), ("offset", "Décalage", -1, 1, .01), ("gamma", "Gamma", .01, 5, .01)):
                 self._controls[key] = self._field(form, label, key, values.get(key, 0 if key != "gamma" else 1), low, high, step)
+        elif kind == "brightness_contrast":
+            values = dict(self._spec.get("brightness_contrast", {}))
+            for key, label in (("brightness", "Luminosité"), ("contrast", "Contraste")):
+                self._controls[key] = self._field(form, label, key, values.get(key, 0), -100, 100)
         elif kind == "vibrance":
             values = dict(self._spec.get("vibrance", {}))
             for key, label in (("vibrance", "Vibrance"), ("saturation", "Saturation")):
@@ -125,10 +137,166 @@ class AdjustmentSettingsDock(QDockWidget):
                 raw = list(values.get(channel, (0, 0, 0, 0)))
                 for index, label in enumerate(("C", "M", "J", "N")):
                     self._controls[f"selective_{channel}_{index}"] = self._field(form, f"{channel} {label}", f"selective_{channel}_{index}", raw[index] if index < len(raw) else 0)
+        elif kind == "hue_saturation":
+            values = dict(self._spec.get("hue_saturation", {}))
+            for key, label, low, high in (("hue", "Teinte", -180, 180), ("saturation", "Saturation", -100, 100),
+                                          ("lightness", "Luminosité", -100, 100)):
+                self._controls[key] = self._field(form, label, key, values.get(key, 0), low, high)
+        elif kind == "gradient_map":
+            self._gradient_controls()
+        elif kind == "color_lookup":
+            self._lookup_controls()
         mask = self._spec.get("luminosity_mask")
         if kind != "luminosity_mask":
             self._mask_controls(form, mask or {})
         self._layout.addStretch(1)
+
+    # ------------------------------------------ courbe de transfert de dégradé --
+
+    def _gradient_settings(self) -> dict:
+        settings = dict(self._spec.get("gradient_map", {}) or {})
+        stops = [dict(stop) for stop in settings.get("stops", []) if "color" in stop]
+        if len(stops) < 2:
+            stops = [{"location": 0.0, "midpoint": 0.5, "color": [0, 0, 0]},
+                     {"location": 1.0, "midpoint": 0.5, "color": [255, 255, 255]}]
+        settings["stops"] = sorted(stops, key=lambda stop: float(stop.get("location", 0.0)))
+        return settings
+
+    def _gradient_controls(self):
+        settings = self._gradient_settings()
+        stops = settings["stops"]
+        css = ", ".join(
+            f"stop:{max(0.0, min(1.0, float(stop.get('location', 0.0)))):.4f} "
+            f"rgb({int(stop['color'][0])}, {int(stop['color'][1])}, {int(stop['color'][2])})"
+            for stop in (reversed(stops) if settings.get("reverse") else stops))
+        if settings.get("reverse"):
+            css = ", ".join(
+                f"stop:{1.0 - max(0.0, min(1.0, float(stop.get('location', 0.0)))):.4f} "
+                f"rgb({int(stop['color'][0])}, {int(stop['color'][1])}, {int(stop['color'][2])})"
+                for stop in stops)
+        preview = QLabel(self._body)
+        preview.setMinimumHeight(28)
+        preview.setStyleSheet("border: 1px solid #555; border-radius: 4px; background: "
+                              f"qlineargradient(x1:0, y1:0, x2:1, y2:0, {css});")
+        self._layout.addWidget(QLabel("Ombres → hautes lumières"))
+        self._layout.addWidget(preview)
+        for index, stop in enumerate(stops):
+            row = QHBoxLayout()
+            color = QColor(*[int(v) for v in stop["color"][:3]])
+            swatch = QPushButton(self._body)
+            swatch.setFixedWidth(44)
+            swatch.setStyleSheet(f"background: {color.name()}; border: 1px solid #555;")
+            swatch.setToolTip("Changer la couleur")
+            swatch.clicked.connect(lambda _checked=False, i=index: self._pick_stop_color(i))
+            location = QDoubleSpinBox(self._body)
+            location.setRange(0.0, 100.0)
+            location.setDecimals(1)
+            location.setSuffix(" %")
+            location.setValue(float(stop.get("location", 0.0)) * 100.0)
+            location.valueChanged.connect(lambda value, i=index: self._set_stop(i, "location", value / 100.0))
+            midpoint = QDoubleSpinBox(self._body)
+            midpoint.setRange(5.0, 95.0)
+            midpoint.setDecimals(0)
+            midpoint.setPrefix("◆ ")
+            midpoint.setSuffix(" %")
+            midpoint.setToolTip("Point milieu avec l'arrêt précédent")
+            midpoint.setValue(float(stop.get("midpoint", 0.5)) * 100.0)
+            midpoint.valueChanged.connect(lambda value, i=index: self._set_stop(i, "midpoint", value / 100.0))
+            remove = QPushButton("−", self._body)
+            remove.setFixedWidth(28)
+            remove.setEnabled(len(stops) > 2)
+            remove.setToolTip("Supprimer cet arrêt")
+            remove.clicked.connect(lambda _checked=False, i=index: self._remove_stop(i))
+            for widget in (swatch, location, midpoint, remove):
+                row.addWidget(widget)
+            self._layout.addLayout(row)
+        buttons = QHBoxLayout()
+        add = QPushButton("Ajouter un arrêt", self._body)
+        add.clicked.connect(self._add_stop)
+        reverse = QCheckBox("Inverser", self._body)
+        reverse.setChecked(bool(settings.get("reverse")))
+        reverse.toggled.connect(lambda value: self._set_gradient("reverse", bool(value)))
+        buttons.addWidget(add)
+        buttons.addWidget(reverse)
+        self._layout.addLayout(buttons)
+
+    def _set_gradient(self, key, value, rebuild=False):
+        if self._updating or self._layer is None:
+            return
+        settings = self._gradient_settings()
+        settings[key] = value
+        spec = dict(self._spec)
+        spec["gradient_map"] = settings
+        self._emit_spec(spec, rebuild=rebuild or key in {"reverse", "stops"})
+
+    def _set_stop(self, index, key, value):
+        settings = self._gradient_settings()
+        stops = settings["stops"]
+        if 0 <= index < len(stops):
+            stops[index][key] = value
+        self._set_gradient("stops", stops, rebuild=key == "color")
+
+    def _pick_stop_color(self, index):
+        stops = self._gradient_settings()["stops"]
+        if not 0 <= index < len(stops):
+            return
+        current = QColor(*[int(v) for v in stops[index]["color"][:3]])
+        color = QColorDialog.getColor(current, self, "Couleur de l'arrêt")
+        if color.isValid():
+            self._set_stop(index, "color", [color.red(), color.green(), color.blue()])
+
+    def _add_stop(self):
+        stops = self._gradient_settings()["stops"]
+        gaps = [(stops[i + 1]["location"] - stops[i]["location"], i) for i in range(len(stops) - 1)]
+        _gap, at = max(gaps)
+        left, right = stops[at], stops[at + 1]
+        color = [round((a + b) / 2) for a, b in zip(left["color"][:3], right["color"][:3])]
+        stops.insert(at + 1, {"location": (left["location"] + right["location"]) / 2,
+                              "midpoint": 0.5, "color": color})
+        self._set_gradient("stops", stops, rebuild=True)
+
+    def _remove_stop(self, index):
+        stops = self._gradient_settings()["stops"]
+        if len(stops) > 2 and 0 <= index < len(stops):
+            del stops[index]
+            self._set_gradient("stops", stops, rebuild=True)
+
+    # ------------------------------------------- correspondance de couleur ------
+
+    def _lookup_controls(self):
+        settings = dict(self._spec.get("color_lookup", {}) or {})
+        name = settings.get("name") or "LUT intégrée"
+        size = settings.get("size")
+        self._layout.addWidget(QLabel(f"Table : {name}" + (f" ({size}³)" if size else " (aucune)")))
+        load = QPushButton("Charger un fichier .cube…", self._body)
+        load.clicked.connect(self._load_cube)
+        self._layout.addWidget(load)
+
+    def _load_cube(self):
+        path, _ = QFileDialog.getOpenFileName(self, "Table de correspondance 3D", "",
+                                              "LUT 3D (*.cube *.CUBE)")
+        if not path:
+            return
+        try:
+            from pathlib import Path
+            from DOCUMENTS.psd_reader import encode_lut, parse_cube_lut
+            size, table, low, high = parse_cube_lut(Path(path).read_text(encoding="latin-1"))
+            encoded = encode_lut(size, table, low, high, Path(path).name)
+        except Exception as error:  # noqa: BLE001 - user file
+            QMessageBox.warning(self, "LUT 3D", f"Fichier .cube illisible : {error}")
+            return
+        spec = dict(self._spec)
+        spec["color_lookup"] = encoded
+        self._emit_spec(spec, rebuild=True)
+
+    def _emit_spec(self, spec, rebuild=False):
+        if not self._edit_timer.isActive():
+            self.editing_started.emit()
+        self._spec = spec
+        self.spec_changed.emit(dict(spec))
+        self._edit_timer.start()
+        if rebuild:
+            QTimer.singleShot(0, self._build)
 
     def _mask_controls(self, form, values):
         values = dict(values or {})
@@ -154,7 +322,8 @@ class AdjustmentSettingsDock(QDockWidget):
             elif key == "_mask_amount": mask["amount"] = value
             elif key == "_mask_feather": mask["feather"] = value
             spec["luminosity_mask"] = mask
-        elif kind in {"levels", "exposure", "vibrance", "parametric_curves", "color_balance"}:
+        elif kind in {"levels", "exposure", "brightness_contrast", "vibrance", "parametric_curves", "color_balance",
+                      "hue_saturation"}:
             group = dict(spec.get(kind, {}))
             if "_" in key and kind == "color_balance":
                 zone, index = key.rsplit("_", 1); values = list(group.get(zone, (0, 0, 0))); values[int(index)] = value; group[zone] = values

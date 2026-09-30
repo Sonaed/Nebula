@@ -1,0 +1,13 @@
+{
+  "size": 8000,
+  "fixture_bytes": 512000132,
+  "fixture_kind": "generated PSD: one full RGBA raster layer plus RGBA composite",
+  "scope": "headless production decoder qualification; UI event-loop timing excluded",
+  "metadata_seconds": 0.001,
+  "preview_seconds": 0.59,
+  "visible_tiles_seconds": 0.054,
+  "panned_tiles_seconds": 0.08,
+  "editable_import_seconds": 0.842,
+  "resident_tile_bytes": 256000000,
+  "peak_rss_mib": 1117.5
+}

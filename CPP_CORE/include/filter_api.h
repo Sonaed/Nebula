@@ -15,6 +15,7 @@
  *    ce cas le tampon n'est pas modifié.  Aucune exception ne traverse l'ABI.
  */
 
+#include <stddef.h>
 #include <stdint.h>
 
 #include "creative_core_api.h" // CreativeDocumentHandle
@@ -28,7 +29,9 @@ extern "C" {
 // 3 : cs_filter_selective_color.
 // 4 : noyaux des calques de réglage (teinte/saturation, vibrance, balance des
 //     couleurs, mélange par luminosité).
-#define CS_FILTER_ABI_VERSION 4
+// 5 : réglages Photoshop (courbe de transfert de dégradé, LUT 3D), alpha,
+//     décodage PackBits des PSD.
+#define CS_FILTER_ABI_VERSION 5
 int cs_filter_abi_version(void);
 
 int cs_filter_gaussian_blur(uint8_t* rgba, int width, int height, int stride,
@@ -125,6 +128,21 @@ int cs_filter_apply_lut(uint8_t* rgba, int width, int height, int stride,
                         const uint8_t* red_lut, const uint8_t* green_lut,
                         const uint8_t* blue_lut, const uint8_t* mask,
                         int mask_stride);
+
+// ---------------------------------------------------------------- ABI >= 5 --
+// table256_rgba : 256 couleurs RGBA (1024 octets).
+int cs_filter_gradient_map(uint8_t* rgba, int width, int height, int stride,
+                           const uint8_t* table256_rgba, const uint8_t* mask,
+                           int mask_stride);
+// table : size³ × 3 floats (rouge le plus rapide), valeurs 0..1.
+int cs_filter_lut3d(uint8_t* rgba, int width, int height, int stride,
+                    const float* table, int size, const uint8_t* mask, int mask_stride);
+int cs_filter_set_alpha(uint8_t* rgba, int width, int height, int stride, int alpha);
+int cs_filter_copy_alpha(uint8_t* rgba, int width, int height, int stride,
+                         const uint8_t* source, int source_stride);
+// Retourne le nombre d'octets décodés, -1 si arguments invalides.
+long cs_psd_unpackbits(const uint8_t* input, size_t length, uint8_t* output,
+                       size_t capacity);
 
 // ---------------------------------------------- calques de filtre (ABI >= 2) --
 //

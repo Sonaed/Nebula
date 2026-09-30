@@ -192,10 +192,10 @@ def test_ensure_projection_precomputes_static_signature_once_per_frame():
     body = src[start:end]
     assert "layer_static = [self._layer_static_signature(layer) for layer in self.document.layers]" in body
     assert "groups_static = self._groups_static_signature()" in body
-    assert "self._projection_signature_for(tx, ty, layer_static, groups_static)" in body
+    assert "self._projection_signature_for(tx, ty, layer_static, groups_static," in body
     # Make sure this precompute happens ONCE, outside the per-tile `for` loop.
     precompute_index = body.index("layer_static = [self._layer_static_signature")
-    loop_index = body.index("for tx, ty in keys:")
+    loop_index = body.index("for tx, ty in ordered:")
     assert precompute_index < loop_index
 
 
@@ -244,7 +244,7 @@ def test_compositor_revision_matches_with_or_without_precomputed_static():
 
 def test_compose_tile_source_reuses_precomputed_static_across_the_frame_loop():
     src = (ROOT / "CANVAS" / "canvas.py").read_text()
-    marker = "supports_cached(self.document):"
+    marker = "supports_cached(self.document)):"
     start = src.index(marker)
     end = src.index("if composed_tiles:", start)
     body = src[start:end]
@@ -252,5 +252,5 @@ def test_compose_tile_source_reuses_precomputed_static_across_the_frame_loop():
     assert "self.gpu_tile_compositor.compose_tile(self.document, tx, ty, static, True)" in body
     # The precompute must sit outside/above the per-tile loop, not inside it.
     precompute_index = body.index("_static_signature(self.document)")
-    loop_index = body.index("for tx, ty in self.visible_document_tile_keys():")
+    loop_index = body.index("for tx, ty in visible_keys:")
     assert precompute_index < loop_index

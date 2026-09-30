@@ -34,6 +34,11 @@ class Layer:
         self.adjustment = None
         self.layer_effects: list[dict] = []
         self.psd_effects: list[dict] = []
+        # Retouch layers own only their generated pixels and an auditable list
+        # of operations. The sampled/source layer is never mutated.
+        self.retouch_operations: list[dict] = []
+        self.transform_state: dict | None = None
+        self._transform_cache: tuple | None = None
 
         # =========================
         # Image du calque
@@ -143,6 +148,27 @@ class Layer:
         # Adoption is used for buffers returned by CreativeCore after an
         # in-place operation; cacheKey() is unchanged by that operation.
         self._cache_dirty = True
+
+    def render_image(self) -> QImage:
+        """Return the source pixels with a serializable transform state applied.
+
+        Source tiles remain unchanged; the render cache is invalidated by both
+        source cache key and state, so undoing/removing the state is exact.
+        """
+        state = self.transform_state
+        if not state:
+            return self.image
+        source = self.image
+        key = (int(source.cacheKey()), tuple(sorted(state.items())))
+        if self._transform_cache is not None and self._transform_cache[0] == key:
+            return self._transform_cache[1]
+        from TOOLS.transform_tool import TransformSpec, TransformTool
+        spec = TransformSpec(**{name: float(state.get(name, default)) for name, default in
+                                (("translate_x", 0), ("translate_y", 0), ("scale_x", 1),
+                                 ("scale_y", 1), ("rotation", 0))})
+        image = TransformTool().apply(source, spec).image
+        self._transform_cache = (key, image)
+        return image
 
     def mark_image_cache_dirty(self) -> None:
         """Record an in-place native write; cacheKey() is not reliable for it."""

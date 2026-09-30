@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 3.20)
 
 project(
     CreativeSystemCore
-    VERSION 0.2.0
+    VERSION 26.3.0
     LANGUAGES CXX
 )
 
@@ -89,6 +89,7 @@ add_library(
     SHARED
     CPP_CORE/src/creative_core_api.cpp
     CPP_CORE/src/filter_api.cpp
+    CPP_CORE/src/stack_compositor.cpp
     CPP_CORE/src/nebula_serialization.cpp
     CPP_CORE/src/atlas_import.cpp
     CPP_CORE/src/texture_atlas.cpp
@@ -119,6 +120,8 @@ set_target_properties(
     PROPERTIES
         OUTPUT_NAME "CreativeCoreBridge"
 )
+
+if(BUILD_CPP_TESTS)
 
 add_executable(
     CreativeCoreTest
@@ -169,6 +172,10 @@ target_link_libraries(CreativeCoreAsyncBrushTests PRIVATE CreativeCore)
 add_executable(CreativeCoreFilterTests CPP_TEST/test_image_filters.cpp)
 target_link_libraries(CreativeCoreFilterTests PRIVATE CreativeCore)
 add_executable(CreativeCoreFilterLayerTests CPP_TEST/test_filter_layer.cpp)
+add_executable(CreativeCorePsdKernelTests CPP_TEST/test_psd_kernels.cpp)
+target_link_libraries(CreativeCorePsdKernelTests PRIVATE CreativeCore)
+
+
 target_link_libraries(CreativeCoreFilterLayerTests PRIVATE CreativeCore)
 
 enable_testing()
@@ -189,3 +196,6 @@ add_test(NAME CreativeCoreTextureAtlasTests COMMAND CreativeCoreTextureAtlasTest
 add_test(NAME CreativeCoreAsyncBrushTests COMMAND CreativeCoreAsyncBrushTests)
 add_test(NAME CreativeCoreFilterTests COMMAND CreativeCoreFilterTests)
 add_test(NAME CreativeCoreFilterLayerTests COMMAND CreativeCoreFilterLayerTests)
+add_test(NAME CreativeCorePsdKernelTests COMMAND CreativeCorePsdKernelTests)
+
+endif()

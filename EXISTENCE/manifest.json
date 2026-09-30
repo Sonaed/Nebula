@@ -2,7 +2,7 @@
   "ecosystem_id": "existence",
   "id": "nebula",
   "name": "Nebula",
-  "version": "26.0",
+  "version": "26.3.0",
   "app_kind": "universe",
   "description": "Univers raster pour peindre, composer et exporter des images.",
   "installed": true,
@@ -45,7 +45,7 @@
     "send_message"
   ],
   "dependencies": [],
-  "existence_min_version": "26.0",
+  "existence_min_version": "26.2.1",
   "protocol": {
     "transport": "json-lines",
     "entrypoint": "python -m EXISTENCE.adapter",

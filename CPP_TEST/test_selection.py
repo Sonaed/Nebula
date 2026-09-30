@@ -67,6 +67,27 @@ class SelectionTests(unittest.TestCase):
         selection.combine(second, SelectionOperation.SUBTRACT)
         self.assertFalse(selection.contains(4, 4))
 
+    def test_difference_and_tile_index(self) -> None:
+        selection = SelectionMask(130, 130)
+        first = QImage(130, 130, QImage.Format.Format_ARGB32); first.fill(0)
+        second = QImage(130, 130, QImage.Format.Format_ARGB32); second.fill(0)
+        first.setPixelColor(2, 2, QColor("white")); first.setPixelColor(70, 2, QColor("white"))
+        second.setPixelColor(70, 2, QColor("white")); second.setPixelColor(120, 120, QColor("white"))
+        selection.combine(first, SelectionOperation.REPLACE)
+        selection.combine(second, SelectionOperation.DIFFERENCE)
+        self.assertTrue(selection.contains(2, 2)); self.assertFalse(selection.contains(70, 2)); self.assertTrue(selection.contains(120, 120))
+        self.assertEqual(selection.occupied_tiles(), {(0, 0), (1, 1)})
+
+    def test_sparse_tile_store_is_authoritative_after_edit(self) -> None:
+        selection = SelectionMask(256, 128)
+        candidate = QImage(256, 128, QImage.Format.Format_ARGB32)
+        candidate.fill(0)
+        candidate.setPixelColor(200, 70, QColor("white"))
+        selection.combine(candidate, SelectionOperation.REPLACE)
+        self.assertIsNone(selection._image)
+        self.assertEqual(selection.occupied_tiles(), {(3, 1)})
+        self.assertTrue(selection.contains(200, 70))
+
     def test_selection_bridge_accepts_enum_operations(self) -> None:
         destination = QImage(4, 3, QImage.Format.Format_ARGB32)
         candidate = QImage(4, 3, QImage.Format.Format_ARGB32)
@@ -87,7 +108,7 @@ class SelectionTests(unittest.TestCase):
         )
         for tool, points in cases:
             with self.subTest(tool=tool):
-                native = SelectionTools.shape_mask(tool, QSize(20, 16), points)
+                native = SelectionTools.shape_mask(tool, QSize(20, 16), points, anti_alias=False)
                 reference = _qt_shape_reference(tool, QSize(20, 16), points)
                 self.assertEqual(bytes(native.constBits()), bytes(reference.constBits()))
 
@@ -106,6 +127,15 @@ class SelectionTests(unittest.TestCase):
         mask = SelectionTools.magic_wand(image, QPoint(0, 1), 0)
         self.assertTrue(mask.pixelColor(1, 1).alpha() > 0)
         self.assertEqual(mask.pixelColor(3, 1).alpha(), 0)
+
+    def test_load_layer_alpha_as_selection(self) -> None:
+        image = QImage(5, 4, QImage.Format.Format_ARGB32)
+        image.fill(QColor(20, 30, 40, 0))
+        image.setPixelColor(2, 1, QColor(20, 30, 40, 201))
+        selection = SelectionMask(5, 4)
+        selection.select_alpha(image)
+        self.assertEqual(selection.image.pixelColor(2, 1).alpha(), 201)
+        self.assertTrue(selection.contains(2, 1))
 
     def test_selection_raster_tools_require_native_engine(self) -> None:
         with patch("TOOLS.selection_tools.native_selection_shape_mask",

@@ -41,7 +41,7 @@ class CurveEditor(QWidget):
 
 class AdjustmentLayerDialog(QDialog):
     def __init__(self, adjustment:dict, parent=None):
-        super().__init__(parent); self.spec=dict(adjustment or {}); self.kind=str(self.spec.get("kind","curves")); self.setWindowTitle({"levels":"Niveaux","hue_saturation":"Teinte / Saturation","exposure":"Exposition","vibrance":"Vibrance","color_balance":"Balance des couleurs","invert":"Inverser","threshold":"Seuil","posterize":"Postérisation","parametric_curves":"Courbes paramétriques","selective_color":"Couleur sélective","luminosity_mask":"Masque de luminosité"}.get(self.kind,"Courbes RVB")); self.setMinimumWidth(360)
+        super().__init__(parent); self.spec=dict(adjustment or {}); self.kind=str(self.spec.get("kind","curves")); self.setWindowTitle({"levels":"Niveaux","hue_saturation":"Teinte / Saturation","exposure":"Exposition","brightness_contrast":"Luminosité / Contraste","vibrance":"Vibrance","color_balance":"Balance des couleurs","invert":"Inverser","threshold":"Seuil","posterize":"Postérisation","parametric_curves":"Courbes paramétriques","selective_color":"Couleur sélective","luminosity_mask":"Masque de luminosité"}.get(self.kind,"Courbes RVB")); self.setMinimumWidth(360)
         root=QVBoxLayout(self); form=QFormLayout(); root.addLayout(form); self.controls={}; self.mask_controls={}
         if self.kind=="curves":
             raw=dict(self.spec.get("curves",{})); curves={"rgb":raw.get("points",[[0,0],[255,255]])}; curves.update({{"r":"red","g":"green","b":"blue"}.get(k,k):v for k,v in dict(raw.get("channels",{})).items()})
@@ -52,6 +52,8 @@ class AdjustmentLayerDialog(QDialog):
             v=dict(self.spec.get("hue_saturation",{})); self.decimal(form,"Teinte","hue",v.get("hue",0),-180,180,1); self.decimal(form,"Saturation","saturation",v.get("saturation",0),-100,100,1); self.decimal(form,"Luminosité","lightness",v.get("lightness",0),-100,100,1)
         elif self.kind=="exposure":
             v=dict(self.spec.get("exposure",{})); self.decimal(form,"Exposition","exposure",v.get("exposure",0),-5,5,.01); self.decimal(form,"Décalage","offset",v.get("offset",0),-1,1,.001); self.decimal(form,"Gamma","gamma",v.get("gamma",1),.01,5,.01)
+        elif self.kind=="brightness_contrast":
+            v=dict(self.spec.get("brightness_contrast",{})); self.decimal(form,"Luminosité","brightness",v.get("brightness",0),-100,100,1); self.decimal(form,"Contraste","contrast",v.get("contrast",0),-100,100,1)
         elif self.kind=="vibrance":
             v=dict(self.spec.get("vibrance",{})); self.decimal(form,"Vibrance","vibrance",v.get("vibrance",0),-100,100,1); self.decimal(form,"Saturation","saturation",v.get("saturation",0),-100,100,1)
         elif self.kind=="color_balance":
@@ -90,6 +92,7 @@ class AdjustmentLayerDialog(QDialog):
         elif self.kind=="levels":r["levels"]={k:c.value() for k,c in self.controls.items()}
         elif self.kind=="hue_saturation":r["hue_saturation"]={k:c.value() for k,c in self.controls.items()}
         elif self.kind=="exposure":r["exposure"]={k:c.value() for k,c in self.controls.items()}
+        elif self.kind=="brightness_contrast":r["brightness_contrast"]={k:c.value() for k,c in self.controls.items()}
         elif self.kind=="vibrance":r["vibrance"]={k:c.value() for k,c in self.controls.items()}
         elif self.kind=="color_balance":r["color_balance"]={zone:[self.controls[f"{zone}_{i}"].value() for i in range(3)] for zone in ("shadows","midtones","highlights")}
         elif self.kind=="threshold":r["threshold"]=self.controls["threshold"].value()

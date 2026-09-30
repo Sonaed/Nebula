@@ -13,6 +13,7 @@ from PySide6.QtWidgets import (
     QFileDialog,
     QMessageBox,
     QInputDialog,
+    QProgressDialog,
 )
 
 from PySide6.QtGui import (
@@ -31,15 +32,22 @@ from DOCUMENTS.layer_manager import LayerManager
 from DOCUMENTS.document_manager import DocumentManager
 
 from DOCUMENTS.format_nebula import NebulaFormat, load_document
+from DOCUMENTS.format_psd import PSDFormat
 
 from DOCUMENTS.document_dialog import DocumentDialog
 
 from DOCUMENTS.document import Document
-from DOCUMENTS.tile_store import initialize_scratch_dispatcher, shutdown_scratch_executor
+from DOCUMENTS.tile_store import (TILE_SIZE, initialize_scratch_dispatcher,
+                                  shutdown_scratch_executor)
 from TOOLS.resource_manager import ResourceManager
 from DOCUMENTS.blend_modes import composite_document
 from DOCUMENTS.color_management import ColorProfile, convert_to_profile
 from DOCUMENTS.recovery import RecoveryManager
+from DOCUMENTS.psd_import import (
+    PSDImportScheduler, ImportPriority, build_overview, decode_composite_tiles,
+    estimate_import_budget,
+)
+from DOCUMENTS.format_psd import PSDImportCancelled
 from CORE.memory_manager import MemoryManager
 from CORE.native_bridge import fill_image_native, plan_visible_layer_merge
 
@@ -50,6 +58,13 @@ class CreativeSystem(QMainWindow):
         self,
         event
     ) -> None:
+
+        if getattr(self, "_psd_import_scheduler", None) is not None:
+            self._psd_import_scheduler.cancel()
+            self._psd_import_scheduler.shutdown(wait=False)
+            self._psd_import_scheduler = None
+            self._psd_overview_future = None
+            self._psd_tile_future = None
 
         canvas = getattr(
             self,
@@ -165,6 +180,14 @@ class CreativeSystem(QMainWindow):
         self.update_window_title()
 
         self.recovery_manager = RecoveryManager()
+        self._psd_import_scheduler: PSDImportScheduler | None = None
+        self._psd_import_future = None
+        self._psd_proxy_tiles: set[tuple[int, int]] = set()
+        self._psd_last_viewport = None
+        self._psd_overview_future = None
+        self._psd_tile_future = None
+        self._psd_import_timer = None
+        self._psd_import_progress = None
         self._autosave_timer = QTimer(self)
         self._autosave_timer.timeout.connect(self._autosave_recovery)
         self._configure_autosave()
@@ -234,6 +257,9 @@ class CreativeSystem(QMainWindow):
 
         self.canvas.performance_warning.connect(
             lambda message: self.statusBar().showMessage(message, 5000)
+        )
+        self.canvas.history_operation_deferred.connect(
+            lambda message: self.statusBar().showMessage(message, 1800)
         )
 
         # LayersDock.invalidate_thumb_cache() already existed for exactly
@@ -384,6 +410,7 @@ class CreativeSystem(QMainWindow):
         self.ui.actions["expand_selection"].triggered.connect(lambda: self.edit_selection("expand"))
         self.ui.actions["contract_selection"].triggered.connect(lambda: self.edit_selection("contract"))
         self.ui.actions["select_color_range"].triggered.connect(self.select_color_range)
+        self.ui.actions["select_alpha"].triggered.connect(self.select_alpha)
 
         self.ui.actions["show_brush"].triggered.connect(
             self.ui.brush_panel_dock.setVisible
@@ -851,6 +878,14 @@ class CreativeSystem(QMainWindow):
             layer.image, color, tolerance))
         self.canvas.update()
 
+    def select_alpha(self) -> None:
+        """Load the active layer transparency as an undoable selection."""
+        layer = self.canvas.document.get_active_layer()
+        if layer is None:
+            return
+        self._with_selection_history(lambda: self.canvas.document.selection.select_alpha(layer.image))
+        self.canvas.update()
+
     def _with_selection_history(self, operation) -> None:
         """Record selection-only edits without snapshotting every paint layer."""
         history = self.canvas.tile_history
@@ -964,6 +999,278 @@ class CreativeSystem(QMainWindow):
         if file_path:
             self.canvas.add_reference_image(file_path)
 
+    def _start_psd_import(self, file_path: str) -> None:
+        """Decode PSD away from the Qt event thread; cancellation is cooperative."""
+        if self._psd_import_scheduler is not None:
+            self._psd_import_scheduler.cancel()
+            self._psd_import_scheduler.shutdown(wait=False)
+        scheduler = self._psd_import_scheduler = PSDImportScheduler(workers=2)
+        try:
+            budget = estimate_import_budget(file_path)
+            limit = getattr(getattr(self, "memory_manager", None), "limit_mb", 0)
+            budget_text = (f"Budget d’import estimé : {budget.estimated_mib:.0f} MiB"
+                           f" · calque plein : {budget.per_full_layer_mib:.0f} MiB"
+                           + (f" · limite Nebula : {limit} MiB" if limit else ""))
+            self._psd_import_budget = budget
+        except (OSError, ValueError) as error:
+            budget_text = f"Budget d’import indisponible : {error}"
+            self._psd_import_budget = None
+        progress = QProgressDialog(f"Lecture des métadonnées Photoshop…\n{budget_text}", "Annuler", 0, 0, self)
+        progress.setWindowTitle("Import Photoshop")
+        progress.setWindowModality(Qt.WindowModality.NonModal)
+        progress.setMinimumDuration(0)
+        progress.setAutoClose(False)
+        progress.canceled.connect(self._cancel_psd_import)
+        progress.show()
+        self._psd_import_progress = progress
+        self.ui.set_import_state(budget_text, warning=bool(getattr(self._psd_import_budget, "estimated_mib", 0) > (getattr(getattr(self, "memory_manager", None), "limit_mb", 0) or float("inf"))))
+        self.statusBar().showMessage(f"Import PSD en arrière-plan… {budget_text}")
+        self._psd_overview_future = scheduler.submit(
+            "overview", ImportPriority.OVERVIEW,
+            lambda cancel: None if cancel.is_set() else build_overview(file_path))
+        self._psd_import_future = None
+        self._psd_import_timer = QTimer(self)
+        self._psd_import_timer.setInterval(30)
+        self._psd_import_timer.timeout.connect(lambda: self._poll_psd_import(file_path))
+        self._psd_import_timer.start()
+
+    def _cancel_psd_import(self) -> None:
+        """Stop accepting PSD work without blocking the event loop."""
+        scheduler, self._psd_import_scheduler = self._psd_import_scheduler, None
+        if scheduler is not None:
+            scheduler.cancel()
+            scheduler.shutdown(wait=False)
+        if self._psd_import_timer is not None:
+            self._psd_import_timer.stop()
+        self._psd_overview_future = None
+        self._psd_tile_future = None
+        self._psd_import_future = None
+        progress, self._psd_import_progress = self._psd_import_progress, None
+        if progress is not None:
+            progress.blockSignals(True)
+            progress.close()
+            progress.deleteLater()
+        self.statusBar().showMessage("Import PSD annulé")
+        self.ui.set_import_state()
+
+    def _poll_psd_import(self, file_path: str) -> None:
+        overview = self._psd_overview_future
+        if overview is not None and overview.done():
+            self._psd_overview_future = None
+            try:
+                payload, (width, height) = overview.result()
+                progress = getattr(self, "_psd_import_progress", None)
+                if progress is not None:
+                    progress.setLabelText("Aperçu prêt — préparation des zones visibles…\n" + self.ui.import_state_label.text())
+                self._show_psd_proxy(payload, width, height)
+                # The embedded preview is available immediately.  Decode the
+                # document-space tiles beneath the current viewport next and
+                # put them in the proxy's sparse store as they arrive.  This
+                # keeps the import bounded and, unlike the former status-only
+                # callback, gives Canvas real pixels to render and retain.
+                self._queue_psd_viewport_tiles(file_path, width, height)
+                # Keep the complete preview stable while editable layers load.
+                editable_viewport = self._psd_import_viewport(width, height)
+                self._psd_import_future = self._psd_import_scheduler.submit(
+                    "document", ImportPriority.REST,
+                    lambda cancel: PSDFormat.load(file_path, cancel=cancel,
+                                                   viewport=editable_viewport))
+            except Exception as error:  # noqa: BLE001
+                self.statusBar().showMessage(f"Aperçu PSD indisponible : {error}")
+                # The preview is optional; never let it prevent the editable
+                # native import from starting.
+                self._psd_import_future = self._psd_import_scheduler.submit(
+                    "document", ImportPriority.REST,
+                    lambda cancel: PSDFormat.load(file_path, cancel=cancel))
+        tile_future = getattr(self, "_psd_tile_future", None)
+        if tile_future is not None and tile_future.done():
+            self._psd_tile_future = None
+            try:
+                _size, tiles = tile_future.result()
+                self._apply_psd_proxy_tiles(tiles)
+                self._psd_proxy_tiles.update(tiles)
+                progress = getattr(self, "_psd_import_progress", None)
+                if progress is not None:
+                    progress.setLabelText("Zones visibles prêtes — import des calques…")
+                self.statusBar().showMessage(f"PSD — {len(tiles)} tuiles visibles prêtes")
+            except Exception as error:  # noqa: BLE001
+                self.statusBar().showMessage(f"Tuiles PSD indisponibles : {error}")
+        proxy = getattr(self.canvas, "document", None)
+        if (self._psd_import_scheduler is not None and proxy is not None
+                and getattr(proxy, "_loading_preview", False)
+                and self._psd_tile_future is None):
+            self._queue_psd_viewport_tiles(file_path, proxy.width, proxy.height)
+        future = self._psd_import_future
+        if future is None or not future.done():
+            return
+        if self._psd_import_timer is not None:
+            self._psd_import_timer.stop()
+        progress, self._psd_import_progress = self._psd_import_progress, None
+        if progress is not None:
+            progress.blockSignals(True)
+            progress.close()
+            progress.deleteLater()
+        scheduler, self._psd_import_scheduler = self._psd_import_scheduler, None
+        self._psd_import_future = None
+        try:
+            document = future.result()
+        except PSDImportCancelled:
+            self.statusBar().showMessage("Import PSD annulé")
+            self.ui.set_import_state()
+            if scheduler is not None:
+                scheduler.shutdown(wait=False)
+            return
+        except Exception as error:  # noqa: BLE001
+            self.statusBar().showMessage(f"Import PSD échoué : {error}")
+            self.ui.set_import_state("Import PSD interrompu", warning=True)
+            if scheduler is not None: scheduler.shutdown(wait=False)
+            QMessageBox.warning(self, "Ouverture PSD", f"Impossible d’ouvrir le fichier PSD :\n{error}")
+            return
+        if scheduler is not None:
+            self.statusBar().showMessage(
+                f"PSD importé — premier résultat {scheduler.metrics.first_result_ms or 0:.0f} ms")
+            scheduler.shutdown(wait=False)
+        if document is None:
+            self.ui.set_import_state("Import PSD indisponible", warning=True)
+            QMessageBox.warning(self, "Import PSD", "Impossible d’ouvrir ce fichier PSD.")
+            return
+        self._report_psd_import(document)
+        warnings = list(getattr(document, "psd_import_report", {}).get("warnings", ()) or ())
+        self.ui.set_import_state(
+            "PSD éditable" if not warnings else f"PSD éditable · {len(warnings)} limite(s)",
+            warning=bool(warnings),
+        )
+        preview = getattr(self.canvas.document, "_display_preview", None)
+        if preview is not None:
+            document._display_preview = QImage(preview)
+        self.canvas.set_document(document)
+        self.layer_manager = LayerManager(document)
+        self.document_manager.documents.append(document)
+        self.document_manager.active_document = document
+        self.current_file = file_path
+        self._remember_recent_document(file_path)
+        self._last_saved_history_index = self.canvas.tile_history.index
+        self.refresh_layers()
+        self.update_window_title()
+        self.ui.show_workspace()
+
+    def _show_psd_proxy(self, payload: bytes, width: int, height: int) -> None:
+        """Display the embedded composite while editable layers decode."""
+        image = QImage.fromData(payload, "PNG")
+        if image.isNull():
+            return
+        proxy = Document(width, height, 300, None)
+        proxy.name = "Aperçu PSD (décodage en cours)"
+        layer = proxy.get_active_layer()
+        if layer is None:
+            return
+        layer.name = "Aperçu composite"
+        proxy._display_preview = image
+        proxy._loading_preview = True
+        self.ui.set_import_state("Aperçu PSD · import éditable en cours")
+        self.canvas.set_document(proxy)
+        self.layer_manager = LayerManager(proxy)
+        self.document_manager.documents.append(proxy)
+        self.document_manager.active_document = proxy
+        self.refresh_layers()
+        self.ui.show_workspace()
+        self.statusBar().showMessage("Aperçu PSD visible — calques en cours de décodage…")
+
+    def _psd_import_viewport(self, width: int, height: int) -> tuple[int, int, int, int]:
+        """Document-space viewport used for the first progressive PSD pass."""
+        canvas = self.canvas
+        zoom = max(float(getattr(canvas, "zoom", 1.0) or 1.0), 0.001)
+        offset = getattr(canvas, "offset", None)
+        ox = float(offset.x()) if offset is not None else 0.0
+        oy = float(offset.y()) if offset is not None else 0.0
+        visible_width = max(TILE_SIZE, int(canvas.width() / zoom))
+        visible_height = max(TILE_SIZE, int(canvas.height() / zoom))
+        x = max(0, min(width - 1, int(-ox / zoom)))
+        y = max(0, min(height - 1, int(-oy / zoom)))
+        return x, y, min(visible_width, width - x), min(visible_height, height - y)
+
+    def _queue_psd_viewport_tiles(self, file_path: str, width: int, height: int) -> None:
+        """Prioritize the current viewport again whenever the user pans."""
+        viewport = self._psd_import_viewport(width, height)
+        if viewport == self._psd_last_viewport:
+            return
+        self._psd_last_viewport = viewport
+        scheduler = self._psd_import_scheduler
+        if scheduler is None:
+            return
+        self._psd_tile_future = scheduler.submit(
+            "visible composite tiles", ImportPriority.VISIBLE,
+            lambda cancel: None if cancel.is_set() else decode_composite_tiles(
+                file_path, viewport, TILE_SIZE, self._psd_proxy_tiles))
+
+    def _apply_psd_proxy_tiles(self, tiles: dict[tuple[int, int], bytes]) -> None:
+        """Publish decoded composite regions into the loading proxy's tiles.
+
+        ``decode_composite_tiles`` returns document origins rather than tile
+        keys.  Splitting each decoded image at Nebula's native tile boundary
+        handles edge tiles and keeps the proxy compatible with normal Canvas
+        composition.
+        """
+        proxy = getattr(self.canvas, "document", None)
+        if proxy is None or not getattr(proxy, "_loading_preview", False):
+            return
+        layer = proxy.get_active_layer()
+        store = getattr(layer, "tile_store", None) if layer is not None else None
+        if store is None:
+            return
+        writes = []
+        for (origin_x, origin_y), payload in tiles.items():
+            image = QImage.fromData(payload, "PNG").convertToFormat(QImage.Format.Format_ARGB32)
+            if image.isNull():
+                continue
+            for y in range(0, image.height(), TILE_SIZE):
+                for x in range(0, image.width(), TILE_SIZE):
+                    tx, ty = (origin_x + x) // TILE_SIZE, (origin_y + y) // TILE_SIZE
+                    target = store.tile_rect(tx, ty)
+                    if target.isEmpty():
+                        continue
+                    part = image.copy(x, y, target.width(), target.height())
+                    if not part.isNull():
+                        writes.append((tx, ty, part))
+        if writes:
+            store.set_tiles_batch(writes)
+            update = getattr(self.canvas, "update", None)
+            if callable(update):
+                update()
+
+    def _report_psd_import(self, document) -> None:
+        """Tell the user what a PSD import could not keep editable (if anything)."""
+        report = getattr(document, "psd_import_report", None)
+        warning = str(getattr(document, "psd_import_warning", "") or "").strip()
+        if isinstance(report, dict):
+            try:
+                self.statusBar().showMessage(
+                    f"PSD importé : {report.get('layers', 0)} calques, "
+                    f"{report.get('groups', 0)} dossiers, "
+                    f"{report.get('adjustments', 0)} calques de réglage", 8000)
+            except RuntimeError:
+                pass
+        if not warning:
+            return
+        lines = warning.splitlines()
+        shown = "\n".join(f"• {line}" for line in lines[:14])
+        if len(lines) > 14:
+            shown += f"\n… et {len(lines) - 14} autre(s)"
+        print("Import PSD :\n" + warning)
+        QMessageBox.information(self, "Import PSD", "Le fichier est ouvert. Remarques :\n\n" + shown)
+
+    def _report_psd_export(self, document) -> None:
+        """Make Photoshop export losses visible after a successful write."""
+        report = getattr(document, "psd_export_report", {})
+        warnings = list(report.get("warnings", ())) if isinstance(report, dict) else []
+        if not warnings:
+            self.statusBar().showMessage("PSD exporté sans perte connue", 6000)
+            return
+        shown = "\n".join(f"• {warning}" for warning in warnings)
+        self.statusBar().showMessage("PSD exporté avec limitations signalées", 8000)
+        QMessageBox.information(
+            self, "Export Photoshop", "Le fichier a été exporté. Limites connues :\n\n" + shown)
+
     def open_file(self, file_path: str | None = None) -> None:
 
         preferences = QSettings("CreativeSystem", "CreativeSystem")
@@ -975,7 +1282,7 @@ class CreativeSystem(QMainWindow):
                 "Ouvrir un document",
                 start_directory,
                 "Nebula document (*.nebula *.nbl);;"
-                "Legacy projects (*.csd *.atlas *.psd);;"
+                "Legacy projects (*.csd *.atlas *.psd *.psb);;"
                 "Images (*.png *.jpg *.jpeg *.bmp)"
             )
 
@@ -994,7 +1301,11 @@ class CreativeSystem(QMainWindow):
         # CSD
         # -----------------------------------------------------
 
-        if extension in (".nebula", ".nbl", ".csd", ".atlas", ".psd"):
+        if extension in (".nebula", ".nbl", ".csd", ".atlas", ".psd", ".psb"):
+
+            if extension in (".psd", ".psb"):
+                self._start_psd_import(file_path)
+                return
 
             document = load_document(file_path)
 
@@ -1007,6 +1318,8 @@ class CreativeSystem(QMainWindow):
                 )
 
                 return
+
+            self._report_psd_import(document)
 
             self.canvas.set_document(
                 document
@@ -1107,9 +1420,41 @@ class CreativeSystem(QMainWindow):
             self.save_file()
             return
 
+        self._dispose_current_document()
+
+    def _dispose_current_document(self) -> None:
+        """Release sparse/native pixels before returning from a discarded document.
+
+        Merely hiding the workspace left the active Canvas and document manager
+        holding every native TileStore. For dense PSDs this looked exactly like
+        a persistent RAM leak after closing a file.
+        """
+        old = self.canvas.document
+        replacement = Document(800, 600)
+        self.canvas.set_document(replacement)
+        for layer in old.layers:
+            layer.tile_store.close()
+            if layer.alpha_mask_store is not None:
+                layer.alpha_mask_store.close()
+        selection_store = getattr(getattr(old, "selection", None), "tile_store", None)
+        if selection_store is not None:
+            selection_store.close()
+        for group in getattr(old, "layer_groups", ()):
+            group.invalidate()
+            if getattr(group, "alpha_mask_store", None) is not None:
+                group.alpha_mask_store.close()
+        self.document_manager.close_document(old)
+        if replacement not in self.document_manager.documents:
+            self.document_manager.documents.append(replacement)
+        self.document_manager.active_document = replacement
+        self.layer_manager = LayerManager(replacement)
         self.current_file = None
         self.ui.show_home()
         self.update_window_title()
+        manager = getattr(self, "memory_manager", None)
+        if manager is not None:
+            manager.trim_allocator()
+            manager.refresh()
 
     # =========================================================
     # IMAGE COMPOSITE
@@ -1360,6 +1705,10 @@ class CreativeSystem(QMainWindow):
             self.save_file_as()
             return
 
+        elif extension in (".psd", ".psb"):
+            from DOCUMENTS.format_psd import PSDFormat
+            success = PSDFormat.save(self.canvas.document, self.current_file)
+
         else:
 
             image = (
@@ -1377,6 +1726,10 @@ class CreativeSystem(QMainWindow):
                 "Erreur",
                 "Impossible d'enregistrer le fichier."
             )
+        elif extension in (".psd", ".psb"):
+            report_export = getattr(self, "_report_psd_export", None)
+            if callable(report_export):
+                report_export(self.canvas.document)
         elif extension in (".nebula", ".nbl"):
             self.recovery_manager.clear()
             self._last_saved_history_index = self.canvas.tile_history.index
@@ -1391,6 +1744,8 @@ class CreativeSystem(QMainWindow):
         native_filter = "Nebula document (*.nebula *.nbl)"
         filter_for_format = {
             ".nebula": native_filter, ".nbl": native_filter,
+            ".psd": "Photoshop document (*.psd)",
+            ".psb": "Photoshop large document (*.psb)",
             ".png": "PNG (*.png)", ".tif": "TIFF (*.tif *.tiff)",
         }
         selected_filter = filter_for_format.get(default_format, native_filter)
@@ -1400,6 +1755,8 @@ class CreativeSystem(QMainWindow):
             "Enregistrer le document",
             start_directory,
             "Nebula document (*.nebula *.nbl);;"
+            "Photoshop document (*.psd);;"
+            "Photoshop large document (*.psb);;"
             "PNG (*.png);;"
             "JPEG (*.jpg *.jpeg);;"
             "TIFF (*.tif *.tiff);;"
@@ -1411,7 +1768,9 @@ class CreativeSystem(QMainWindow):
             return
 
         extension_by_filter = {
-            native_filter: ".nebula", "PNG (*.png)": ".png",
+            native_filter: ".nebula", "Photoshop document (*.psd)": ".psd",
+            "Photoshop large document (*.psb)": ".psb",
+            "PNG (*.png)": ".png",
             "JPEG (*.jpg *.jpeg)": ".jpg", "TIFF (*.tif *.tiff)": ".tif",
             "BMP (*.bmp)": ".bmp",
         }
@@ -1441,6 +1800,9 @@ class CreativeSystem(QMainWindow):
             )
             return
 
+        elif extension in (".psd", ".psb"):
+            success = PSDFormat.save(self.canvas.document, file_path)
+
         else:
 
             image = (
@@ -1460,6 +1822,11 @@ class CreativeSystem(QMainWindow):
             )
 
             return
+
+        if extension in (".psd", ".psb"):
+            report_export = getattr(self, "_report_psd_export", None)
+            if callable(report_export):
+                report_export(self.canvas.document)
 
         self.current_file = file_path
         self._remember_recent_document(file_path)
@@ -1889,6 +2256,13 @@ class CreativeSystem(QMainWindow):
         self.canvas.update()
 
     def add_adjustment_layer(self, kind: str) -> None:
+        def _identity_lut():
+            import numpy as np
+            from DOCUMENTS.psd_reader import encode_lut
+            axis = np.linspace(0.0, 1.0, 17, dtype=np.float32)
+            blue, green, red = np.meshgrid(axis, axis, axis, indexing="ij")
+            return encode_lut(17, np.stack((red, green, blue), axis=-1), name="Identité")
+
         """Insert a non-destructive adjustment layer with editable defaults."""
         defaults = {
             "curves": {"kind": "curves", "curves": {"points": [[0, 0], [128, 128], [255, 255]]}},
@@ -1897,6 +2271,8 @@ class CreativeSystem(QMainWindow):
             "hue_saturation": {"kind": "hue_saturation", "hue_saturation": {
                 "hue": 0.0, "saturation": 0.0, "lightness": 0.0}},
             "exposure": {"kind": "exposure", "exposure": {"exposure": 0.0, "offset": 0.0, "gamma": 1.0}},
+            "brightness_contrast": {"kind": "brightness_contrast", "brightness_contrast": {
+                "brightness": 0.0, "contrast": 0.0}},
             "vibrance": {"kind": "vibrance", "vibrance": {"vibrance": 0.0, "saturation": 0.0}},
             "invert": {"kind": "invert"},
             "threshold": {"kind": "threshold", "threshold": 128},
@@ -1908,16 +2284,25 @@ class CreativeSystem(QMainWindow):
             "selective_color": {"kind": "selective_color", "selective_color": {"channels": {}}},
             "luminosity_mask": {"kind": "luminosity_mask", "luminosity_mask": {
                 "mode": "lights", "amount": 1.0, "feather": 0.15, "invert": False}},
+            "gradient_map": {"kind": "gradient_map", "gradient_map": {
+                "reverse": False, "method": "Lnr ", "stops": [
+                    {"location": 0.0, "midpoint": 0.5, "color": [0, 0, 0]},
+                    {"location": 1.0, "midpoint": 0.5, "color": [255, 255, 255]}]}},
+            "color_lookup": {"kind": "color_lookup", "color_lookup": _identity_lut()},
         }
         spec = defaults.get(str(kind))
         if spec is None:
             return
         self.canvas.begin_history_action(structure_only=True)
-        self.canvas.document.add_adjustment_layer(kind, spec=spec)
+        names = {"gradient_map": "Courbe de transfert de dégradé",
+                 "color_lookup": "Correspondance de couleur"}
+        self.canvas.document.add_adjustment_layer(kind, names.get(str(kind)), spec=spec)
         self.canvas.commit_history_action()
         self.canvas._projection_tile_signatures.clear()
         self.refresh_layers()
         self.canvas.update()
+        if kind in names:
+            self.edit_adjustment_layer()
 
     def edit_adjustment_layer(self) -> None:
         layer = self.canvas.document.get_active_layer()
@@ -1934,6 +2319,9 @@ class CreativeSystem(QMainWindow):
             self.canvas.begin_history_action(structure_only=True)
 
     def _end_adjustment_edit(self) -> None:
+        # Do not leave the last slider value waiting for the frame coalescer:
+        # closing a drag must commit exactly what the user sees.
+        self._flush_adjustment_preview()
         if getattr(self, "_adjustment_edit_active", False):
             self._adjustment_edit_active = False
             self.canvas.commit_history_action()
@@ -1943,7 +2331,32 @@ class CreativeSystem(QMainWindow):
         if layer is None or getattr(layer, "layer_kind", "raster") != "adjustment":
             return
         self._begin_adjustment_edit()
-        layer.adjustment = dict(spec)
+        # Spinboxes can emit dozens of values per second.  Recomposition is
+        # expensive on dense documents, so publish at most once per rendered
+        # frame while retaining the most recent value.
+        self._pending_adjustment_spec = dict(spec)
+        self._pending_adjustment_layer_id = layer.id
+        timer = getattr(self, "_adjustment_preview_timer", None)
+        if timer is None:
+            timer = QTimer(self)
+            timer.setSingleShot(True)
+            timer.setInterval(16)
+            timer.timeout.connect(self._flush_adjustment_preview)
+            self._adjustment_preview_timer = timer
+        if not timer.isActive():
+            timer.start()
+
+    def _flush_adjustment_preview(self) -> None:
+        spec = getattr(self, "_pending_adjustment_spec", None)
+        layer_id = getattr(self, "_pending_adjustment_layer_id", None)
+        self._pending_adjustment_spec = None
+        self._pending_adjustment_layer_id = None
+        if spec is None or layer_id is None:
+            return
+        layer = next((item for item in self.canvas.document.layers if item.id == layer_id), None)
+        if layer is None or getattr(layer, "layer_kind", "raster") != "adjustment":
+            return
+        layer.adjustment = spec
         self.canvas._invalidate_projection_cache()
         self.canvas.update()
 

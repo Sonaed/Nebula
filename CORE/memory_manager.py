@@ -7,6 +7,7 @@ import os
 import tempfile
 import shutil
 import atexit
+import ctypes
 
 from PySide6.QtCore import QObject, QSettings, QTimer, Signal
 from PySide6.QtWidgets import QLabel
@@ -57,6 +58,22 @@ def _default_memory_limit_mb() -> int:
     if physical <= 0:
         return 2048
     return max(512, min(49152, physical * 60 // 100))
+
+
+MEMORY_PROFILES = {
+    "Prudent": 35,
+    "Équilibré": 60,
+    "Performance": 75,
+}
+
+
+def recommended_limit_mb(profile: str = "Équilibré") -> int:
+    """Return a safe RAM budget from physical memory for a named profile."""
+    percentage = MEMORY_PROFILES.get(str(profile), MEMORY_PROFILES["Équilibré"])
+    physical = _physical_memory_mb()
+    if physical <= 0:
+        return _default_memory_limit_mb()
+    return max(512, min(65536, physical * percentage // 100))
 
 
 def _process_resident_bytes() -> int:
@@ -121,6 +138,8 @@ class MemoryManager(QObject):
             "performance/memory_limit_mb", _default_memory_limit_mb(), int
         )))
         self._pressure_active = False
+        self._budget_warning_visible = False
+        self._status_bar = status_bar
         self._swap_dir = _create_swap_directory()
         configured_scratch = str(self.settings.value("performance/scratch_directory", "") or "").strip()
         self._scratch_dir = Path(configured_scratch).expanduser() if configured_scratch else self._swap_dir / "tiles"
@@ -149,7 +168,8 @@ class MemoryManager(QObject):
         self.label = QLabel("RAM — | GPU —")
         self.label.setObjectName("memoryUsageIndicator")
         self.label.setToolTip(
-            "Mémoire du processus CreativeSystem et estimation de la mémoire des textures GPU"
+            "Budget mémoire Nebula : avertissement puis éviction des tuiles vers le disque.\n"
+            "La limite est configurable dans Préférences > Performance."
         )
         status_bar.addPermanentWidget(self.label)
         self.timer = QTimer(self)
@@ -163,6 +183,13 @@ class MemoryManager(QObject):
         self.settings.setValue("performance/memory_limit_mb", self.limit_mb)
         self.refresh()
 
+    def set_memory_profile(self, profile: str) -> None:
+        """Apply a named profile; Manuel deliberately preserves the explicit limit."""
+        profile = str(profile)
+        self.settings.setValue("performance/memory_profile", profile)
+        if profile != "Manuel":
+            self.set_limit_mb(recommended_limit_mb(profile))
+
     def set_scratch_directory(self, directory: str) -> None:
         value = str(directory or "").strip()
         self.settings.setValue("performance/scratch_directory", value)
@@ -175,41 +202,56 @@ class MemoryManager(QObject):
         self._configure_tile_scratch()
 
     def _configure_tile_scratch(self) -> None:
-        layers = tuple(getattr(getattr(self.canvas, "document", None), "layers", ()))
-        signature = (tuple(layer.id for layer in layers), str(self._scratch_dir), self.limit_mb)
+        document = getattr(self.canvas, "document", None)
+        layers = tuple(getattr(document, "layers", ()))
+        selection_store = getattr(getattr(document, "selection", None), "tile_store", None)
+        stores = [(str(layer.id), layer.tile_store) for layer in layers]
+        if selection_store is not None:
+            stores.append(("selection", selection_store))
+        for group in getattr(document, "layer_groups", ()):
+            if getattr(group, "alpha_mask_store", None) is not None:
+                stores.append((f"group-{group.id}", group.alpha_mask_store))
+        signature = (tuple(identifier for identifier, _store in stores), str(self._scratch_dir), self.limit_mb)
         if signature == self._scratch_configuration:
             return
         try:
-            for layer in layers:
-                layer.tile_store.set_scratch_directory(self._scratch_dir / layer.id)
+            for identifier, store in stores:
+                store.set_scratch_directory(self._scratch_dir / identifier)
         except OSError:
             # The configured root can exist while its per-layer children are
             # no longer writable (removed drive, read-only mount, etc.).
             self._scratch_dir = self._swap_dir / "tiles"
             self._scratch_dir.mkdir(parents=True, exist_ok=True)
-            for layer in layers:
-                layer.tile_store.set_scratch_directory(self._scratch_dir / layer.id)
+            for identifier, store in stores:
+                store.set_scratch_directory(self._scratch_dir / identifier)
 
         self._scratch_configuration = signature
         # La composition des calques a change : la file reference peut-etre
         # des stores qui n'existent plus.
         self._eviction_queue.clear()
-        occupied = [max(0, int(layer.tile_store.allocated_bytes())) for layer in layers]
+        occupied = [max(0, int(store.allocated_bytes())) for _identifier, store in stores]
         total_occupied = sum(occupied)
         total_budget = self.limit_mb * 1024 * 1024
-        for index, layer in enumerate(layers):
+        for index, (_identifier, store) in enumerate(stores):
             if total_occupied:
                 share = total_budget * occupied[index] // total_occupied
             else:
-                share = total_budget // max(1, len(layers))
-            layer.tile_store.set_memory_limit(max(1, share))
+                share = total_budget // max(1, len(stores))
+            store.set_memory_limit(max(1, share))
 
     def snapshot(self) -> MemorySnapshot:
         document = self.canvas.document
         document_bytes = sum(layer.tile_store.allocated_bytes()
                              + _image_bytes(getattr(layer, "_image_cache", None))
                              for layer in document.layers)
-        document_bytes += _image_bytes(document.selection.image)
+        selection_store = getattr(document.selection, "tile_store", None)
+        if selection_store is not None:
+            document_bytes += max(0, int(selection_store.allocated_bytes()))
+        else:
+            document_bytes += _image_bytes(document.selection.image)
+        document_bytes += sum(max(0, int(group.alpha_mask_store.allocated_bytes()))
+                              for group in getattr(document, "layer_groups", ())
+                              if getattr(group, "alpha_mask_store", None) is not None)
         for image in getattr(document, "reference_images", ()):
             document_bytes += _image_bytes(getattr(image, "image", image))
 
@@ -249,8 +291,12 @@ class MemoryManager(QObject):
         renderer = getattr(self.canvas, "gpu_renderer", None)
         gpu_bytes = 0
         if renderer is not None:
-            gpu_bytes = sum(max(0, int(item.width)) * max(0, int(item.height)) * 4
-                            for item in renderer.textures.values())
+            estimator = getattr(renderer, "estimated_texture_bytes", None)
+            if callable(estimator):
+                gpu_bytes = max(0, int(estimator()))
+            else:
+                gpu_bytes = sum(max(0, int(item.width)) * max(0, int(item.height)) * 4
+                                for item in renderer.textures.values())
 
         return MemorySnapshot(
             process_bytes=_process_resident_bytes(),
@@ -267,7 +313,16 @@ class MemoryManager(QObject):
         process_mb = snapshot.process_bytes / MIB
         limit_mb = snapshot.limit_bytes / MIB
         gpu_mb = snapshot.gpu_texture_bytes / MIB
-        self.label.setText(f"RAM {process_mb:.0f}/{limit_mb:.0f} MB · GPU {gpu_mb:.0f} MB")
+        cache_policy = getattr(self.canvas, "tile_cache_manager", None)
+        tile_suffix = ""
+        if cache_policy is not None:
+            live = cache_policy.snapshot()
+            tile_suffix = f" · T {live['visible']}v/{live['prefetch']}p"
+        self.label.setText(f"RAM {process_mb:.0f}/{limit_mb:.0f} MB · GPU {gpu_mb:.0f} MB{tile_suffix}")
+        over_budget = snapshot.process_bytes > snapshot.limit_bytes
+        self.label.setProperty("warning", over_budget)
+        self.label.style().unpolish(self.label)
+        self.label.style().polish(self.label)
         self.label.setToolTip(
             "RAM du processus (RSS): "
             f"{process_mb:.1f} MB / {limit_mb:.0f} MB\n"
@@ -276,10 +331,24 @@ class MemoryManager(QObject):
             f"Cache composition: {snapshot.composition_cache_bytes / MIB:.1f} MB\n"
             f"Textures GPU estimées: {gpu_mb:.1f} MB"
         )
-        if snapshot.process_bytes > snapshot.limit_bytes:
+        if cache_policy is not None:
+            stats = cache_policy.snapshot()
+            self.label.setToolTip(self.label.toolTip() + "\n"
+                f"Tuiles — visibles: {stats['visible']} · récentes: {stats['recent']} · "
+                f"préchargées: {stats['prefetch']} · froides: {stats['cold']} · "
+                f"requêtes: {stats['requests']} / prêtes: {stats['ready']}")
+        if over_budget:
+            if not self._budget_warning_visible:
+                self._status_bar.showMessage(
+                    f"Budget mémoire dépassé ({process_mb:.0f}/{limit_mb:.0f} MB) : "
+                    "éviction des tuiles et de l’historique vers le disque…", 12000)
+            self._budget_warning_visible = True
             self._pressure_active = True
             self._relieve_pressure(snapshot)
         elif snapshot.process_bytes < snapshot.limit_bytes * 0.85:
+            if self._budget_warning_visible:
+                self._status_bar.showMessage("Mémoire Nebula revenue sous le budget", 5000)
+            self._budget_warning_visible = False
             self._pressure_active = False
             self._eviction_queue.clear()
 
@@ -436,6 +505,18 @@ class MemoryManager(QObject):
         self._swap_executor.shutdown(wait=False, cancel_futures=True)
         if not self._swap_in_progress:
             shutil.rmtree(self._swap_dir, ignore_errors=True)
+
+    @staticmethod
+    def trim_allocator() -> None:
+        """Return freed native tile pages to Linux when the allocator supports it."""
+        try:
+            libc = ctypes.CDLL("libc.so.6")
+            trim = libc.malloc_trim
+            trim.argtypes = [ctypes.c_size_t]
+            trim.restype = ctypes.c_int
+            trim(0)
+        except (AttributeError, OSError):
+            pass
 
     @property
     def last_snapshot(self) -> MemorySnapshot:

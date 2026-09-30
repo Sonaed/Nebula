@@ -64,7 +64,8 @@ from DOCUMENTS.selection import SelectionOperation
 from CANVAS.free_transform import FreeTransformSession, CURSORS as FREE_TRANSFORM_CURSORS
 from CORE.native_bridge import native_selection_bounds
 from DOCUMENTS.blend_modes import (has_non_normal, composite_layers, apply_clipped_adjustment,
-                                   adjustment_coverage, hide_clipped_over_hidden_base)
+                                   adjustment_coverage, hide_clipped_over_hidden_base,
+                                   adjustment_entry, resolve_stack)
 from DOCUMENTS.adjustments import (AdjustmentLayerSpec, CurvesAdjustment,
                                    LevelsAdjustment, HueSaturationAdjustment,
                                    ExposureAdjustment, VibranceAdjustment,
@@ -74,6 +75,7 @@ from DOCUMENTS.adjustments import (AdjustmentLayerSpec, CurvesAdjustment,
 from UI.qt_blend_modes import composition_mode
 from CANVAS.tile_history import TileHistory
 from CORE.projection_worker import ProjectionWorker, ProjectionLayer
+from CORE.tile_cache_manager import TileCacheManager
 from CORE.native_bridge import (clone_image_native, draw_text_native,
                                 apply_alpha_mask_native, fill_image_native,
                                 normalize_alpha_mask_native,
@@ -96,6 +98,7 @@ class Canvas(QOpenGLWidget):
     view_flip_changed = Signal(bool, bool)
     symmetry_changed = Signal(bool, bool)
     history_restored = Signal()
+    history_operation_deferred = Signal(str)
     performance_warning = Signal(str)
     # Emitted with the painted-on layer's id whenever a stroke finishes.
     # LayersDock.invalidate_thumb_cache() existed already (its own docstring
@@ -135,6 +138,10 @@ class Canvas(QOpenGLWidget):
         self._projection_tile_signatures: dict[tuple[int, int], tuple] = {}
         self._projection_tile_generation: dict[tuple[int, int], int] = {}
         self._projection_ready_tiles: set[tuple[int, int]] = set()
+        self._projection_pending_images = {}
+        self._projection_publish_keys = set()
+        self._projection_waiting_visible = set()
+        self._projection_display_ready = False
         self._editing_alpha_mask_layer_id: str | None = None
         self._editing_alpha_mask_image: QImage | None = None
         self._async_brush_handle = None
@@ -160,6 +167,11 @@ class Canvas(QOpenGLWidget):
         # the margin is bounded, so this cannot turn a large document into a
         # full-document projection cache.
         self._projection_prefetch_margin_tiles = 1
+        self.tile_cache_manager = TileCacheManager()
+        # View offset is initialized later with the rest of the navigation
+        # state; origin is the correct initial prediction anchor.
+        self._last_view_offset = QPointF()
+        self._tile_loading_since: dict[tuple[int, int], float] = {}
         self._projection_cache_stats = {
             "visible_hits": 0, "visible_misses": 0,
             "prefetch_hits": 0, "prefetch_misses": 0,
@@ -593,6 +605,8 @@ class Canvas(QOpenGLWidget):
         """
         rgba = [color.red(), color.green(), color.blue(), color.alpha()]
         self.set_brush_setting("color", rgba)
+        if getattr(self, "_alt_return_tool", None) is not None:
+            self._alt_picker_sampled = True
         preferences = QSettings("CreativeSystem", "CreativeSystem")
         preferences.setValue(
             "brush/tool_settings/brush",
@@ -814,6 +828,7 @@ class Canvas(QOpenGLWidget):
         settings = self.brush_settings.snapshot()
         image = image if image.format() == QImage.Format.Format_RGBA8888 else image.convertToFormat(QImage.Format.Format_RGBA8888)
         dirty = self._brush_dirty_rect(start, end)
+        selection_before = self._selection_edit_snapshot(image, dirty)
         layer = self.get_active_layer()
         if layer is not None:
             self.tile_history.capture_before(layer, dirty)
@@ -841,6 +856,7 @@ class Canvas(QOpenGLWidget):
             # l'édition réelle : les outils de filtre appartiennent au moteur
             # CreativeCore comme les autres outils de peinture.
             return image
+        image = self._restore_selection_after_edit(image, selection_before, dirty)
         image = self._restore_locked_alpha(image, dirty) or image
         if layer is not None:
             # `layer.image = image` (the compatibility setter) writes through
@@ -937,6 +953,17 @@ class Canvas(QOpenGLWidget):
             ))
 
         for segment_start, segment_end, tilt_start, tilt_end in segments:
+            segment_dirty = self._brush_dirty_rect(segment_start, segment_end)
+            # A selection is an edit constraint, not merely an overlay. Keep
+            # a bounded pre-dab snapshot so the native brush can remain the
+            # fast rasterizer while its result is composited back through the
+            # selection alpha (including feathered edges).
+            selection_before = self._selection_edit_snapshot(image, segment_dirty)
+            if layer is not None:
+                if self._editing_alpha_mask_layer_id == layer.id:
+                    self.tile_history.capture_mask_before(layer, segment_dirty)
+                else:
+                    self.tile_history.capture_before(layer, segment_dirty)
             offset = QPoint(clone_offset) if clone_offset is not None else QPoint()
             if segment_start.x() != start.x():
                 offset.setX(-offset.x())
@@ -953,6 +980,7 @@ class Canvas(QOpenGLWidget):
             )
             if image is None:
                 return None
+            image = self._restore_selection_after_edit(image, selection_before, segment_dirty)
         return image
 
     def _cpp_smooth_native_point(self, position: QPoint) -> QPointF:
@@ -1477,6 +1505,21 @@ class Canvas(QOpenGLWidget):
     ) -> None:
 
         self._cancel_async_brush()
+        # Reject callbacks and cached pixels belonging to the previous document,
+        # even when the new document has exactly the same dimensions.
+        self._projection_tile_generation.clear()
+        self._projection_tile_signatures.clear()
+        self._projection_ready_tiles.clear()
+        self._projection_pending_images.clear()
+        self.__dict__.pop('_projection_result_cache', None)
+        self.__dict__.pop('_projection_checked_state', None)
+        self._projection_publish_keys.clear()
+        self._projection_waiting_visible.clear()
+        self._projection_display_ready = False
+        self._projection_scan_pending = True
+        self._frame_index_cache = None
+        self.projection_store.clear_resident()
+        self.projection_store.resize(document.width, document.height)
         self.document = document
         self.selected_reference_id = None
         self.reference_drag_id = None
@@ -1670,6 +1713,49 @@ class Canvas(QOpenGLWidget):
                 return image
             return self._restore_alpha_from_history(image, layer, rect)
         return self._restore_alpha_from(image, self._alpha_lock_snapshot, rect)
+
+    def _selection_edit_snapshot(self, image: QImage, rect: QRect) -> QImage | None:
+        """Return a small pre-edit snapshot only when selection constrains it."""
+        selection = self.document.selection
+        if selection.is_empty():
+            return None
+        area = rect.intersected(image.rect())
+        if area.isEmpty() or not area.intersects(selection.bounds()):
+            return image.copy(area) if not area.isEmpty() else None
+        return image.copy(area)
+
+    def _restore_selection_after_edit(self, image: QImage, before: QImage | None,
+                                      rect: QRect) -> QImage:
+        """Composite a bounded edit through the active selection alpha.
+
+        The brush engine intentionally receives a normal raster.  Applying a
+        mask directly to that raster would erase existing pixels outside the
+        selection, so this instead overlays the masked *changed* area on the
+        captured pre-edit pixels.  It preserves all outside pixels and gives
+        feathered selections their expected partial dab.
+        """
+        if before is None:
+            return image
+        area = rect.intersected(image.rect())
+        if area.isEmpty() or before.size() != area.size():
+            return image
+        selection = self.document.selection
+        if selection.is_empty():
+            return image
+        changed = image.copy(area).convertToFormat(QImage.Format.Format_RGBA8888)
+        mask = selection.image.copy(area).convertToFormat(QImage.Format.Format_ARGB32)
+        if changed.isNull() or mask.isNull() or not apply_alpha_mask_native(changed, mask):
+            return image
+        restored = before.convertToFormat(QImage.Format.Format_RGBA8888)
+        painter = QPainter(restored)
+        painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceOver)
+        painter.drawImage(0, 0, changed)
+        painter.end()
+        target = QPainter(image)
+        target.setCompositionMode(QPainter.CompositionMode.CompositionMode_Source)
+        target.drawImage(area.topLeft(), restored)
+        target.end()
+        return image
 
 
     def fit_document(
@@ -2156,6 +2242,12 @@ class Canvas(QOpenGLWidget):
             self.commit_history_action()
 
     def begin_stroke_history(self) -> None:
+        # TileHistory rejects nested transactions.  Without an explicit
+        # boundary here, a stroke begun while a layer action is still pending
+        # gets attached to that layer action and Ctrl+Z can remove the layer.
+        pending = self.tile_history._pending
+        if pending is not None and pending.get("mode") != "dirty":
+            self.commit_history_action()
         layer = self.get_active_layer()
         self._stroke_image_format = (
             layer.tile_store.image_format if layer is not None else None
@@ -2295,6 +2387,8 @@ class Canvas(QOpenGLWidget):
             # Keep the UI responsive during an active stroke/action. The queued
             # undo runs immediately after its transaction commits or cancels.
             self._deferred_undo_count += 1
+            if self._deferred_undo_count == 1:
+                self.history_operation_deferred.emit("Annulation en attente")
             return
 
         if self.tile_history.undo(self.document):
@@ -2347,6 +2441,9 @@ class Canvas(QOpenGLWidget):
 
     def _invalidate_projection_cache(self) -> None:
         """Reject in-flight native frames that were captured before undo/redo."""
+        self._projection_idle_key = None
+        self.__dict__.pop('_projection_result_cache', None)
+        self.__dict__.pop('_projection_checked_state', None)
         stale_keys = (set(self.projection_store.occupied_keys)
                       | set(self._projection_tile_generation)
                       | set(self._projection_tile_signatures))
@@ -2354,6 +2451,7 @@ class Canvas(QOpenGLWidget):
             self._projection_tile_generation[key] = -1
             self._projection_tile_signatures.pop(key, None)
             self._projection_ready_tiles.discard(key)
+            self._projection_pending_images.pop(key, None)
 
     # =========================================================
     # TRANSFORMER
@@ -3321,6 +3419,15 @@ class Canvas(QOpenGLWidget):
 
         self._record_paint_start()
 
+        preview = getattr(self.document, "_display_preview", None)
+        if preview is not None and not preview.isNull():
+            loading = getattr(self.document, "_loading_preview", False)
+            if not loading and not self._projection_display_ready:
+                self._ensure_projection()
+            if loading or not self._projection_display_ready:
+                self._paint_cpu_fallback()
+                return
+
         # QOpenGLContext is already imported at the module level; no need to
         # re-import it on every paint call.
         context = (
@@ -3346,7 +3453,10 @@ class Canvas(QOpenGLWidget):
             self._paint_cpu_fallback()
             return
 
-        if has_non_normal(self.document) or self.document.layer_groups:
+        large_stack = (self.document.width * self.document.height >= 16_000_000
+                       and sum(layer.visible for layer in self.document.layers) >= 8)
+        if (has_non_normal(self.document) or self.document.layer_groups
+                or (large_stack and not self.gpu_instanced_stroke.active)):
             self._paint_gpu_projection()
             return
         # -----------------------------------------------------
@@ -3550,16 +3660,25 @@ class Canvas(QOpenGLWidget):
         # Any advanced document returns None and falls through to the exact
         # asynchronous CreativeCore projection below.
         composed_tiles = []
+        for index, layer in enumerate(self.document.layers):
+            self._commit_layer_cache_for_render(layer, index)
         # supports_cached() memoizes the (also non-trivial) structure check
         # against a document signature; the plain supports() staticmethod
         # this used to call re-ran that whole per-layer/per-group check from
         # scratch every single frame regardless of whether anything changed.
-        if GPU_SHADER_COMPOSITING_ENABLED and self.gpu_tile_compositor.supports_cached(self.document):
+        visible_keys = self.visible_document_tile_keys()
+        # The shader compositor retains only MAX_TILE_CACHE FBOs. Composing
+        # more before drawing evicts texture IDs still in composed_tiles and
+        # repeats all of that work next frame. Use the budgeted projection
+        # plus reduced overview for large viewports instead.
+        if (GPU_SHADER_COMPOSITING_ENABLED
+                and len(visible_keys) <= self.gpu_tile_compositor.MAX_TILE_CACHE
+                and self.gpu_tile_compositor.supports_cached(self.document)):
             # Both computed once for every tile this frame instead of once
             # per visible layer per tile - see GPUTileCompositor._static_signature
             # and compose_tile()'s `supports` parameter.
             static = self.gpu_tile_compositor._static_signature(self.document)
-            for tx, ty in self.visible_document_tile_keys():
+            for tx, ty in visible_keys:
                 texture_id = self.gpu_tile_compositor.compose_tile(self.document, tx, ty, static, True)
                 if texture_id is None:
                     composed_tiles = []
@@ -3584,19 +3703,120 @@ class Canvas(QOpenGLWidget):
         # Only advanced documents need the authoritative CPU projection.
         self._ensure_projection()
         self.gpu_renderer.prune_layers([self._gpu_projection_layer, *self.document.layers])
-        self.gpu_renderer.draw_layer(
-            self._gpu_projection_layer, self.document, float(self.width()),
-            float(self.height()), self.zoom, self.offset,
-            device_pixel_ratio=dpr,
-            view_rotation=self.view_rotation,
-            view_flip_x=self.view_flip_x,
-            view_flip_y=self.view_flip_y,
-        )
+        if not self._draw_projection_overview(dpr):
+            self.gpu_renderer.draw_layer(
+                self._gpu_projection_layer, self.document, float(self.width()),
+                float(self.height()), self.zoom, self.offset,
+                device_pixel_ratio=dpr,
+                view_rotation=self.view_rotation,
+                view_flip_x=self.view_flip_x,
+                view_flip_y=self.view_flip_y,
+            )
         gl.glDisable(0x0BE2)
         painter.endNativePainting()
         self.draw_view_overlays(painter)
+        self._draw_tile_loading_indicator(painter)
         self.draw_brush_cursor(painter)
         painter.end()
+
+    def _draw_tile_loading_indicator(self, painter: QPainter) -> None:
+        """Small, non-blocking feedback while old/proxy pixels cover a cold load."""
+        waiting = len(getattr(self, "_projection_waiting_visible", ()))
+        if not waiting:
+            return
+        text = "Chargement des tuiles…" if waiting > 1 else "Chargement de la tuile…"
+        painter.save()
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        box = QRectF(12, self.height() - 36, 180, 24)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QColor(15, 23, 42, 210))
+        painter.drawRoundedRect(box, 8, 8)
+        painter.setPen(QColor(203, 213, 225))
+        painter.setFont(QFont("Sans Serif", 9))
+        painter.drawText(box, Qt.AlignmentFlag.AlignCenter, text)
+        painter.restore()
+
+    def _draw_projection_overview(self, dpr: float) -> bool:
+        """Zoomed out: draw the projection as ONE reduced texture.
+
+        At fit-to-screen a 3000 px document is ~2600 projection tiles, i.e.
+        thousands of GL calls from Python every frame.  Below 50 % zoom the
+        tiles are instead reduced (power-of-two scale, so tile edges stay on
+        whole pixels) into a single texture that is updated only where a
+        projection tile changed, and drawn with one call.
+        """
+        import math
+        renderer = self.gpu_renderer
+        screen_scale = float(self.zoom) * float(dpr)
+        if screen_scale <= 0 or screen_scale > 0.5 or renderer.blitter is None:
+            return False
+        level = max(1, min(6, int(math.floor(math.log2(1.0 / screen_scale)))))
+        scale = 1.0 / (1 << level)
+        store = self.projection_store
+        width = max(1, math.ceil(self.document.width * scale))
+        height = max(1, math.ceil(self.document.height * scale))
+        identity = (id(self.document), level, width, height, id(store))
+        state = getattr(self, "_overview_state", None)
+        if state is None or state["identity"] != identity:
+            if state is not None:
+                try:
+                    state["texture"].destroy()
+                except RuntimeError:
+                    pass
+            image = QImage(width, height, QImage.Format.Format_RGBA8888_Premultiplied)
+            image.fill(0)
+            try:
+                texture = renderer._create_texture(image, tiled=True)
+            except RuntimeError:
+                return False
+            state = self._overview_state = {"identity": identity, "image": image,
+                                            "texture": texture, "versions": {}}
+        revisions = store.resident_revisions() or {}
+        versions = state["versions"]
+        changed = [key for key in self._projection_ready_tiles
+                   if versions.get(key) != revisions.get(key)]
+        if changed:
+            image = state["image"]
+            painter = QPainter(image)
+            painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_Source)
+            painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
+            left = top = 1 << 30
+            right = bottom = -1
+            for key in changed:
+                rect = store.tile_rect(*key)
+                try:
+                    tile = store.tile(*key)
+                except OSError:
+                    continue
+                x0, y0 = int(rect.x() * scale), int(rect.y() * scale)
+                x1 = min(width, math.ceil((rect.x() + rect.width()) * scale))
+                y1 = min(height, math.ceil((rect.y() + rect.height()) * scale))
+                if x1 <= x0 or y1 <= y0:
+                    continue
+                painter.drawImage(QRectF(x0, y0, x1 - x0, y1 - y0), tile)
+                versions[key] = revisions.get(key)
+                left, top = min(left, x0), min(top, y0)
+                right, bottom = max(right, x1), max(bottom, y1)
+            painter.end()
+            if right > left and bottom > top:
+                patch = image.copy(left, top, right - left, bottom - top)
+                if not renderer._upload_client_memory(state["texture"], patch, left, top):
+                    return False
+        target = QRectF(self.offset.x() * dpr, self.offset.y() * dpr,
+                        self.document.width * self.zoom * dpr,
+                        self.document.height * self.zoom * dpr)
+        viewport = QRectF(0, 0, self.width() * dpr, self.height() * dpr).toRect()
+        blitter = renderer.blitter
+        blitter.bind()
+        try:
+            blitter.setOpacity(1.0)
+            blitter.blit(int(state["texture"].textureId()),
+                         renderer._blit_view_transform(target, viewport, self.view_rotation,
+                                                       self.view_flip_x, self.view_flip_y),
+                         "top_left")
+        finally:
+            blitter.release()
+        return True
 
     def _paint_cpu_fallback(
         self
@@ -3636,6 +3856,17 @@ class Canvas(QOpenGLWidget):
             self.zoom,
             self.zoom
         )
+
+        preview = getattr(self.document, "_display_preview", None)
+        if (preview is not None and not preview.isNull()
+                and (getattr(self.document, "_loading_preview", False)
+                     or not self._projection_display_ready)):
+            painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
+            painter.drawImage(QRectF(0, 0, self.document.width, self.document.height), preview)
+            painter.restore()
+            self.draw_view_overlays(painter)
+            painter.end()
+            return
 
         # QOpenGLWidget may use the OpenGL paint engine for QPainter calls.
         # Several advanced composition modes are not consistently supported
@@ -3938,54 +4169,259 @@ class Canvas(QOpenGLWidget):
             self._projection_tile_signatures.clear()
             self._projection_tile_generation.clear()
             self._projection_ready_tiles.clear()
+            self._projection_pending_images.clear()
+            self._projection_display_ready = False
+        # An unchanged viewport needs no tile enumeration or signature scan.
+        # Pixel edits, masks, document structure and view changes all invalidate
+        # this key; scratch residency changes advance the same store counters.
+        def store_version(store):
+            return None if store is None else (id(store), getattr(store, "_mutation_count", None))
+        current_key = (
+            id(self.document), self.width(), self.height(), self.zoom,
+            self.offset.x(), self.offset.y(), self.view_rotation,
+            self.view_flip_x, self.view_flip_y, self._projection_prefetch_margin_tiles,
+            tuple((self._layer_static_signature(layer), store_version(layer.tile_store),
+                   store_version(getattr(layer, "alpha_mask_store", None)))
+                  for layer in self.document.layers), self._groups_static_signature())
+        self._projection_current_key = current_key
+        if (getattr(self, "_projection_idle_key", None) == current_key
+                and self._projection_display_ready
+                and not self._projection_scan_pending
+                and not self._projection_waiting_visible
+                and getattr(self, "_projection_idle_revision", None)
+                    == self.projection_store._mutation_count):
+            return
         visible_keys = self.visible_document_tile_keys()
-        keys = self.visible_document_tile_keys(self._projection_prefetch_margin_tiles)
+        self._projection_publish_keys = visible_keys
+        self._projection_waiting_visible = visible_keys - self._projection_ready_tiles
+        # Keep a recent projection behind the moving viewport. A newly exposed
+        # cold tile can therefore continue showing its former texture/overview
+        # while its authoritative scratch source is restored asynchronously.
+        pan_delta = (self.offset.x() - self._last_view_offset.x(),
+                     self.offset.y() - self._last_view_offset.y())
+        self._last_view_offset = QPointF(self.offset)
+        active = self.document.get_active_layer()
+        active_group = (self.document.group_for_layer(active.id) if active is not None else None)
+        # The active group's visible tiles are promoted to their own class;
+        # its isolated cache is consequently retained while the user edits it.
+        active_group_keys = visible_keys if active_group is not None else ()
+        desired = self.tile_cache_manager.update(visible_keys, pan_delta=pan_delta, zoom=self.zoom,
+                                                 active_group_keys=active_group_keys)
+        columns = (self.document.width + TILE_SIZE - 1) // TILE_SIZE
+        rows = (self.document.height + TILE_SIZE - 1) // TILE_SIZE
+        keys = {key for key in desired if 0 <= key[0] < columns and 0 <= key[1] < rows}
         known_keys = (self.projection_store.resident_keys()
                       | set(self._projection_tile_signatures)
                       | set(self._projection_tile_generation)
                       | self._projection_ready_tiles)
         for key in known_keys:
-            if key not in keys:
+            if key not in keys and not self.tile_cache_manager.should_retain(key):
                 self.projection_store.remove_resident_tile(*key)
                 self._projection_tile_signatures.pop(key, None)
                 self._projection_ready_tiles.discard(key)
                 self._projection_tile_generation.pop(key, None)
+                self._projection_pending_images.pop(key, None)
         visible_inputs = {}
         prefetch_inputs = {}
         # Computed once for the whole frame - see _projection_signature_for.
         layer_static = [self._layer_static_signature(layer) for layer in self.document.layers]
         groups_static = self._groups_static_signature()
+        # One native call per tile store per frame instead of one per layer per
+        # tile: with ~80 layers and ~2000 cached tiles the per-tile lookups
+        # alone cost seconds per frame.
+        # Nothing structural or pixel-wise changed since the last frame (the
+        # common case: idle repaint, cursor move, pan): reuse the previous
+        # index and skip every tile that already has an up-to-date signature.
+        def mutations(store):
+            return (id(store), getattr(store, "_mutation_count", None)) if store is not None else None
+        frame_state = (tuple(hash(static) for static in layer_static), hash(groups_static),
+                       tuple((mutations(layer.tile_store),
+                              mutations(getattr(layer, "alpha_mask_store", None)))
+                             for layer in self.document.layers))
+        cached = getattr(self, "_frame_index_cache", None)
+        unchanged = (cached is not None and cached[0] == frame_state
+                     and all(item[1] is not None for pair in frame_state[2] for item in pair
+                             if item is not None))
+        incremental = False
+        if unchanged:
+            _state, revision_maps, tile_signature = cached
+        elif (cached is not None and cached[0][0] == frame_state[0]
+              and cached[0][1] == frame_state[1] and len(cached[0][2]) == len(frame_state[2])
+              and all(old[0] is not None and new[0] is not None and old[0][0] == new[0][0]
+                      and (old[1] is None) == (new[1] is None)
+                      and (old[1] is None or old[1][0] == new[1][0])
+                      for old, new in zip(cached[0][2], frame_state[2]))):
+            # Only pixels changed (painting): re-read just the touched stores
+            # and invalidate just the tiles whose revisions moved.
+            old_state, old_maps, _old_signature = cached
+            revision_maps = list(old_maps)
+            dirty: set | None = set()
+            layers = self.document.layers
+            for index, (old_pair, new_pair) in enumerate(zip(old_state[2], frame_state[2])):
+                if old_pair == new_pair:
+                    continue
+                layer = layers[index]
+                colors = (self._store_revision_map(layer.tile_store)
+                          if old_pair[0] != new_pair[0] else old_maps[index][0])
+                masks = (self._store_revision_map(getattr(layer, "alpha_mask_store", None))
+                         if old_pair[1] != new_pair[1] else old_maps[index][1])
+                for before, after in ((old_maps[index][0], colors), (old_maps[index][1], masks)):
+                    if before is None or after is None:
+                        dirty = None
+                        break
+                    dirty.update(key for key in before.keys() | after.keys()
+                                 if before.get(key) != after.get(key))
+                if dirty is None:
+                    break
+                revision_maps[index] = (colors, masks)
+            if dirty is not None:
+                tile_signature = self._tile_signature_direct(layer_static, groups_static,
+                                                             revision_maps)
+                for key in dirty:
+                    self._projection_tile_signatures.pop(key, None)
+                self._frame_index_cache = (frame_state, revision_maps, tile_signature)
+                unchanged = incremental = True
+        if not unchanged:
+            revision_maps = [(self._store_revision_map(layer.tile_store),
+                              self._store_revision_map(getattr(layer, "alpha_mask_store", None)))
+                             for layer in self.document.layers]
+            tile_signature = self._tile_signature_index(layer_static, groups_static, revision_maps)
+            self._frame_index_cache = (frame_state, revision_maps, tile_signature)
         # Only actually needed by tiles that miss the cache below, so unlike
         # layer_static/groups_static above (checked against every tile, hit or
         # miss) this is built lazily - a frame where everything is already
         # cached (nothing being painted, just an idle repaint) should not pay
         # an O(groups + layers) cost it will never use. See _group_hierarchy.
         hierarchy = None
-        for tx, ty in keys:
+        known_signatures = self._projection_tile_signatures
+        # Never block the UI thread for long: tiles are recomputed within a
+        # per-frame time budget, on-screen tiles first; the rest continue on
+        # the next frames (the previous projection stays visible meanwhile).
+        import time as _time
+        started = _time.perf_counter()
+        budget = 0.018
+        more_work = False
+        ordered = [key for key in keys if key in visible_keys]
+        ordered += [key for key in keys if key not in visible_keys]
+        # Continue a budget-limited scan without rechecking its completed prefix.
+        checked_state = (current_key, frozenset(keys))
+        if getattr(self, '_projection_checked_state', None) != checked_state:
+            self._projection_checked_state = checked_state
+            self._projection_checked_keys = set()
+        checked = self._projection_checked_keys
+        from collections import OrderedDict
+        result_cache = self.__dict__.setdefault('_projection_result_cache', OrderedDict())
+        batch_context = None
+        batch_jobs = []
+        # A frame cut short by the time budget has only re-checked part of the
+        # tiles: until a full pass completes, stale signatures must not be
+        # trusted (otherwise tiles changed by e.g. hiding a layer stay stale).
+        if not unchanged:
+            self._projection_scan_pending = True
+        scan_pending = getattr(self, "_projection_scan_pending", False)
+        for tx, ty in ordered:
+            if more_work:
+                break
             key = (tx, ty)
-            signature = self._projection_signature_for(tx, ty, layer_static, groups_static)
+            if key in checked and key in known_signatures:
+                self._projection_cache_stats["visible_hits" if key in visible_keys else "prefetch_hits"] += 1
+                continue
+            if (unchanged and not scan_pending and tile_signature is not None
+                    and key in known_signatures):
+                self._projection_cache_stats["visible_hits" if key in visible_keys else "prefetch_hits"] += 1
+                continue            # same index as last frame: this tile is current
+            signature = (tile_signature(tx, ty) if tile_signature is not None else
+                         self._projection_signature_for(tx, ty, layer_static, groups_static,
+                                                        revision_maps))
             if self._projection_tile_signatures.get(key) == signature:
+                checked.add(key)
                 stats_key = "visible_hits" if key in visible_keys else "prefetch_hits"
                 self._projection_cache_stats[stats_key] += 1
                 continue
             stats_key = "visible_misses" if key in visible_keys else "prefetch_misses"
             self._projection_cache_stats[stats_key] += 1
+            self.tile_cache_manager.mark_request(key)
+            self._tile_loading_since.setdefault(key, _time.perf_counter())
+            self._projection_ready_tiles.discard(key)
+            if key in visible_keys:
+                self._projection_waiting_visible.add(key)
+            self._projection_pending_images.pop(key, None)
+            cache_key = (id(self.document), self.document.width, self.document.height, key, signature)
+            cached_image = result_cache.get(cache_key)
+            if cached_image is not None:
+                result_cache.move_to_end(cache_key)
+                self._projection_tile_generation.pop(key, None)
+                self._projection_tile_signatures[key] = signature
+                self._projection_pending_images[key] = cached_image
+                self._projection_ready_tiles.add(key)
+                self.tile_cache_manager.mark_ready(key)
+                self._tile_loading_since.pop(key, None)
+                self._projection_waiting_visible.discard(key)
+                checked.add(key)
+                continue
             rect = self.projection_store.tile_rect(tx, ty)
             if rect.isEmpty():
                 continue
             rect = self.projection_store.tile_rect(tx, ty)
             if hierarchy is None:
                 hierarchy = self._group_hierarchy()
-            tile_layers, missing_scratch = self._tile_projection_layers(tx, ty, rect, hierarchy)
-            if missing_scratch:
-                continue
-            # The native worker is FIFO.  Submit the viewport first so a
-            # quick pan never lets speculative work delay what is on screen.
-            target = visible_inputs if key in visible_keys else prefetch_inputs
-            target[key] = (rect.width(), rect.height(), tile_layers)
-            self._projection_tile_signatures[key] = signature
-            self._projection_ready_tiles.discard(key)
+            batch_program = None
+            if batch_context is None:
+                batch_context = self._native_batch_context(hierarchy, frame_state)
+            if batch_context:
+                batch_program = self._native_tile_program(tx, ty, batch_context, revision_maps)
+            if batch_program is not None:
+                program, missing_scratch = batch_program
+                if missing_scratch:
+                    continue
+                batch_jobs.append((key, rect, signature, program))
+                if len(batch_jobs) >= 384:
+                    more_work = True
+            else:
+                native = self._native_tile_image(tx, ty, rect, hierarchy, revision_maps)
+                if native is not None:
+                    image, missing_scratch = native
+                    tile_layers = ([] if image is None else
+                                   [ProjectionLayer(image, True, 1.0, "normal", {})])
+                else:
+                    tile_layers, missing_scratch = self._tile_projection_layers(tx, ty, rect, hierarchy)
+                if missing_scratch:
+                    continue
+                # The native worker is FIFO.  Submit the viewport first so a
+                # quick pan never lets speculative work delay what is on screen.
+                target = visible_inputs if key in visible_keys else prefetch_inputs
+                target[key] = (rect.width(), rect.height(), tile_layers)
+                self._projection_tile_signatures[key] = signature
+                self._projection_ready_tiles.discard(key)
+            if _time.perf_counter() - started > budget:
+                more_work = True
+        if batch_jobs:
+            images = self._compose_native_batch(batch_context, batch_jobs)
+            for (key, rect, signature, _program), image in zip(batch_jobs, images):
+                if image is None:
+                    continue
+                # The native stack batch already produced the final pixels.
+                # Do not run a second asynchronous normal-layer composition.
+                self._projection_tile_generation.pop(key, None)
+                self._projection_tile_signatures[key] = signature
+                self._projection_pending_images[key] = image
+                self._projection_ready_tiles.add(key)
+                self.tile_cache_manager.mark_ready(key)
+                self._tile_loading_since.pop(key, None)
+                self._projection_waiting_visible.discard(key)
+                checked.add(key)
+                cache_key = (id(self.document), self.document.width, self.document.height, key, signature)
+                result_cache[cache_key] = image
+                result_cache.move_to_end(cache_key)
+                # At most 128 MiB of 64x64 ARGB tile pixels, independent of canvas size.
+                while len(result_cache) > 8192:
+                    result_cache.popitem(last=False)
+        if more_work:
+            QTimer.singleShot(0, self.update)
+        else:
+            self._projection_scan_pending = False
         if not visible_inputs and not prefetch_inputs:
+            self._publish_projection_frame()
             return
         for inputs in (visible_inputs, prefetch_inputs):
             if not inputs:
@@ -3993,6 +4429,145 @@ class Canvas(QOpenGLWidget):
             generation = self.projection_worker.request(inputs)
             for key in inputs:
                 self._projection_tile_generation[key] = generation
+
+    def _native_batch_context(self, hierarchy, frame_state):
+        """(template, batch function, positions) for this frame, or False."""
+        from CORE.native_bridge import load_creative_core
+        from DOCUMENTS.stack_program import build_stack_template, native_batch_function
+        function = native_batch_function(load_creative_core())
+        if function is None:
+            return False
+        structure = (frame_state[0], frame_state[1], len(self.document.layers))
+        cached = getattr(self, "_stack_template_cache", None)
+        if cached is not None and cached[0] == structure:
+            template = cached[1]
+        else:
+            template = build_stack_template(self.document, hierarchy)
+            self._stack_template_cache = (structure, template)
+        if template is None:
+            return False
+        return (template, function, hierarchy[3])
+
+    def _native_tile_program(self, tx: int, ty: int, context, revision_maps):
+        """(program, pending) for one tile from the frame's template."""
+        template, _function, positions = context
+        key = (tx, ty)
+        maps_ok = revision_maps is not None and len(revision_maps) == len(self.document.layers)
+
+        def fetch(store, revisions):
+            if revisions is not None and key not in revisions:
+                return None, False
+            if not store.has_tile(tx, ty):
+                return None, False
+            if not store.tile_is_resident(tx, ty):
+                store.request_tile_async(tx, ty, self._on_scratch_tile_ready)
+                return None, True
+            return store.tile(tx, ty), False
+
+        def layer_image(layer):
+            return fetch(layer.tile_store, revision_maps[positions[layer.id]][0] if maps_ok else None)
+
+        def layer_mask(layer):
+            return fetch(layer.alpha_mask_store,
+                         revision_maps[positions[layer.id]][1] if maps_ok else None)
+
+        program = template.instantiate(layer_image, layer_mask)
+        return program, program.pending
+
+    def _compose_native_batch(self, context, jobs):
+        """Compose every queued tile in one parallel CreativeCore call."""
+        from CORE.native_bridge import qimage_pointer
+        from DOCUMENTS.stack_program import compose_batch
+        _template, function, _positions = context
+        pointers = []
+
+        def pixels_of(image):
+            fmt = image.format()
+            if fmt == QImage.Format.Format_ARGB32:
+                code = 0
+            elif fmt == QImage.Format.Format_RGBA8888:
+                code = 1
+            else:
+                return None
+            pointer = qimage_pointer(image)
+            pointers.append(pointer)
+            return ctypes.cast(pointer, ctypes.c_void_p).value, image.bytesPerLine(), code
+
+        def new_target(width, height):
+            image = QImage(width, height, QImage.Format.Format_ARGB32)
+            pointer = qimage_pointer(image)
+            pointers.append(pointer)
+            return image, ctypes.cast(pointer, ctypes.c_void_p).value, image.bytesPerLine()
+
+        images = compose_batch([(program, rect.width(), rect.height())
+                                for _key, rect, _signature, program in jobs],
+                               function, pixels_of, new_target)
+        return images if images is not None else [None] * len(jobs)
+
+    def _native_tile_image(self, tx: int, ty: int, rect: QRect, hierarchy, revision_maps):
+        """Compose one projection tile in a single CreativeCore call.
+
+        Returns None when the document needs the Python path (old bridge,
+        layer effects, non-LUT adjustments), else (image | None, pending).
+        """
+        from CORE.native_bridge import load_creative_core, qimage_pointer
+        from DOCUMENTS.stack_program import (build_stack_program, compose_program,
+                                             native_stack_function)
+        function = native_stack_function(load_creative_core())
+        if function is None:
+            return None
+        key = (tx, ty)
+        positions = hierarchy[3]
+        maps_ok = revision_maps is not None and len(revision_maps) == len(self.document.layers)
+
+        def fetch(store, revisions):
+            if revisions is not None and key not in revisions:
+                return None, False
+            if not store.has_tile(tx, ty):
+                return None, False
+            if not store.tile_is_resident(tx, ty):
+                store.request_tile_async(tx, ty, self._on_scratch_tile_ready)
+                return None, True
+            return store.tile(tx, ty), False
+
+        def layer_image(layer):
+            colors = revision_maps[positions[layer.id]][0] if maps_ok else None
+            return fetch(layer.tile_store, colors)
+
+        def layer_mask(layer):
+            masks = revision_maps[positions[layer.id]][1] if maps_ok else None
+            return fetch(layer.alpha_mask_store, masks)
+
+        program = build_stack_program(self.document, layer_image, layer_mask, hierarchy)
+        if program is None:
+            return None
+        if program.pending:
+            return None, True
+        pointers = []
+
+        def pixels_of(image):
+            fmt = image.format()
+            if fmt == QImage.Format.Format_ARGB32:
+                code = 0
+            elif fmt == QImage.Format.Format_RGBA8888:
+                code = 1
+            else:
+                return None
+            pointer = qimage_pointer(image)
+            pointers.append(pointer)
+            return ctypes.cast(pointer, ctypes.c_void_p).value, image.bytesPerLine(), code
+
+        def new_target(width, height):
+            image = QImage(width, height, QImage.Format.Format_ARGB32)
+            pointer = qimage_pointer(image)
+            pointers.append(pointer)
+            return image, ctypes.cast(pointer, ctypes.c_void_p).value, image.bytesPerLine()
+
+        image = compose_program(program, rect.width(), rect.height(), function, pixels_of,
+                                new_target)
+        if image is None:
+            return None
+        return image, False
 
     def _group_hierarchy(self) -> tuple:
         """Structural bookkeeping around groups that never varies by tile.
@@ -4038,80 +4613,17 @@ class Canvas(QOpenGLWidget):
                 raise ValueError("Les groupes doivent contenir une plage contiguë")
             return result
 
-        def adjustment_spec(layer):
-            value = getattr(layer, "adjustment", None)
-            if not isinstance(value, dict):
-                return None
-            curves = value.get("curves", {}) or {}
-            levels = value.get("levels", {}) or {}
-            hsl = value.get("hue_saturation", {}) or {}
-            exposure = value.get("exposure", {}) or {}
-            vibrance = value.get("vibrance", {}) or {}
-            balance = value.get("color_balance", {}) or {}
-            parametric = value.get("parametric_curves", {}) or {}
-            selective = value.get("selective_color", {}) or {}
-            luminosity = value.get("luminosity_mask", {}) or {}
-            return AdjustmentLayerSpec(
-                kind=str(value.get("kind", "")),
-                curves=CurvesAdjustment(tuple(tuple(point) for point in curves.get(
-                    "points", ((0, 0), (255, 255))))),
-                levels=LevelsAdjustment(**{key: levels[key] for key in (
-                    "black", "white", "gamma", "output_black", "output_white") if key in levels}),
-                hue_saturation=HueSaturationAdjustment(**{key: hsl[key] for key in (
-                    "hue", "saturation", "lightness") if key in hsl}),
-                exposure=ExposureAdjustment(**{key: exposure[key] for key in (
-                    "exposure", "offset", "gamma") if key in exposure}),
-                vibrance=VibranceAdjustment(**{key: vibrance[key] for key in (
-                    "vibrance", "saturation") if key in vibrance}),
-                color_balance=ColorBalanceAdjustment(**{
-                    key: tuple(balance[key]) for key in ("shadows", "midtones", "highlights")
-                    if key in balance and isinstance(balance[key], (list, tuple)) and len(balance[key]) == 3}),
-                threshold=int(value.get("threshold", 128)),
-                posterize=int(value.get("posterize", 4)),
-                parametric_curves=ParametricCurvesAdjustment(**{key: parametric[key] for key in (
-                    "black", "shadows", "midtones", "highlights", "white") if key in parametric}),
-                selective_color=SelectiveColorAdjustment(channels={str(key): tuple(values) for key, values in
-                    dict(selective.get("channels", {})).items() if isinstance(values, (list, tuple)) and len(values) == 4}),
-                luminosity_mask=LuminosityMaskAdjustment(**{key: luminosity[key] for key in (
-                    "mode", "amount", "feather", "invert") if key in luminosity}),
-            )
-
-        def apply_adjustment_to_tiles(tiles, layer, base_visible):
-            """Return (entries, pending); an adjustment honours its mask and opacity."""
-            if not getattr(layer, "visible", True):
-                base_visible[0] = False
-                return tiles, False
-            clipping = bool(getattr(layer, "clipping", False))
-            if clipping and not base_visible[0]:
-                return tiles, False
-            spec = adjustment_spec(layer)
-            if spec is None:
-                return tiles, False
+        def adjustment_tile(layer):
+            """Return (entry-or-None, pending) for an adjustment layer on this tile."""
             mask = None
             mask_store = getattr(layer, "alpha_mask_store", None)
             if (mask_store is not None and not getattr(layer, "mask_disabled", False)
                     and mask_store.has_tile(tx, ty)):
                 if not mask_store.tile_is_resident(tx, ty):
                     mask_store.request_tile_async(tx, ty, self._on_scratch_tile_ready)
-                    return tiles, True
+                    return None, True
                 mask = mask_store.tile(tx, ty)
-            if tiles:
-                base = composite_layers(rect.width(), rect.height(), tiles)
-            else:
-                base = QImage(rect.size(), QImage.Format.Format_RGBA8888)
-                if not fill_image_native(base, QColor(0, 0, 0, 0)):
-                    raise RuntimeError("CreativeCore is required to clear an adjustment tile")
-            adjusted = apply_adjustment(base, spec)
-            clip_image = None
-            if clipping and tiles:
-                clip_source = next((entry for entry in reversed(tiles)
-                                    if not bool(getattr(entry, "clipping", False))), tiles[-1])
-                clip_image = clip_source.image
-            coverage = adjustment_coverage(getattr(layer, "opacity", 1.0), base.size(), mask, clip_image)
-            if coverage is not None:
-                adjusted = apply_clipped_adjustment(base, adjusted, coverage)
-            base_visible[0] = True
-            return [ProjectionLayer(adjusted, True, 1.0, "normal", {})], False
+            return adjustment_entry(layer, mask), False
 
         def render_group(group):
             group_members = members(group)
@@ -4127,7 +4639,10 @@ class Canvas(QOpenGLWidget):
                 covered.update(child_members)
             tiles, pending, signature = [], False, [group.id, group.visible,
                 float(group.opacity), group.blend_mode,
-                tuple(sorted((str(k), repr(v)) for k, v in group.blend_parameters.items()))]
+                tuple(sorted((str(k), repr(v)) for k, v in group.blend_parameters.items())),
+                bool(getattr(group, "mask_disabled", False)),
+                getattr(getattr(group, "alpha_mask_store", None),
+                        "tile_revision", lambda *_: 0)(tx, ty)]
             base_visible = [True]
             position = min(group_members)
             while position <= max(group_members):
@@ -4142,13 +4657,20 @@ class Canvas(QOpenGLWidget):
                 if position not in covered:
                     layer = document.layers[position]
                     if getattr(layer, "layer_kind", "raster") == "adjustment":
-                        tiles[:], child_pending = apply_adjustment_to_tiles(tiles, layer, base_visible)
-                        child_tiles = []
+                        entry, child_pending = adjustment_tile(layer)
+                        child_tiles = hide_clipped_over_hidden_base(
+                            [entry] if entry is not None else [], base_visible)
                     else:
                         child_tiles, child_pending = self._projection_tile_for_layer(layer, tx, ty, rect)
                         child_tiles = hide_clipped_over_hidden_base(child_tiles, base_visible)
                     tiles.extend(child_tiles)
                     pending |= child_pending
+                    if (str(getattr(layer, "layer_kind", "raster")) == "raster"
+                            and not layer.tile_store.has_tile(tx, ty)):
+                        # No pixels here: its visibility/opacity cannot change this tile.
+                        signature.append((layer.id, None, bool(getattr(layer, "clipping", False))))
+                        position += 1
+                        continue
                     signature.append((layer.id, layer.visible, float(layer.opacity), layer.blend_mode,
                                       bool(getattr(layer, "clipping", False)),
                                       tuple(sorted((str(k), repr(v)) for k, v in layer.blend_parameters.items())),
@@ -4164,8 +4686,19 @@ class Canvas(QOpenGLWidget):
             group_signature = tuple(signature)
             image = group.cached_tile(tile_key, group_signature)
             if image is None:
-                image = composite_layers(rect.width(), rect.height(), tiles)
+                image = composite_layers(rect.width(), rect.height(),
+                                         resolve_stack(tiles, rect.width(), rect.height()))
                 group.store_tile(tile_key, group_signature, image)
+            mask_store = getattr(group, "alpha_mask_store", None)
+            if (mask_store is not None and not getattr(group, "mask_disabled", False)
+                    and mask_store.has_tile(tx, ty)):
+                if not mask_store.tile_is_resident(tx, ty):
+                    mask_store.request_tile_async(tx, ty, self._on_scratch_tile_ready)
+                    return ProjectionLayer(QImage(), False, 0.0, "normal", {}), True, group_signature
+                masked = clone_image_native(image)
+                if masked is None or not apply_alpha_mask_native(masked, mask_store.tile(tx, ty)):
+                    raise RuntimeError("CreativeCore refused to apply the group alpha mask")
+                image = masked
             return ProjectionLayer(image, True, float(group.opacity), str(group.blend_mode),
                                    dict(group.blend_parameters)), False, group_signature
 
@@ -4186,8 +4719,9 @@ class Canvas(QOpenGLWidget):
             if group is None and index not in root_coverage:
                 layer = document.layers[index]
                 if getattr(layer, "layer_kind", "raster") == "adjustment":
-                    entries[:], pending = apply_adjustment_to_tiles(entries, layer, base_visible)
-                    items = []
+                    entry, pending = adjustment_tile(layer)
+                    items = hide_clipped_over_hidden_base(
+                        [entry] if entry is not None else [], base_visible)
                 else:
                     items, pending = self._projection_tile_for_layer(layer, tx, ty, rect)
                     items = hide_clipped_over_hidden_base(items, base_visible)
@@ -4198,25 +4732,42 @@ class Canvas(QOpenGLWidget):
             if group is not None:
                 entry, pending, _signature = render_group(group)
                 missing |= pending
-                base_visible[0] = bool(entry.visible)
-                if entry.visible:
-                    entries.append(entry)
+                # Kept even when hidden: resolve_stack drops it together with
+                # the layers clipped onto the folder.
+                entries.extend(hide_clipped_over_hidden_base([entry], base_visible))
                 index = max(members(group)) + 1
             else:
                 index += 1
-        return entries, missing
+        if missing:
+            return entries, missing
+        return resolve_stack(entries, rect.width(), rect.height()), missing
 
     def _projection_tile_for_layer(self, layer, tx: int, ty: int, rect: QRect):
         store = layer.tile_store
+        # A TransformState is render-time metadata: source tiles are never
+        # rewritten. Its cache is full-document for correctness across tile
+        # boundaries; the projection still uploads only this requested tile.
+        if getattr(layer, "transform_state", None):
+            image = layer.render_image().copy(rect)
+            return [ProjectionLayer(image, layer.visible, float(layer.opacity),
+                                    str(layer.blend_mode), dict(layer.blend_parameters),
+                                    bool(getattr(layer, "clipping", False)), False)], False
         if store.has_tile(tx, ty) and not store.tile_is_resident(tx, ty):
             store.request_tile_async(tx, ty, self._on_scratch_tile_ready)
             return [], True
         if store.has_tile(tx, ty):
             image = store.tile(tx, ty)
         else:
-            image = QImage(rect.size(), QImage.Format.Format_ARGB32)
-            if not fill_image_native(image, QColor(0, 0, 0, 0)):
-                raise RuntimeError("CreativeCore is required to clear projection tiles")
+            # Shared read-only transparent tile: compositors never write to
+            # their inputs, and a masked layer clones it below.
+            blanks = self.__dict__.setdefault("_blank_projection_tiles", {})
+            key = (rect.width(), rect.height())
+            image = blanks.get(key)
+            if image is None:
+                image = QImage(rect.width(), rect.height(), QImage.Format.Format_ARGB32)
+                if not fill_image_native(image, QColor(0, 0, 0, 0)):
+                    raise RuntimeError("CreativeCore is required to clear projection tiles")
+                blanks[key] = image
         mask_store = getattr(layer, "alpha_mask_store", None)
         if (mask_store is not None and not getattr(layer, "mask_disabled", False)
                 and mask_store.has_tile(tx, ty)):
@@ -4229,24 +4780,54 @@ class Canvas(QOpenGLWidget):
                 raise RuntimeError("CreativeCore refused to apply the projection alpha mask")
         return [ProjectionLayer(image, layer.visible, float(layer.opacity),
                                 str(layer.blend_mode), dict(layer.blend_parameters),
-                                bool(getattr(layer, "clipping", False)))], False
+                                bool(getattr(layer, "clipping", False)),
+                                not store.has_tile(tx, ty))], False
 
     def _commit_layer_cache_for_render(self, layer, index: int) -> None:
         """Flush legacy pixels while retaining the active brush buffer mid-stroke."""
         keep_buffer = self.drawing and index == self.document.active_layer_index
         layer.commit_image_cache(release=not keep_buffer)
 
+    def _publish_projection_frame(self) -> bool:
+        """Publish a complete viewport, never a mix of old/new tile results."""
+        if (getattr(self, "_projection_scan_pending", False)
+                or self._projection_waiting_visible):
+            return False
+        visible = self._projection_publish_keys
+        if (not visible or not visible.issubset(self._projection_ready_tiles)
+                or not visible.issubset(self._projection_tile_signatures)):
+            return False
+        pending = self._projection_pending_images
+        keys = visible.intersection(pending)
+        if keys:
+            writes = [(tx, ty, pending[(tx, ty)]) for tx, ty in keys]
+            if not self.projection_store.set_tiles_batch(writes):
+                return False
+            for key in keys:
+                pending.pop(key, None)
+        first_frame = not self._projection_display_ready
+        self._projection_display_ready = True
+        self._projection_idle_key = getattr(self, "_projection_current_key", None)
+        self._projection_idle_revision = self.projection_store._mutation_count
+        if keys or first_frame:
+            # Whole-viewport repaint: old pixels remain visible until all
+            # replacements have been committed together above.
+            self.update()
+        return True
+
     def _on_projected_tile(self, generation: int, tx: int, ty: int, image) -> None:
         key = (tx, ty)
         if self._projection_tile_generation.get(key) != generation:
             return
-        self.projection_store.set_tile(tx, ty, image)
+        self._projection_pending_images[key] = image
         self._projection_ready_tiles.add(key)
-        # A projection callback usually produces one 64px tile.  Requesting a
-        # full widget repaint here made a dense document stutter while its
-        # worker was catching up.  Qt still coalesces neighbouring tile
-        # updates for free.
-        self._repaint_brush_dirty_rect(self.projection_store.tile_rect(tx, ty))
+        manager = getattr(self, "tile_cache_manager", None)
+        if manager is not None:
+            manager.mark_ready(key)
+        getattr(self, "_tile_loading_since", {}).pop(key, None)
+        self._projection_waiting_visible.discard(key)
+        if key in self._projection_publish_keys:
+            self._publish_projection_frame()
 
     def _on_projection_failed(self, generation: int, tx: int, ty: int, error: str) -> None:
         key = (tx, ty)
@@ -4254,6 +4835,7 @@ class Canvas(QOpenGLWidget):
             return
         self._projection_tile_signatures.pop(key, None)
         self._projection_ready_tiles.discard(key)
+        self._projection_pending_images.pop(key, None)
         print(f"Projection de tuile ({tx}, {ty}) impossible : {error}")
 
     def _layer_static_signature(self, layer) -> tuple:
@@ -4279,9 +4861,85 @@ class Canvas(QOpenGLWidget):
                       tuple(sorted((str(k), repr(v)) for k, v in group.blend_parameters.items())))
                      for group in self.document.layer_groups)
 
+    @staticmethod
+    def _store_revision_map(store):
+        """{(tx, ty): revision} of a store in one native call, or None (fallback)."""
+        if store is None:
+            return {}
+        getter = getattr(store, "resident_revisions", None)
+        revisions = getter() if callable(getter) else None
+        if revisions is None:
+            return None
+        revisions = dict(revisions)
+        for key in tuple(getattr(store, "_swapped", ()) or ()):
+            revisions[key] = store.tile_revision(*key)
+        return revisions
+
+    def _tile_signature_index(self, layer_static, groups_static, revision_maps):
+        """Per-frame index -> signature(tx, ty), or None to use the slow path.
+
+        Instead of walking every layer for every tile (80 layers x 2600 tiles
+        per frame), each layer's occupied tiles are visited once and grouped
+        by tile.  A tile's signature then only lists the layers that actually
+        have pixels there (plus adjustment layers, which act everywhere).
+        Layer metadata is folded in as a hash so the big adjustment payloads
+        (3D LUTs) are never compared tile by tile.
+        """
+        layers = self.document.layers
+        if len(revision_maps) != len(layers):
+            return None
+        present: dict = {}
+        everywhere = []
+        for index, (layer, static, (colors, masks)) in enumerate(zip(layers, layer_static,
+                                                                     revision_maps)):
+            if colors is None or masks is None:
+                return None
+            static_key = hash(static)
+            if static[6] != "raster":
+                everywhere.append((index, static_key, masks))
+                continue
+            for key, revision in colors.items():
+                present.setdefault(key, []).append((index, static_key, revision, masks.get(key, 0)))
+        frame = (hash(groups_static), len(layers),
+                 tuple(bool(static[4]) for static in layer_static))
+        empty = ()
+
+        def signature(tx: int, ty: int):
+            key = (tx, ty)
+            return (frame, tuple(present.get(key, empty)),
+                    tuple((index, static_key, masks.get(key, 0))
+                          for index, static_key, masks in everywhere))
+        return signature
+
+    def _tile_signature_direct(self, layer_static, groups_static, revision_maps):
+        """Same signatures as _tile_signature_index, computed per tile on demand.
+
+        Used after an incremental (painting) update where only a few tiles
+        need a new signature: no full per-frame index is rebuilt.
+        """
+        layers = self.document.layers
+        static_keys = [hash(static) for static in layer_static]
+        raster = [static[6] == "raster" for static in layer_static]
+        everywhere = [(index, static_keys[index], masks)
+                      for index, (colors, masks) in enumerate(revision_maps)
+                      if not raster[index]]
+        frame = (hash(groups_static), len(layers),
+                 tuple(bool(static[4]) for static in layer_static))
+
+        def signature(tx: int, ty: int):
+            key = (tx, ty)
+            present = tuple((index, static_keys[index], colors[key], masks.get(key, 0))
+                            for index, (colors, masks) in enumerate(revision_maps)
+                            if raster[index] and key in colors)
+            return (frame, present,
+                    tuple((index, static_key, masks.get(key, 0))
+                          for index, static_key, masks in everywhere))
+        return signature
+
     def _projection_signature_for(self, tx: int, ty: int,
                                   layer_static: list[tuple] | None = None,
-                                  groups_static: tuple | None = None) -> tuple:
+                                  groups_static: tuple | None = None,
+                                  revision_maps: list | None = None) -> tuple:
         """Per-tile cache-comparison key.
 
         `layer_static`/`groups_static` let a caller that is about to check many
@@ -4296,6 +4954,24 @@ class Canvas(QOpenGLWidget):
             layer_static = [self._layer_static_signature(layer) for layer in self.document.layers]
         if groups_static is None:
             groups_static = self._groups_static_signature()
+        if revision_maps is not None and len(revision_maps) == len(self.document.layers):
+            key = (tx, ty)
+            layers = []
+            for layer, static, (colors, masks) in zip(self.document.layers, layer_static,
+                                                      revision_maps):
+                if colors is not None and key not in colors and static[6] == "raster":
+                    # No pixels on this tile: toggling or fading the layer must
+                    # not invalidate it (only the layer's own tiles recompute).
+                    layers.append((static[0], None, static[4]))
+                    continue
+                color = (colors.get(key, 0) if colors is not None
+                         else layer.tile_store.tile_revision(tx, ty))
+                if masks is not None:
+                    mask = masks.get(key, 0)
+                else:
+                    mask = layer.alpha_mask_store.tile_revision(tx, ty)
+                layers.append((static, color, mask))
+            return tuple(layers), groups_static
         layers = tuple(
             (static, layer.tile_store.tile_revision(tx, ty),
              (getattr(getattr(layer, "alpha_mask_store", None),
@@ -4405,6 +5081,7 @@ class Canvas(QOpenGLWidget):
             "input_to_paint": self._timing_summary(self._input_to_paint_ms),
             "native_brush_segment": self._timing_summary(self._brush_segment_ms),
             "projection_cache": dict(self._projection_cache_stats),
+            "tile_cache": self.tile_cache_manager.snapshot(),
             "budget_ms": {"target": 8.0, "warning": 16.0, "unacceptable": 40.0},
         }
         if reset:
@@ -4542,6 +5219,14 @@ class Canvas(QOpenGLWidget):
                 and self.tools.current_tool in self.ALT_PICKER_TOOLS
                 and getattr(self, "_alt_return_tool", None) is None):
             self._alt_return_tool = self.tools.current_tool
+            self._alt_return_eraser = bool(self.tools.brush.eraser)
+            # Tool switching has per-tool brush profiles. Keep an in-memory
+            # copy because QSettings may deserialize a profile lazily (or not
+            # at all on some Linux backends), which otherwise falls back to
+            # DEFAULT_BRUSH_SETTINGS when Alt is released.
+            self._alt_return_brush_settings = self.brush_settings.snapshot()
+            self._alt_return_preset_name = self.get_cpp_brush_preset_name()
+            self._alt_picker_sampled = False
             self.tools.set_picker()
             event.accept()
             return
@@ -4784,7 +5469,7 @@ class Canvas(QOpenGLWidget):
             event
         )
 
-    ALT_PICKER_TOOLS = frozenset({"brush", "eraser", "smudge", "blur", "sharpen",
+    ALT_PICKER_TOOLS = frozenset({"brush", "eraser", "smudge", "blur", "sharpen", "clone_stamp",
                                   "fill", "gradient", "line", "rectangle", "ellipse", "bezier",
                                   "pixel", "pixel_eraser"})
 
@@ -4793,13 +5478,36 @@ class Canvas(QOpenGLWidget):
         if previous is None:
             return False
         self._alt_return_tool = None
-        if self.tools.current_tool == "picker":
-            self.tools._select_tool(previous, eraser=(previous == "eraser"))
+        eraser = bool(getattr(self, "_alt_return_eraser", previous == "eraser"))
+        self._alt_return_eraser = None
+        settings = getattr(self, "_alt_return_brush_settings", None)
+        preset_name = getattr(self, "_alt_return_preset_name", None)
+        sampled = bool(getattr(self, "_alt_picker_sampled", False))
+        self._alt_return_brush_settings = None
+        self._alt_return_preset_name = None
+        self._alt_picker_sampled = False
+        # Restore the captured tool even if another input event occurred
+        # while Alt was held; the old conditional could leave ToolManager on
+        # its default brush.
+        self.tools._select_tool(previous, eraser=eraser)
+        if isinstance(settings, dict):
+            # The picker may legitimately have changed only the colour. All
+            # other dynamics/tip settings belong to the original brush.
+            if sampled:
+                settings = dict(settings)
+                settings["color"] = self.brush_settings.get("color")
+            self.brush_settings.update(settings)
+            self._current_cpp_brush_preset_name = preset_name
+            QSettings("CreativeSystem", "CreativeSystem").setValue(
+                f"brush/tool_settings/{previous}", self.brush_settings.snapshot())
         return True
 
     def focusOutEvent(self, event) -> None:
         # Alt+Tab ou perte de focus pendant Alt : ne jamais rester bloqué en pipette.
         self._restore_alt_picker()
+        self.space_pressed = False
+        self.panning = False
+        self.update()
         super().focusOutEvent(event)
 
     def keyReleaseEvent(
@@ -4820,6 +5528,7 @@ class Canvas(QOpenGLWidget):
         ):
 
             self.space_pressed = False
+            self.panning = False
 
             self.update()
 
@@ -5611,7 +6320,7 @@ class Canvas(QOpenGLWidget):
 
             return
 
-        if event.button() == Qt.MouseButton.LeftButton and self.tools.current_tool == "hand":
+        if event.button() == Qt.MouseButton.LeftButton and self.panning:
             self.panning = False
             self.update()
             event.accept()

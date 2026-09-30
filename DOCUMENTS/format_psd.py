@@ -5,6 +5,8 @@ import logging
 import os
 import struct
 import tempfile
+import shutil
+import zlib
 from pathlib import Path
 
 from PySide6.QtGui import QImage
@@ -35,52 +37,502 @@ PSD_BLEND_FALLBACKS = {
 }
 
 
+class PSDImportCancelled(RuntimeError):
+    """The caller requested that an in-progress PSD import stop safely."""
+
+
 class PSDFormat:
     """Read PSDs safely; failures are reported, never silently flattened."""
 
     @staticmethod
-    def load(file_path: str | Path) -> Document | None:
+    def export_report(document) -> dict:
+        """Describe PSD features that this writer cannot preserve as editable.
+
+        The report is deliberately attached to the document by ``save`` so
+        callers can show it next to the exported file instead of silently
+        degrading Photoshop-only structure.
+        """
+        warnings = []
+        adjustments = sum(getattr(layer, "layer_kind", "raster") == "adjustment"
+                          and not PSDFormat._exports_adjustment(layer)
+                          for layer in document.layers)
+        if adjustments:
+            warnings.append(f"{adjustments} calque(s) de réglage exporté(s) aplati(s)")
+        nested_groups = sum(getattr(group, "parent_id", None) is not None
+                            for group in document.layer_groups)
+        if nested_groups:
+            warnings.append(f"{nested_groups} groupe(s) imbriqué(s) exporté(s) sans hiérarchie")
+        effects = sum(bool(getattr(layer, "layer_effects", ()) or
+                           getattr(layer, "psd_effects", ()))
+                      for layer in document.layers)
+        if effects:
+            warnings.append(f"Effets de calque de {effects} calque(s) non exportés")
+        if document.text_objects:
+            warnings.append(f"{len(document.text_objects)} objet(s) texte aplati(s) dans le composite")
+        return {"layers": len(document.layers), "groups": len(document.layer_groups),
+                "warnings": warnings}
+
+    @staticmethod
+    def _exports_adjustment(layer) -> bool:
+        spec = getattr(layer, "adjustment", None) or {}
+        return str(spec.get("kind", "")) == "curves" and isinstance(spec.get("curves"), dict)
+
+    @staticmethod
+    def load(file_path: str | Path, progress=None, cancel=None, viewport=None) -> Document | None:
+        # 1. Nebula's own reader (no dependency, adjustment layers included).
         try:
-            return PSDFormat._load_layered(file_path)
+            PSDFormat._raise_if_cancelled(cancel)
+            return PSDFormat._load_native(file_path, progress=progress, cancel=cancel, viewport=viewport)
+        except PSDImportCancelled:
+            # Never reinterpret a deliberate cancellation as a decoder fault
+            # and fall through to a slower or flattened import path.
+            raise
+        except Exception as error:  # noqa: BLE001 - any failure falls back below
+            logger.warning("Lecteur PSD Nebula : %s (%s)", error, file_path)
+            native_error = error
+        # 2. psd-tools, when installed (exotic colour modes).
+        try:
+            PSDFormat._raise_if_cancelled(cancel)
+            document = PSDFormat._load_layered(file_path)
+            document.psd_import_warning = "\n".join(filter(None, [
+                f"Lecteur Nebula : {native_error}", getattr(document, "psd_import_warning", "")]))
+            return document
+        except PSDImportCancelled:
+            raise
         except ImportError as error:
             logger.info("psd-tools unavailable; trying flattened PSD import: %s", error)
         except Exception as error:
             logger.warning("Layered PSD import failed for %s: %s", file_path, error)
+        # 3. Flattened image through Qt's image plugins.
+        PSDFormat._raise_if_cancelled(cancel)
         image = QImage(str(file_path))
         if image.isNull() or image.width() <= 0 or image.height() <= 0:
             logger.error("PSD import failed: no readable fallback for %s", file_path)
             return None
         document = Document(image.width(), image.height(), 300, None)
         document.name = Path(file_path).stem
-        document.layers.clear()
-        layer = document.add_layer(Path(file_path).stem)
+        layer = document.layers[0]
+        layer.name = Path(file_path).stem
         layer.image = image.convertToFormat(QImage.Format.Format_RGBA8888)
-        document.psd_import_warning = "PSD importé aplati : psd-tools n'a pas pu lire les calques"
+        document.psd_import_warning = f"PSD importé aplati : {native_error}"
+        return document
+
+    # ------------------------------------------------------------------
+    # Native reader -> Nebula document
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _load_native(file_path: str | Path, progress=None, cancel=None, viewport=None) -> Document:
+        from DOCUMENTS.psd_reader import read_psd
+
+        with read_psd(file_path, composite=False, lazy_layers=True) as psd:
+            if psd.layers:
+                return PSDFormat._import_native_document(psd, file_path, progress, cancel, viewport)
+        with read_psd(file_path, composite=True) as psd:
+            if psd.composite is None:
+                raise ValueError("PSD sans calque ni image composite")
+            return PSDFormat._import_native_document(psd, file_path, progress, cancel, viewport)
+
+    @staticmethod
+    def _import_native_document(psd, file_path, progress=None, cancel=None, viewport=None):
+        PSDFormat._raise_if_cancelled(cancel)
+        document = Document(int(psd.width), int(psd.height), 300, None)
+        document.name = Path(file_path).stem
+        document.layers.clear()
+        warnings: list[str] = list(psd.warnings)
+        if psd.icc_profile:
+            try:
+                from DOCUMENTS.color_management import ColorProfile
+                document.set_color_profile(ColorProfile("Embedded PSD ICC", psd.icc_profile))
+            except Exception as error:  # noqa: BLE001
+                warnings.append(f"Profil ICC ignoré ({error})")
+        if not psd.layers:
+            layer = document.add_layer(Path(file_path).stem)
+            PSDFormat._write_pixels(layer, psd.composite, 0, 0, document)
+            groups = []
+        else:
+            groups = []
+            deferred = []
+            PSDFormat._import_children(document, psd.root, None, groups, warnings, progress, cancel,
+                                       deferred, viewport)
+            # Keep layer order stable by creating hidden-layer placeholders in
+            # their original slots, then spend decode time on them only after
+            # every visible layer has been transferred to Nebula tiles.
+            for source, layer in deferred:
+                PSDFormat._raise_if_cancelled(cancel)
+                try:
+                    source.decode_pixels()
+                    if source.rgba is not None and source.rgba.size:
+                        PSDFormat._write_pixels(layer, source.rgba, source.left, source.top, document)
+                    PSDFormat._write_mask(layer, source, document, (source.left, source.top,
+                                                                     source.right, source.bottom))
+                    if source.effects:
+                        layer.psd_effects = list(source.effects)
+                except Exception as error:  # noqa: BLE001
+                    warnings.append(f"{source.name} : calque masqué ignoré ({error})")
+                finally:
+                    source.release_pixels()
+                if progress is not None:
+                    progress(layer, document)
+        # Children-first order: CreativeCore's structural mirror accepts a
+        # folder enclosing already-created folders (see createEnclosingGroup).
+        document.layer_groups.extend(groups)
+        if not document.layers:
+            raise ValueError("PSD sans calque importable")
+        document.active_layer_index = len(document.layers) - 1
+        try:
+            document.sync_native_state()
+        except RuntimeError as error:
+            warnings.append(f"Structure des dossiers simplifiée pour CreativeCore ({error})")
+            PSDFormat._flatten_group_nesting(document)
+            document.sync_native_state()
+        adjustments = [layer for layer in document.layers if layer.layer_kind == "adjustment"]
+        if adjustments:
+            try:
+                from CORE.native_filters import load_filters
+                filters = load_filters()
+                if filters is None or not getattr(filters, "supports_psd_adjustments", False):
+                    warnings.insert(0, "Recompilez CreativeCore (cmake --build) : les calques de "
+                                       "réglage Photoshop ne s'afficheront pas avant.")
+            except Exception:  # noqa: BLE001
+                pass
+        document.psd_import_warning = "\n".join(dict.fromkeys(warnings))
+        document.psd_import_report = {
+            "layers": len(document.layers), "groups": len(document.layer_groups),
+            "adjustments": len(adjustments),
+            "clipped_layers": sum(bool(layer.clipping) for layer in document.layers),
+            "masks": sum(layer.alpha_mask_store is not None for layer in document.layers),
+            "warnings": list(dict.fromkeys(warnings))}
         return document
 
     @staticmethod
-    def save(document: Document, file_path: str | Path) -> bool:
-        """Write a valid 8-bit RGB PSD with editable raster layers.
+    def _flatten_group_nesting(document) -> None:
+        """Last resort for a structure the native mirror refuses: keep root folders."""
+        by_id = {group.id: group for group in document.layer_groups}
+        document.layer_groups[:] = [group for group in document.layer_groups
+                                    if group.parent_id is None or group.parent_id not in by_id]
+        for group in document.layer_groups:
+            group.parent_id = None
 
-        This first writer intentionally uses Photoshop's uncompressed channel
-        form.  It is universally readable and, importantly, can be written
-        atomically; PackBits compression can be added without changing the
-        document model or the file structure.
-        """
-        width, height = int(document.width), int(document.height)
-        if width <= 0 or height <= 0 or width > 30000 or height > 30000:
+    @staticmethod
+    def _import_children(document, children, parent_group, groups, warnings, progress=None,
+                         cancel=None, deferred=None, viewport=None) -> list[str]:
+        """Create layers bottom-to-top; return the ids of the leaf layers created."""
+        leaf_ids: list[str] = []
+        # ``psd_reader`` normalizes sibling lists to bottom-to-top order.
+        # Nebula uses the same convention (index zero is the bottom layer),
+        # so do not reverse here: reversing caused backgrounds to cover the
+        # artwork after import.
+        for source in children:
+            PSDFormat._raise_if_cancelled(cancel)
+            if source.is_group:
+                start = len(groups)
+                members = PSDFormat._import_children(document, source.children, source, groups,
+                                                     warnings, progress, cancel, deferred, viewport)
+                if not members:
+                    continue            # empty Photoshop folder: nothing to show
+                blend = PSDFormat._blend_from_key(source.effective_blend_key, source.name, warnings,
+                                                  group=True)
+                group = LayerGroup(name=source.name or "Groupe", layer_ids=list(members),
+                                   visible=source.visible,
+                                   opacity=PSDFormat._opacity(source),
+                                   blend_mode=blend)
+                for child in groups[start:]:
+                    if child.parent_id is None:
+                        child.parent_id = group.id
+                groups.append(group)
+                if source.mask is not None and not source.mask.disabled and (
+                        source.mask.data is not None and source.mask.data.size
+                        and int(source.mask.data.min()) < 255 or source.mask.default_color < 255):
+                    warnings.append(f"{source.name} : masque de dossier ignoré")
+                if source.clipping:
+                    warnings.append(f"{source.name} : dossier écrêté, écrêtage ignoré")
+                leaf_ids.extend(members)
+                continue
+            try:
+                if (PSDFormat._defer_raster_layer(source, viewport)
+                        and source.adjustment is None and source.fill is None
+                        and deferred is not None):
+                    layer = document.add_layer(source.name or "Calque")
+                    PSDFormat._apply_common(layer, source, warnings)
+                    layer.psd_unsupported = list(source.unsupported)
+                    deferred.append((source, layer))
+                    leaf_ids.append(layer.id)
+                    continue
+                source.decode_pixels()
+                PSDFormat._raise_if_cancelled(cancel)
+                layer = PSDFormat._import_leaf(document, source, warnings)
+            except Exception as error:  # noqa: BLE001 - keep the rest of the file
+                warnings.append(f"{source.name} : calque ignoré ({error})")
+                continue
+            finally:
+                source.release_pixels()
+            if layer is not None:
+                leaf_ids.append(layer.id)
+                if progress is not None:
+                    progress(layer, document)
+        return leaf_ids
+
+    @staticmethod
+    def _raise_if_cancelled(cancel) -> None:
+        if cancel is not None and cancel.is_set():
+            raise PSDImportCancelled("Import PSD annulé")
+
+    @staticmethod
+    def _defer_raster_layer(source, viewport) -> bool:
+        """Whether a raster source can wait without changing document order."""
+        if source.hidden:
+            return True
+        if viewport is None:
             return False
+        vx, vy, vw, vh = (int(value) for value in viewport)
+        return (source.right <= vx or source.bottom <= vy
+                or source.left >= vx + max(0, vw) or source.top >= vy + max(0, vh))
+
+    @staticmethod
+    def _opacity(source) -> float:
+        return max(0.0, min(1.0, (source.opacity / 255.0) * (source.fill_opacity / 255.0)))
+
+    @staticmethod
+    def _import_leaf(document, source, warnings):
+        name = source.name or "Calque"
+        limitations = list(source.unsupported)
+        for message in source.unsupported:
+            warnings.append(f"{name} : {message}")
+        if source.adjustment is not None:
+            spec = dict(source.adjustment)
+            kind = str(spec.get("kind", ""))
+            layer = document.add_adjustment_layer(kind, name, spec)
+            if kind == "unsupported":
+                message = f"{spec.get('reason', 'réglage non pris en charge')}, conservé sans effet"
+                warnings.append(f"{name} : {message}")
+                limitations.append(message)
+            elif spec.get("colorize"):
+                message = "option « Redéfinir » de Teinte/Saturation ignorée"
+                warnings.append(f"{name} : {message}")
+                limitations.append(message)
+            full = (0, 0, document.width, document.height)
+            PSDFormat._apply_common(layer, source, warnings, limitations)
+            PSDFormat._write_mask(layer, source, document, full)
+            layer.psd_unsupported = list(dict.fromkeys(limitations))
+            return layer
+        layer = document.add_layer(name)
+        rgba = source.rgba
+        if source.fill is not None and source.fill.get("kind") == "solid_color" and (
+                rgba is None or not rgba.size or int(rgba[..., 3].max()) == 0):
+            import numpy as np
+            color = source.fill.get("color", [0, 0, 0])
+            rgba = np.empty((document.height, document.width, 4), dtype=np.uint8)
+            rgba[..., :3] = color[:3]
+            rgba[..., 3] = 255
+            left, top = 0, 0
+        else:
+            left, top = source.left, source.top
+            if source.fill is not None and source.fill.get("kind") != "solid_color":
+                message = "calque de remplissage importé en pixels"
+                warnings.append(f"{name} : {message}")
+                limitations.append(message)
+        content = (0, 0, 0, 0)
+        if rgba is not None and rgba.size:
+            content = PSDFormat._write_pixels(layer, rgba, left, top, document)
+        PSDFormat._apply_common(layer, source, warnings, limitations)
+        PSDFormat._write_mask(layer, source, document, content)
+        if source.effects:
+            layer.psd_effects = list(source.effects)
+            limitations.append("effets de calque conservés sans garantie de rendu")
+        layer.psd_unsupported = list(dict.fromkeys(limitations))
+        return layer
+
+    @staticmethod
+    def _apply_common(layer, source, warnings, limitations=None) -> None:
+        layer.opacity = PSDFormat._opacity(source)
+        layer.visible = source.visible
+        layer.clipping = bool(source.clipping)
+        layer.lock_alpha = bool(source.transparency_locked) and layer.layer_kind == "raster"
+        layer.label_color = source.label_color
+        layer.blend_mode = PSDFormat._blend_from_key(source.blend_key, layer.name, warnings, limitations)
+        layer.psd_fill_opacity = source.fill_opacity / 255.0
+
+    @staticmethod
+    def _blend_from_key(key: str, name: str, warnings: list[str], limitations=None,
+                        group: bool = False) -> str:
+        mode = PSD_BLEND_MODES.get(str(key))
+        if mode is None:
+            message = f"mode PSD inconnu {key!r}, normal utilisé"
+            warnings.append(f"{name} : {message}")
+            if limitations is not None:
+                limitations.append(message)
+            return "normal"
+        if mode == "passthrough":
+            # Nebula folders are isolated; for folders holding normal layers,
+            # clipping sets and clipped adjustments the result is the same.
+            return "normal"
+        fallback = PSD_BLEND_FALLBACKS.get(mode)
+        if fallback:
+            message = f"{mode} affiché comme {fallback}"
+            warnings.append(f"{name} : {message}")
+            if limitations is not None:
+                limitations.append(message)
+            return fallback
+        return mode
+
+    @staticmethod
+    def _tile_region(document, left, top, right, bottom, tile):
+        left, top = max(0, left), max(0, top)
+        right, bottom = min(document.width, right), min(document.height, bottom)
+        if right <= left or bottom <= top:
+            return None
+        tx0, ty0 = left // tile, top // tile
+        tx1, ty1 = (right - 1) // tile, (bottom - 1) // tile
+        return tx0, ty0, tx1, ty1
+
+    @staticmethod
+    def _store_tiles(store, canvas, origin_x, origin_y, region, document, skip_empty=True):
+        """Cut a BGRA numpy canvas (aligned on ``origin``) into exact-size tiles."""
+        tile = store.tile_size
+        tx0, ty0, tx1, ty1 = region
+        writes, keepalive = [], []
+        for ty in range(ty0, ty1 + 1):
+            for tx in range(tx0, tx1 + 1):
+                x0, y0 = tx * tile, ty * tile
+                w = min(tile, document.width - x0)
+                h = min(tile, document.height - y0)
+                block = canvas[y0 - origin_y:y0 - origin_y + h, x0 - origin_x:x0 - origin_x + w]
+                if skip_empty and not block.any():
+                    continue
+                block = PSDFormat._contiguous(block)
+                image = QImage(block.data, w, h, w * 4, QImage.Format.Format_ARGB32)
+                keepalive.append(block)
+                writes.append((tx, ty, image))
+                if len(writes) >= 512:
+                    if not store.set_tiles_batch(writes):
+                        raise RuntimeError("CreativeCore a refusé l'écriture des tuiles PSD")
+                    writes, keepalive = [], []
+        if writes and not store.set_tiles_batch(writes):
+            raise RuntimeError("CreativeCore a refusé l'écriture des tuiles PSD")
+
+    @staticmethod
+    def _contiguous(block):
+        import numpy as np
+        return np.ascontiguousarray(block)
+
+    @staticmethod
+    def _write_pixels(layer, rgba, left, top, document) -> tuple[int, int, int, int]:
+        """Write straight-alpha RGBA pixels; returns the written document bounds."""
+        import numpy as np
+        height, width = rgba.shape[:2]
+        if left == 0 and top == 0 and (width, height) == (document.width, document.height):
+            # The native writer already splits full-canvas images into owned
+            # tiles. Avoid hundreds of thousands of Python/QImage wrappers.
+            pixels = np.ascontiguousarray(rgba)
+            transparent = pixels[..., 3] == 0
+            if transparent.any():
+                if not pixels.flags.writeable:
+                    pixels = pixels.copy()
+                pixels[transparent] = 0
+            image = QImage(pixels.data, width, height, width * 4,
+                           QImage.Format.Format_RGBA8888)
+            changed = layer.tile_store.write_image(image)
+            expected = ((width + layer.tile_store.tile_size - 1) // layer.tile_store.tile_size
+                        * ((height + layer.tile_store.tile_size - 1) // layer.tile_store.tile_size))
+            if len(changed) != expected:
+                raise RuntimeError("CreativeCore a refusé l'écriture du calque PSD")
+            layer.discard_image_cache()
+            return (0, 0, width, height)
+        tile = layer.tile_store.tile_size
+        region = PSDFormat._tile_region(document, left, top, left + width, top + height, tile)
+        if region is None:
+            return (0, 0, 0, 0)
+        tx0, ty0, tx1, ty1 = region
+        origin_x = tx0 * tile
+        dx0, dy0 = max(left, 0), max(top, 0)
+        dx1, dy1 = min(left + width, document.width), min(top + height, document.height)
+        # Convert one tile row at a time. An 8K layer needs ~2 MB of staging
+        # memory instead of another full 256 MB BGRA canvas.
+        for ty in range(ty0, ty1 + 1):
+            origin_y = ty * tile
+            y0, y1 = max(dy0, origin_y), min(dy1, origin_y + tile)
+            canvas = np.zeros((tile, (tx1 - tx0 + 1) * tile, 4), dtype=np.uint8)
+            source = rgba[y0 - top:y1 - top, dx0 - left:dx1 - left]
+            target = canvas[y0 - origin_y:y1 - origin_y, dx0 - origin_x:dx1 - origin_x]
+            target[..., 0] = source[..., 2]  # ARGB32 bytes: B, G, R, A
+            target[..., 1] = source[..., 1]
+            target[..., 2] = source[..., 0]
+            target[..., 3] = source[..., 3]
+            target[source[..., 3] == 0] = 0
+            PSDFormat._store_tiles(layer.tile_store, canvas, origin_x, origin_y,
+                                   (tx0, ty, tx1, ty), document)
+        layer.discard_image_cache()
+        return (dx0, dy0, dx1, dy1)
+
+    @staticmethod
+    def _write_mask(layer, source, document, content) -> None:
+        """Photoshop pixel mask -> Nebula sparse mask (absent tile = revealed).
+
+        Mask tiles store white RGB with the coverage in alpha, so a fully
+        hiding tile is never mistaken for an absent (fully revealing) one.
+        """
+        import numpy as np
+        mask = source.mask
+        if mask is None:
+            return
+        default = int(mask.default_color)
+        data = mask.data
+        if mask.invert:
+            default = 255 - default
+            data = None if data is None else 255 - data
+        has_data = data is not None and data.size and mask.width > 0 and mask.height > 0
+        if default == 255 and (not has_data or int(data.min()) == 255):
+            return                                  # reveals everything: no mask needed
+        if default == 255:
+            bounds = (mask.left, mask.top, mask.right, mask.bottom)
+        else:
+            boxes = [box for box in (content, (mask.left, mask.top, mask.right, mask.bottom))
+                     if box[2] > box[0] and box[3] > box[1]]
+            if not boxes:
+                boxes = [(0, 0, document.width, document.height)]
+            bounds = (min(b[0] for b in boxes), min(b[1] for b in boxes),
+                      max(b[2] for b in boxes), max(b[3] for b in boxes))
+        store = layer.ensure_alpha_mask()
+        tile = store.tile_size
+        region = PSDFormat._tile_region(document, *bounds, tile)
+        layer.mask_disabled = bool(mask.disabled)
+        if region is None:
+            return
+        tx0, ty0, tx1, ty1 = region
+        origin_x, origin_y = tx0 * tile, ty0 * tile
+        canvas = np.empty(((ty1 - ty0 + 1) * tile, (tx1 - tx0 + 1) * tile, 4), dtype=np.uint8)
+        canvas[..., :3] = 255
+        canvas[..., 3] = default
+        if has_data:
+            dx0, dy0 = max(mask.left, origin_x), max(mask.top, origin_y)
+            dx1 = min(mask.right, origin_x + canvas.shape[1], document.width)
+            dy1 = min(mask.bottom, origin_y + canvas.shape[0], document.height)
+            if dx1 > dx0 and dy1 > dy0:
+                canvas[dy0 - origin_y:dy1 - origin_y, dx0 - origin_x:dx1 - origin_x, 3] = \
+                    data[dy0 - mask.top:dy1 - mask.top, dx0 - mask.left:dx1 - mask.left]
+        PSDFormat._store_tiles(store, canvas, origin_x, origin_y, region, document,
+                               skip_empty=False)
+
+    @staticmethod
+    def save(document: Document, file_path: str | Path) -> bool:
+        """Atomically write ZIP-compressed editable raster PSD/PSB layers."""
+        document.psd_export_report = PSDFormat.export_report(document)
+        width, height = int(document.width), int(document.height)
         destination = Path(file_path)
+        version = 2 if destination.suffix.lower() == ".psb" else 1
+        maximum = 300000 if version == 2 else 30000
+        if width <= 0 or height <= 0 or width > maximum or height > maximum:
+            return False
         destination.parent.mkdir(parents=True, exist_ok=True)
         descriptor, temporary_name = tempfile.mkstemp(prefix=f".{destination.stem}-", suffix=".tmp",
                                                      dir=destination.parent)
         try:
             with os.fdopen(descriptor, "wb") as stream:
-                PSDFormat._write_header(stream, width, height)
+                PSDFormat._write_header(stream, width, height, version)
                 PSDFormat._write_image_resources(stream, document)
-                PSDFormat._write_layer_and_mask_info(stream, document)
-                from DOCUMENTS.blend_modes import composite_document
-                composite = composite_document(document)
+                PSDFormat._write_layer_and_mask_info(stream, document, version)
+                composite = PSDFormat._export_composite(document)
                 PSDFormat._write_channel_image_data(stream, composite)
                 stream.flush()
                 os.fsync(stream.fileno())
@@ -95,9 +547,9 @@ class PSDFormat:
             return False
 
     @staticmethod
-    def _write_header(stream, width: int, height: int) -> None:
+    def _write_header(stream, width: int, height: int, version: int = 1) -> None:
         stream.write(b"8BPS")
-        stream.write(struct.pack(">H", 1))
+        stream.write(struct.pack(">H", version))
         stream.write(b"\0" * 6)
         stream.write(struct.pack(">HIIHH", 3, height, width, 8, 3))
         stream.write(struct.pack(">I", 0))  # colour-mode data
@@ -120,36 +572,79 @@ class PSDFormat:
         stream.write(resource)
 
     @staticmethod
-    def _write_layer_and_mask_info(stream, document: Document) -> None:
-        from io import BytesIO
-        body = BytesIO()
-        layers = list(reversed(document.layers))  # PSD is top-to-bottom.
-        ordered = PSDFormat._export_layer_records(document, layers)
-        body.write(struct.pack(">h", len(ordered)))
-        records: list[tuple[object, QImage, tuple[int, ...], list[bytes]]] = []
-        for kind, layer in ordered:
-            if kind != "layer":
-                PSDFormat._write_group_marker(body, layer, kind == "group_start")
-                continue
-            image = layer.tile_store.materialize().convertToFormat(QImage.Format.Format_RGBA8888)
-            channels = PSDFormat._layer_channel_data(image)
-            channel_ids = (0, 1, 2, -1)
-            mask_store = getattr(layer, "alpha_mask_store", None)
-            if mask_store is not None:
-                mask = mask_store.materialize().convertToFormat(QImage.Format.Format_RGBA8888)
-                channels.append(PSDFormat._layer_channel_data(mask)[3])
-                channel_ids += (-2,)
-            records.append((layer, image, channel_ids, channels))
-            PSDFormat._write_layer_record(body, layer, image, channel_ids, channels)
-        for _layer, _image, _channel_ids, channels in records:
-            for channel in channels:
-                body.write(channel)
-        layer_info = body.getvalue()
-        # PSD layer-and-mask section: layer-info length, layer-info payload,
-        # global mask length.  Photoshop accepts an empty global mask.
-        payload = struct.pack(">I", len(layer_info)) + layer_info + struct.pack(">I", 0)
-        stream.write(struct.pack(">I", len(payload)))
-        stream.write(payload)
+    def _export_composite(document):
+        from DOCUMENTS.blend_modes import composite_document, composite_document_layers
+        if document.width * document.height * len(document.layers) <= 16_000_000:
+            return composite_document(document)
+        from PySide6.QtCore import QRect
+        from PySide6.QtGui import QPainter
+        from CORE.native_bridge import draw_text_native
+        image = QImage(document.width, document.height, QImage.Format.Format_RGBA8888)
+        if image.isNull():
+            raise MemoryError("Impossible de créer le composite PSD")
+        image.fill(0)
+        painter = QPainter(image)
+        painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_Source)
+        try:
+            for y in range(0, document.height, 64):
+                for x in range(0, document.width, 64):
+                    rect = QRect(x, y, min(64, document.width - x), min(64, document.height - y))
+                    painter.drawImage(x, y, composite_document_layers(document, rect))
+        finally:
+            painter.end()
+        for item in document.text_objects:
+            if not draw_text_native(image, item.text, item.font,
+                                    item.position.x(), item.position.y(), item.color):
+                raise RuntimeError("CreativeCore a refusé le texte du composite PSD")
+        return image
+
+    @staticmethod
+    def _write_layer_and_mask_info(stream, document: Document, version: int = 1) -> None:
+        ordered = PSDFormat._export_layer_records(document, list(document.layers))
+        if len(ordered) > 32767:
+            raise ValueError("Trop de calques pour le format Photoshop")
+        size_format = ">Q" if version == 2 else ">I"
+        size_bytes = 8 if version == 2 else 4
+        section_start = stream.tell()
+        stream.write(b"\0" * (size_bytes * 2))
+        info_start = stream.tell()
+        stream.write(struct.pack(">h", len(ordered)))
+        # PSD puts every record before the channel data. Spool compressed
+        # channels to disk and release each materialized image before moving
+        # on: an export never retains every full-size RGBA layer at once.
+        with tempfile.TemporaryFile() as channels_file:
+            for kind, layer in ordered:
+                if kind != "layer":
+                    PSDFormat._write_group_marker(stream, layer, kind == "group_start")
+                    continue
+                layer.commit_image_cache(release=True)
+                image = layer.tile_store.materialize().convertToFormat(QImage.Format.Format_RGBA8888)
+                channels = PSDFormat._layer_channel_data(image)
+                channel_ids = (0, 1, 2, -1)
+                if layer.alpha_mask_store is not None:
+                    mask = layer.alpha_mask_coverage()
+                    channels.append(PSDFormat._zip_channel(mask, 3))
+                    channel_ids += (-2,)
+                    del mask
+                PSDFormat._write_layer_record(stream, layer, image, channel_ids, channels, version)
+                for channel in channels:
+                    channels_file.write(channel)
+                del image, channels
+            channels_file.seek(0)
+            shutil.copyfileobj(channels_file, stream, 1024 * 1024)
+        info_size = stream.tell() - info_start
+        if info_size % 2:
+            stream.write(b"\0")
+            info_size += 1
+        stream.write(struct.pack(">I", 0))  # empty global mask
+        end = stream.tell()
+        section_size = end - section_start - size_bytes
+        if version == 1 and section_size > 0xFFFFFFFF:
+            raise ValueError("Ce document dépasse la limite PSD : utilisez .psb")
+        stream.seek(section_start)
+        stream.write(struct.pack(size_format, section_size))
+        stream.write(struct.pack(size_format, info_size))
+        stream.seek(end)
 
     @staticmethod
     def _export_layer_records(document, layers):
@@ -167,10 +662,10 @@ class PSDFormat:
             indices = sorted(positions[item] for item in group.layer_ids if item in positions)
             if not indices or indices != list(range(indices[0], indices[-1] + 1)):
                 continue
-            starts.setdefault(indices[-1], []).append(group)  # end marker comes first in PSD order.
-            ends.setdefault(indices[0], []).append(group)
+            starts.setdefault(indices[0], []).append(group)  # bounding marker precedes children.
+            ends.setdefault(indices[-1], []).append(group)
         result = []
-        for index in range(len(document.layers) - 1, -1, -1):
+        for index in range(len(document.layers)):
             for group in starts.get(index, ()):
                 result.append(("group_end", group))
             result.append(("layer", document.layers[index]))
@@ -193,35 +688,66 @@ class PSDFormat:
 
     @staticmethod
     def _write_layer_record(stream, layer, image: QImage, channel_ids: tuple[int, ...],
-                            channels: list[bytes]) -> None:
+                            channels: list[bytes], version: int = 1) -> None:
         width, height = image.width(), image.height()
         stream.write(struct.pack(">iiiiH", 0, 0, height, width, len(channel_ids)))
         for channel_id, payload in zip(channel_ids, channels):
-            stream.write(struct.pack(">hI", channel_id, len(payload)))
+            stream.write(struct.pack(">hQ" if version == 2 else ">hI", channel_id, len(payload)))
         mode = PSDFormat._psd_blend_key(str(getattr(layer, "blend_mode", "normal")))
         stream.write(b"8BIM" + mode)
         stream.write(bytes((round(max(0.0, min(1.0, float(layer.opacity))) * 255),
                             1 if bool(getattr(layer, "clipping", False)) else 0,
                             0 if bool(getattr(layer, "visible", True)) else 0x02, 0)))
         extra = PSDFormat._layer_extra_data(str(getattr(layer, "name", "Layer")),
-                                             width, height, -2 in channel_ids)
+                                             width, height, -2 in channel_ids,
+                                             adjustment=getattr(layer, "adjustment", None))
         stream.write(struct.pack(">I", len(extra)))
         stream.write(extra)
 
     @staticmethod
     def _layer_extra_data(name: str, width: int, height: int, has_mask: bool = False,
-                          section_type: int | None = None) -> bytes:
+                          section_type: int | None = None, adjustment=None) -> bytes:
         # Mask descriptor, blending ranges, then Pascal name + Unicode luni name.
         latin = name.encode("macroman", "replace")[:255]
         pascal = bytes((len(latin),)) + latin
         pascal += b"\0" * ((4 - len(pascal) % 4) % 4)
         utf16 = name.encode("utf-16be")
-        luni = b"8BIMluni" + struct.pack(">I", 4 + len(utf16)) + struct.pack(">I", len(name)) + utf16
-        luni += b"\0" * ((4 - len(luni) % 4) % 4)
+        luni_payload = struct.pack(">I", len(utf16) // 2) + utf16
+        luni_padding = b"\0" * ((4 - (12 + len(luni_payload)) % 4) % 4)
+        # The native reader consumes the tagged-block size literally.  Keep
+        # the Photoshop alignment bytes inside this writer's declared size so
+        # a following adjustment tag is not mistaken for padding.
+        luni = b"8BIMluni" + struct.pack(">I", len(luni_payload) + len(luni_padding))
+        luni += luni_payload + luni_padding
         mask = (struct.pack(">IiiiiBBH", 20, 0, 0, height, width, 255, 0, 0)
                 if has_mask else struct.pack(">I", 0))
         section = b"" if section_type is None else b"8BIMlsct" + struct.pack(">I", 4) + struct.pack(">I", section_type)
-        return mask + struct.pack(">I", 0) + pascal + luni + section
+        adjustment_block = PSDFormat._curve_adjustment_block(adjustment)
+        return mask + struct.pack(">I", 0) + pascal + luni + section + adjustment_block
+
+    @staticmethod
+    def _curve_adjustment_block(adjustment) -> bytes:
+        """Encode Nebula Curves/Levels-as-curves as Photoshop's ``curv`` tag."""
+        if not isinstance(adjustment, dict) or adjustment.get("kind") != "curves":
+            return b""
+        curves = adjustment.get("curves")
+        if not isinstance(curves, dict):
+            return b""
+        entries = [(0, curves.get("points", [[0, 0], [255, 255]]))]
+        entries.extend((index, curves.get("channels", {}).get(name))
+                       for index, name in ((1, "red"), (2, "green"), (3, "blue"))
+                       if curves.get("channels", {}).get(name))
+        bitmap = sum(1 << index for index, _points in entries)
+        payload = bytearray(b"\0" + struct.pack(">HI", 1, bitmap))
+        for _index, points in entries:
+            normalized = [(max(0, min(255, int(point[0]))), max(0, min(255, int(point[1]))))
+                          for point in points if isinstance(point, (list, tuple)) and len(point) >= 2]
+            normalized = normalized[:255] or [(0, 0), (255, 255)]
+            payload += struct.pack(">H", len(normalized))
+            for value, output in normalized:
+                payload += struct.pack(">HH", output, value)
+        block = b"8BIMcurv" + struct.pack(">I", len(payload)) + bytes(payload)
+        return block + (b"\0" if len(payload) % 2 else b"")
 
     @staticmethod
     def _channel_rows(image: QImage, include_alpha: bool = False) -> list[list[bytes]]:
@@ -261,29 +787,27 @@ class PSDFormat:
         return bytes(result)
 
     @staticmethod
+    def _zip_channel(image: QImage, channel: int) -> bytes:
+        import numpy as np
+        rgba = image.convertToFormat(QImage.Format.Format_RGBA8888)
+        pixels = np.frombuffer(rgba.constBits(), np.uint8).reshape(rgba.height(), rgba.bytesPerLine())
+        plane = pixels[:, channel:rgba.width() * 4:4]
+        return struct.pack(">H", 2) + zlib.compress(plane.tobytes(), 1)
+
+    @staticmethod
     def _layer_channel_data(image: QImage) -> list[bytes]:
-        payloads = []
-        for rows in PSDFormat._channel_rows(image, include_alpha=True):
-            packed = [PSDFormat._packbits(row) for row in rows]
-            if any(len(row) > 0xFFFF for row in packed):
-                raise ValueError("PSD RLE scanline exceeds v1 limit")
-            payloads.append(struct.pack(">H", 1) + b"".join(struct.pack(">H", len(row)) for row in packed)
-                            + b"".join(packed))
-        return payloads
+        return [PSDFormat._zip_channel(image, channel) for channel in range(4)]
 
     @staticmethod
     def _write_channel_image_data(stream, image: QImage, include_alpha: bool = False) -> None:
-        all_rows = PSDFormat._channel_rows(image, include_alpha)
-        packed_rows = [[PSDFormat._packbits(row) for row in rows] for rows in all_rows]
-        if any(len(row) > 0xFFFF for rows in packed_rows for row in rows):
-            raise ValueError("PSD RLE scanline exceeds v1 limit")
-        stream.write(struct.pack(">H", 1))
-        for rows in packed_rows:
-            for row in rows:
-                stream.write(struct.pack(">H", len(row)))
-        for rows in packed_rows:
-            for row in rows:
-                stream.write(row)
+        # Raw merged channels are universally supported, including readers
+        # which cannot decode ZIP composites. No Python PackBits pixel loop.
+        import numpy as np
+        rgba = image.convertToFormat(QImage.Format.Format_RGBA8888)
+        pixels = np.frombuffer(rgba.constBits(), np.uint8).reshape(rgba.height(), rgba.bytesPerLine())
+        stream.write(struct.pack(">H", 0))
+        for channel in range(4 if include_alpha else 3):
+            stream.write(pixels[:, channel:rgba.width() * 4:4].tobytes())
 
     @staticmethod
     def _psd_blend_key(mode: str) -> bytes:
@@ -302,9 +826,11 @@ class PSDFormat:
         warnings: list[str] = []
         PSDFormat._import_color_profile(document, psd, warnings)
         imported: dict[int, object] = {}
-        # psd-tools order is top-to-bottom; Nebula stores the bottom layer at 0.
+        # psd-tools descendants are already emitted in the document's storage
+        # order for raster layers.  Nebula stores that same bottom-to-top order
+        # at indices 0..n, so reversing here silently inverted every import.
         sources = list(psd.descendants())
-        for source in reversed(sources):
+        for source in sources:
             if PSDFormat._is_group(source):
                 continue
             try:

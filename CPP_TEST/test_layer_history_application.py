@@ -30,6 +30,7 @@ def fake_application(document):
     )
     app._with_layer_history = lambda operation, **kwargs: \
         CreativeSystem._with_layer_history(app, operation, **kwargs)
+    app._selected_layer_targets = lambda: [document.active_layer_index]
     return app, history
 
 

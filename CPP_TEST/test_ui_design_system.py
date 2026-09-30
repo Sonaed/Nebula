@@ -9,12 +9,13 @@ from pathlib import Path
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtGui import QImage, QResizeEvent, QMouseEvent
-from PySide6.QtCore import QSize, QPoint, QPointF, QRect, QSettings, QEventLoop, QTimer, Qt
+from PySide6.QtGui import QImage, QResizeEvent, QMouseEvent, QFocusEvent, QKeyEvent, QPainter
+from PySide6.QtCore import QSize, QPoint, QPointF, QRect, QSettings, QEvent, QEventLoop, QTimer, Qt
 from PySide6.QtWidgets import QApplication, QLabel, QMainWindow
 from PySide6.QtTest import QTest
 
 from CANVAS.canvas import Canvas
+from DOCUMENTS.selection import SelectionOperation
 from UI.theme import ThemeManager
 from UI.dialogs.preferences_dialog import PreferencesDialog
 from UI.docks.tool_rail_dock import ToolRailDock
@@ -289,6 +290,8 @@ class UIDesignSystemTests(unittest.TestCase):
 
     def test_undo_waits_for_the_open_stroke_transaction(self) -> None:
         canvas = Canvas()
+        messages = []
+        canvas.history_operation_deferred.connect(messages.append)
         layer = canvas.document.get_active_layer()
         canvas.begin_history_action()
         layer.image.setPixelColor(8, 8, QColor("red"))
@@ -298,6 +301,7 @@ class UIDesignSystemTests(unittest.TestCase):
         canvas.begin_stroke_history()
         canvas.undo()
         self.assertEqual(canvas.tile_history.index, 1)
+        self.assertEqual(messages, ["Annulation en attente"])
         canvas.commit_stroke_history()
         loop = QEventLoop()
         QTimer.singleShot(20, loop.quit)
@@ -798,6 +802,116 @@ class UIDesignSystemTests(unittest.TestCase):
         self.assertLess(abs(mapped.x() - pointer.x()), 0.01)
         self.assertLess(abs(mapped.y() - pointer.y()), 0.01)
         canvas.close()
+
+    def test_alt_picker_restores_the_exact_previous_tool(self) -> None:
+        canvas = Canvas()
+        try:
+            canvas.tools.set_clone_stamp()
+            canvas._alt_return_tool = canvas.tools.current_tool
+            canvas._alt_return_eraser = canvas.tools.brush.eraser
+            canvas.tools.set_picker()
+            self.assertTrue(canvas._restore_alt_picker())
+            self.assertEqual(canvas.tools.current_tool, "clone_stamp")
+        finally:
+            canvas.close()
+
+    def test_alt_picker_restores_the_active_brush_profile_but_keeps_sampled_colour(self) -> None:
+        canvas = Canvas()
+        try:
+            canvas.tools.set_brush()
+            original = canvas.brush_settings.snapshot()
+            original.update({"size": 73.0, "hardness": 0.21, "spacing": 0.37,
+                             "color": [12, 34, 56, 255], "wetness": 0.62})
+            canvas.brush_settings.update(original)
+            canvas._alt_return_tool = "brush"
+            canvas._alt_return_eraser = False
+            canvas._alt_return_brush_settings = canvas.brush_settings.snapshot()
+            canvas._alt_return_preset_name = canvas.get_cpp_brush_preset_name()
+            canvas._alt_picker_sampled = False
+            canvas.tools.set_picker()
+            canvas.apply_sampled_brush_color(QColor(190, 90, 40, 255))
+            self.assertTrue(canvas._restore_alt_picker())
+            restored = canvas.brush_settings.snapshot()
+            self.assertEqual(restored["size"], 73.0)
+            self.assertEqual(restored["hardness"], 0.21)
+            self.assertEqual(restored["spacing"], 0.37)
+            self.assertEqual(restored["wetness"], 0.62)
+            self.assertEqual(restored["color"], [190, 90, 40, 255])
+        finally:
+            canvas.close()
+
+    def test_alt_picker_shortcut_keeps_the_active_brush_profile(self) -> None:
+        canvas = Canvas()
+        try:
+            canvas.tools.set_brush()
+            original = canvas.brush_settings.snapshot()
+            original.update({"size": 91.0, "hardness": 0.17, "spacing": 0.44,
+                             "color": [30, 60, 90, 255], "wetness": 0.51})
+            canvas.brush_settings.update(original)
+
+            canvas.keyPressEvent(QKeyEvent(
+                QEvent.Type.KeyPress, Qt.Key.Key_Alt, Qt.KeyboardModifier.NoModifier))
+            self.assertEqual(canvas.tools.current_tool, "picker")
+            canvas.apply_sampled_brush_color(QColor(220, 140, 60, 255))
+            canvas.keyReleaseEvent(QKeyEvent(
+                QEvent.Type.KeyRelease, Qt.Key.Key_Alt, Qt.KeyboardModifier.NoModifier))
+
+            restored = canvas.brush_settings.snapshot()
+            self.assertEqual(canvas.tools.current_tool, "brush")
+            self.assertEqual(restored["size"], 91.0)
+            self.assertEqual(restored["hardness"], 0.17)
+            self.assertEqual(restored["spacing"], 0.44)
+            self.assertEqual(restored["wetness"], 0.51)
+            self.assertEqual(restored["color"], [220, 140, 60, 255])
+        finally:
+            canvas.close()
+
+    def test_selection_mask_preserves_pixels_outside_a_brush_edit(self) -> None:
+        canvas = Canvas()
+        try:
+            canvas.create_new_image(12, 12)
+            selected = QImage(12, 12, QImage.Format.Format_ARGB32)
+            selected.fill(QColor(0, 0, 0, 0))
+            painter = QPainter(selected)
+            painter.fillRect(QRect(4, 0, 4, 12), QColor(255, 255, 255, 255))
+            painter.end()
+            canvas.document.selection.combine(selected, SelectionOperation.REPLACE)
+
+            before = QImage(12, 12, QImage.Format.Format_RGBA8888)
+            before.fill(QColor(20, 40, 180, 255))
+            changed = before.copy()
+            changed.fill(QColor(220, 50, 40, 255))
+            result = canvas._restore_selection_after_edit(
+                changed, before.copy(), QRect(0, 0, 12, 12))
+
+            self.assertEqual(result.pixelColor(2, 6), QColor(20, 40, 180, 255))
+            self.assertEqual(result.pixelColor(5, 6), QColor(220, 50, 40, 255))
+            self.assertEqual(result.pixelColor(9, 6), QColor(20, 40, 180, 255))
+        finally:
+            canvas.close()
+
+    def test_focus_loss_and_space_release_clear_temporary_pan(self) -> None:
+        canvas = Canvas()
+        try:
+            canvas.space_pressed = True
+            canvas.panning = True
+            canvas.focusOutEvent(QFocusEvent(QEvent.Type.FocusOut))
+            self.assertFalse(canvas.space_pressed)
+            self.assertFalse(canvas.panning)
+        finally:
+            canvas.close()
+
+    def test_brush_starts_a_separate_history_step_after_layer_change(self) -> None:
+        canvas = Canvas()
+        try:
+            canvas.begin_history_action(structure_only=True)
+            canvas.document.add_layer("Avant le trait")
+            canvas.begin_stroke_history()
+            self.assertEqual(canvas.tile_history._pending["mode"], "dirty")
+            self.assertEqual(len(canvas.tile_history.steps), 1)
+            canvas.cancel_history_action()
+        finally:
+            canvas.close()
 
 
 if __name__ == "__main__":

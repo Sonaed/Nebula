@@ -6,6 +6,7 @@ import numpy as np
 from PySide6.QtCore import QRect, QRectF, QPointF, Qt
 from PySide6.QtGui import QImage, QPainter, QTransform
 from DOCUMENTS.selection import SelectionMask
+from CORE.native_bridge import transform_raster_native
 
 
 @dataclass(frozen=True)
@@ -15,6 +16,30 @@ class TransformSpec:
     scale_x: float = 1.0
     scale_y: float = 1.0
     rotation: float = 0.0
+
+
+@dataclass(frozen=True)
+class TransformState:
+    """Serializable, non-destructive affine state attached to a raster layer."""
+    translate_x: float = 0.0
+    translate_y: float = 0.0
+    scale_x: float = 1.0
+    scale_y: float = 1.0
+    rotation: float = 0.0
+
+    def as_dict(self) -> dict[str, float]:
+        return {"translate_x": float(self.translate_x), "translate_y": float(self.translate_y),
+                "scale_x": float(self.scale_x), "scale_y": float(self.scale_y),
+                "rotation": float(self.rotation)}
+
+    @classmethod
+    def from_value(cls, value) -> "TransformState":
+        value = value or {}
+        if not isinstance(value, dict):
+            raise ValueError("TransformState invalide")
+        return cls(**{name: float(value.get(name, default)) for name, default in
+                      (("translate_x", 0), ("translate_y", 0), ("scale_x", 1),
+                       ("scale_y", 1), ("rotation", 0))})
 
 
 @dataclass(frozen=True)
@@ -153,6 +178,13 @@ class TransformTool:
             selection_image = selection.image
             bounds = selection.bounds()
         transform = self.matrix(QRectF(bounds), spec)
+        native = transform_raster_native(
+            image, selection_image, spec.translate_x, spec.translate_y,
+            spec.scale_x, spec.scale_y, spec.rotation)
+        if native is None:
+            raise RuntimeError("CreativeCore is required for raster transforms")
+        native_image, native_selection = native
+        return TransformResult(native_image, native_selection)
         floating, remainder = split_by_selection(image, selection_image)
         output_format = (image.format() if image.format() in (
             QImage.Format.Format_ARGB32, QImage.Format.Format_RGBA8888)
@@ -161,6 +193,20 @@ class TransformTool:
         new_selection = (self.transform_selection(selection_image, bounds, transform)
                          if selection_image is not None else None)
         return TransformResult(result, new_selection)
+
+    @staticmethod
+    def set_non_destructive_state(layer, state: TransformState | TransformSpec) -> None:
+        """Attach a render-time transform without touching source tiles."""
+        if not isinstance(state, (TransformState, TransformSpec)):
+            raise TypeError("state doit être TransformState ou TransformSpec")
+        layer.transform_state = TransformState(
+            state.translate_x, state.translate_y, state.scale_x, state.scale_y, state.rotation).as_dict()
+        layer._transform_cache = None
+
+    @staticmethod
+    def clear_non_destructive_state(layer) -> None:
+        layer.transform_state = None
+        layer._transform_cache = None
 
     @staticmethod
     def perspective(image: QImage, spec: PerspectiveSpec) -> QImage:
@@ -205,4 +251,4 @@ class TransformTool:
 
 
 __all__ = ["TransformTool", "split_by_selection", "draw_transformed", "TransformSpec", "TransformResult",
-           "PerspectiveSpec", "LiquifyStroke", "WarpControl"]
+           "PerspectiveSpec", "LiquifyStroke", "WarpControl", "TransformState"]

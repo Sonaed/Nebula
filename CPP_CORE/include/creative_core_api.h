@@ -182,6 +182,17 @@ int cs_cslz_decode_info(const uint8_t* encoded, int encoded_size,
 int cs_cslz_decode(const uint8_t* encoded, int encoded_size,
                    uint8_t* output, int output_capacity);
 
+// Direct document I/O avoids a Python/QImage round trip for each 64px tile.
+typedef struct CsNebulaStoreTile {
+    CreativeTileStoreHandle store;
+    uint32_t id;
+    int x, y, width, height;
+} CsNebulaStoreTile;
+int cs_nebula_writer_add_store_tiles(CreativeNebulaWriterHandle writer,
+                                    const CsNebulaStoreTile* tiles, uint32_t count);
+int cs_nebula_reader_read_store_tiles(CreativeNebulaReaderHandle reader,
+                                     const CsNebulaStoreTile* tiles, uint32_t count);
+
 // Sparse resident tile map; Python owns only Qt adapters and scratch files.
 CreativeTileStoreHandle cs_tile_store_create(int width, int height, int tile_size);
 void cs_tile_store_destroy(CreativeTileStoreHandle handle);

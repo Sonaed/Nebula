@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import os
+import tempfile
 import zipfile
 from functools import lru_cache
 from pathlib import Path
@@ -104,9 +106,10 @@ class BlendPresetManager:
         }
 
     def __init__(self, directory: str | Path | None = None) -> None:
-        self.directory = Path(directory) if directory is not None else (
-            Path.home() / ".local" / "share" / "CreativeSystem" / "resources" / "blends"
-        )
+        configured_root = os.environ.get("CREATIVE_SYSTEM_DATA_HOME", "").strip()
+        default_root = (Path(configured_root) if configured_root else
+                        Path.home() / ".local" / "share" / "CreativeSystem")
+        self.directory = Path(directory) if directory is not None else default_root / "resources" / "blends"
         self.directory.mkdir(parents=True, exist_ok=True)
 
     def _preset_path(self, name: str) -> Path:
@@ -135,9 +138,24 @@ class BlendPresetManager:
             return self.defaults()[name]
         try:
             data = json.loads(self._preset_path(name).read_text(encoding="utf-8"))
-            return data if self._valid(data) else None
-        except (OSError, json.JSONDecodeError):
+            if self._valid(data):
+                return data
+            self._quarantine_corrupt(name)
             return None
+        except (OSError, json.JSONDecodeError):
+            self._quarantine_corrupt(name)
+            return None
+
+    def _quarantine_corrupt(self, name: str) -> None:
+        """Keep a bad preset visible for diagnostics without loading it again."""
+        source = self._preset_path(name)
+        if not source.exists():
+            return
+        target = source.with_suffix(source.suffix + ".corrupt")
+        try:
+            source.replace(target)
+        except OSError:
+            pass
 
     @staticmethod
     def _valid(data: dict) -> bool:
@@ -175,7 +193,23 @@ class BlendPresetManager:
             return False
         data = {**normalized, "name": name}
         try:
-            self._preset_path(name).write_text(json.dumps(data, indent=2), encoding="utf-8")
+            path = self._preset_path(name)
+            payload = json.dumps(data, indent=2, ensure_ascii=False).encode("utf-8")
+            fd, temporary = tempfile.mkstemp(prefix=f".{path.stem}-", suffix=".tmp", dir=path.parent)
+            try:
+                with os.fdopen(fd, "wb") as stream:
+                    stream.write(payload)
+                    stream.flush()
+                    os.fsync(stream.fileno())
+                if path.exists():
+                    path.replace(path.with_suffix(path.suffix + ".bak"))
+                os.replace(temporary, path)
+            except Exception:
+                try:
+                    os.unlink(temporary)
+                except OSError:
+                    pass
+                raise
             return True
         except OSError:
             return False

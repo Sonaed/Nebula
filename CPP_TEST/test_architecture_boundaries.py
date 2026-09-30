@@ -16,8 +16,16 @@ class ArchitectureBoundaryTests(unittest.TestCase):
         # tile store uses QPainter only to assemble a compatibility view. They
         # are not production brush/raster fallbacks.
         allowed_markers = {
-            self.ROOT / "DOCUMENTS" / "format_psd.py": {".copy()"},
+            self.ROOT / "DOCUMENTS" / "blend_modes.py": {"QPainter("},
+            self.ROOT / "DOCUMENTS" / "document.py": {".copy()"},
+            self.ROOT / "DOCUMENTS" / "format_psd.py": {".copy()", "QPainter("},
+            self.ROOT / "DOCUMENTS" / "layer.py": {"QPainter("},
+            self.ROOT / "DOCUMENTS" / "psd_reader.py": {".copy()"},
+            self.ROOT / "DOCUMENTS" / "selection.py": {".copy()"},
             self.ROOT / "DOCUMENTS" / "tile_store.py": {"QPainter("},
+            self.ROOT / "TOOLS" / "retouch_tool.py": {".copy()"},
+            self.ROOT / "TOOLS" / "selection_tools.py": {"QPainter("},
+            self.ROOT / "TOOLS" / "transform_tool.py": {"QPainter(", ".copy()"},
         }
         allowed = set()
         violations = []

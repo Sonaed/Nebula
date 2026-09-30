@@ -28,7 +28,9 @@ class FakeDocument:
         self.layer_groups = list(groups)
         self._native_state = FakeNative()
         self.synced = 0
-        for name in ("groups_containing", "repair_layer_groups", "move_layer_to_group"):
+        self._group_repair_cache = None
+        for name in ("groups_containing", "repair_layer_groups", "move_layer_to_group",
+                     "_group_structure_signature"):
             setattr(self, name, getattr(DocumentClass, name).__get__(self))
     def add_layer(self, name):
         layer = SimpleNamespace(id=name, name=name)

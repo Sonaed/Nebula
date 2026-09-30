@@ -20,6 +20,21 @@ class ColorProfile:
     def is_embedded(self) -> bool:
         return bool(self.icc_bytes)
 
+    def validate(self) -> None:
+        if self.icc_bytes and len(self.icc_bytes) < 128:
+            raise ValueError("ICC profile is truncated")
+        if self.icc_bytes and not QColorSpace.fromIccProfile(self.icc_bytes).isValid():
+            raise ValueError("Invalid ICC profile")
+
+
+@dataclass(frozen=True)
+class SoftProofSettings:
+    """Explicit, serializable output-intent policy for proof previews/exports."""
+    profile: ColorProfile
+    rendering_intent: str = "relative_colorimetric"
+    black_point_compensation: bool = True
+    paper_white: bool = False
+
 
 SRGB = ColorProfile("sRGB")
 
@@ -40,6 +55,7 @@ def load_profile(path: str | Path) -> ColorProfile:
 
 
 def convert_to_profile(image: QImage, profile: ColorProfile) -> QImage:
+    profile.validate()
     if profile.name.lower() == "srgb" and not profile.icc_bytes:
         result = QImage(image)
         result.convertToColorSpace(QColorSpace(QColorSpace.NamedColorSpace.SRgb))
@@ -53,4 +69,21 @@ def convert_to_profile(image: QImage, profile: ColorProfile) -> QImage:
     return result
 
 
-__all__ = ["ColorProfile", "SRGB", "profile_from_image", "load_profile", "convert_to_profile"]
+def linearize(image: QImage) -> QImage:
+    """Return an image tagged as linear sRGB without silently changing pixels."""
+    result = QImage(image)
+    result.setColorSpace(QColorSpace(QColorSpace.NamedColorSpace.SRgbLinear))
+    return result
+
+
+def soft_proof(image: QImage, settings: SoftProofSettings) -> QImage:
+    """Convert a proof image to the declared output intent.
+
+    Qt performs the ICC transform; the policy object remains available to the
+    UI/export layer so proof settings are never implicit or lost in a document.
+    """
+    settings.profile.validate()
+    return convert_to_profile(image, settings.profile)
+
+
+__all__ = ["ColorProfile", "SoftProofSettings", "SRGB", "profile_from_image", "load_profile", "convert_to_profile", "linearize", "soft_proof"]

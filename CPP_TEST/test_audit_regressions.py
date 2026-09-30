@@ -93,6 +93,20 @@ class AuditRegressionTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 restored.import_bundle(hostile)
 
+    def test_resource_update_keeps_content_addressed_rollback(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "library"
+            first = Path(directory) / "first.csbr"
+            second = Path(directory) / "second.csbr"
+            first.write_bytes(b"v1"); second.write_bytes(b"v2")
+            manager = ResourceManager(root)
+            path = manager.import_file(first, "brushes")
+            original = manager.catalog("brushes")[0]
+            updated = manager.update_resource(original, second)
+            self.assertNotEqual(updated.content_hash, original.content_hash)
+            restored = manager.rollback_resource(updated, original.content_hash)
+            self.assertEqual(restored.content_hash, original.content_hash)
+
     def test_ui_colors_are_palette_tokens(self):
         pattern = re.compile(r"#[0-9a-fA-F]{6}")
         root = Path(__file__).resolve().parents[1] / "UI"

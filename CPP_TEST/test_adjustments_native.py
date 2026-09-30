@@ -38,6 +38,7 @@ class FakeImage:
 
     class Format:
         Format_RGBA8888 = "rgba8888"
+        Format_ARGB32 = "argb32"
 
     def __init__(self, width, height, data=None):
         self._w, self._h = width, height
@@ -146,6 +147,16 @@ class AdjustmentWiringTests(unittest.TestCase):
             rgb = np.power(rgb, 1.0 / max(0.01, float(gamma)))
             data[..., :3] = np.rint(np.clip(rgb, 0.0, 1.0) * 255.0).astype(np.uint8)
             self.assertTrue(np.array_equal(out, data), f"exposition {exposure},{offset},{gamma}")
+
+    def test_brightness_contrast_uses_the_native_lut(self):
+        for brightness, contrast in ((0, 0), (35, -20), (-70, 80), (150, -150)):
+            out = self.run_kind("brightness_contrast",
+                                brightness_contrast=adj.BrightnessContrastAdjustment(brightness, contrast))
+            table = self.filters.brightness_contrast_lut(
+                max(-100, min(100, brightness)), max(-100, min(100, contrast)))
+            expected = self.data.copy()
+            expected[..., :3] = np.frombuffer(table, dtype=np.uint8)[expected[..., :3]]
+            self.assertTrue(np.array_equal(out, expected), f"luminosité/contraste {brightness},{contrast}")
 
     def test_luminosity_mask_flow_matches_legacy(self):
         for mode in ("lights", "shadows", "midtones"):

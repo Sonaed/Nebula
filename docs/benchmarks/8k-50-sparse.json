@@ -1,0 +1,13 @@
+{
+  "size": 8000,
+  "layers": 50,
+  "painted_size": 512,
+  "scope": "PSD import, Nebula save/reopen, CPU 64px tile composition; excludes GUI/GPU",
+  "psd_import_seconds": 0.2223,
+  "resident_tile_bytes": 52428800,
+  "cpu_64px_tile_median_ms": 1.94,
+  "nebula_save_seconds": 0.2112,
+  "nebula_file_bytes": 720082,
+  "nebula_reopen_seconds": 0.1183,
+  "peak_rss_mib": 436.6
+}

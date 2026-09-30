@@ -281,5 +281,29 @@ bool buildCurveLut(const double* xs, const double* ys, int count,
 bool applyLut(const Surface& s, const uint8_t* red, const uint8_t* green,
               const uint8_t* blue, const Mask& mask = {});
 
+
+// ------------------------------------------- réglages Photoshop (ABI 5) ----
+
+// Courbe de transfert de dégradé : la luminance du pixel
+// (0.30 R + 0.59 G + 0.11 B, pondération de Photoshop) indexe une table de
+// 256 couleurs RGBA ; seule la couleur est remplacée (alpha d'origine
+// conservé), interpolation linéaire entre deux entrées.
+bool gradientMap(const Surface& s, const uint8_t* table256Rgba, const Mask& mask = {});
+
+// Table de correspondance 3D (.cube) : `table` contient size³ triplets RGB
+// float 0..1, rouge variant le plus vite.  Interpolation trilinéaire ; alpha
+// conservé.  size ∈ [2, 256].
+bool lut3d(const Surface& s, const float* table, int size, const Mask& mask = {});
+
+// Remplace l'alpha de chaque pixel par `alpha` (RGB inchangé).
+bool setAlpha(const Surface& s, uint8_t alpha);
+
+// Copie l'alpha de `source` (RGBA8888 de même taille) dans `s`.
+bool copyAlpha(const Surface& s, const uint8_t* source, int sourceStride);
+
+// PackBits (compression « RLE » des PSD).  Retourne le nombre d'octets écrits
+// (au plus `capacity`) ou -1 si les arguments sont invalides.
+long unpackBits(const uint8_t* input, size_t length, uint8_t* output, size_t capacity);
+
 } // namespace filters
 } // namespace cc

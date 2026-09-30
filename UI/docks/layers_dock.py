@@ -17,8 +17,8 @@ from PySide6.QtWidgets import (
     QLineEdit,
 )
 
-from PySide6.QtCore import Qt, Signal, QPoint, QTimer
-from PySide6.QtGui import QPixmap
+from PySide6.QtCore import Qt, Signal, QPoint, QRectF, QTimer
+from PySide6.QtGui import QImage, QPainter, QPixmap
 
 from DOCUMENTS.document import Document
 from UI.widgets.layer_delegate import LayerItemDelegate, CLIP_INDENT
@@ -402,6 +402,7 @@ class LayersDock(QDockWidget):
         curves_action = adjustment_menu.addAction("Courbes")
         levels_action = adjustment_menu.addAction("Niveaux")
         hue_action = adjustment_menu.addAction("Teinte / Saturation")
+        brightness_action = adjustment_menu.addAction("Luminosité / Contraste")
         exposure_action = adjustment_menu.addAction("Exposition")
         vibrance_action = adjustment_menu.addAction("Vibrance")
         balance_action = adjustment_menu.addAction("Balance des couleurs")
@@ -423,6 +424,7 @@ class LayersDock(QDockWidget):
         curves_action.triggered.connect(lambda: self.add_adjustment_requested.emit("curves"))
         levels_action.triggered.connect(lambda: self.add_adjustment_requested.emit("levels"))
         hue_action.triggered.connect(lambda: self.add_adjustment_requested.emit("hue_saturation"))
+        brightness_action.triggered.connect(lambda: self.add_adjustment_requested.emit("brightness_contrast"))
         exposure_action.triggered.connect(lambda: self.add_adjustment_requested.emit("exposure"))
         vibrance_action.triggered.connect(lambda: self.add_adjustment_requested.emit("vibrance"))
         balance_action.triggered.connect(lambda: self.add_adjustment_requested.emit("color_balance"))
@@ -577,6 +579,7 @@ class LayersDock(QDockWidget):
                 ("curves", "Courbes"),
                 ("levels", "Niveaux"),
                 ("hue_saturation", "Teinte / Saturation"),
+                ("brightness_contrast", "Luminosité / Contraste"),
                 ("exposure", "Exposition"),
                 ("vibrance", "Vibrance"),
                 ("color_balance", "Balance des couleurs"),
@@ -643,13 +646,48 @@ class LayersDock(QDockWidget):
     # CALQUES
     # =========================================================
 
-    def _thumb_key(self, layer) -> tuple:
-        """Clé de cache miniature : version de génération du TileStore + état masque."""
+    @staticmethod
+    def _store_fingerprint(store) -> tuple:
+        """Cheap content fingerprint: tile revisions only grow when a tile changes."""
+        if store is None:
+            return ()
+        mutation = getattr(store, "_mutation_count", None)
+        if mutation is not None:
+            return (id(store), mutation)
         try:
-            gen = layer.tile_store._generation if hasattr(layer.tile_store, "_generation") else id(layer)
-        except Exception:
-            gen = id(layer)
-        return (gen, layer.alpha_mask_store is not None, getattr(layer, "mask_disabled", False))
+            revisions = store.resident_revisions()
+        except Exception:  # noqa: BLE001
+            revisions = None
+        if revisions is None:
+            return (id(store), len(store.occupied_keys))
+        return (len(revisions), sum(revisions.values()), len(getattr(store, "_swapped", ()) or ()))
+
+    def _thumb_key(self, layer) -> tuple:
+        """Clé de cache miniature : contenu réel du TileStore + état masque."""
+        return (id(layer), self._store_fingerprint(layer.tile_store),
+                self._store_fingerprint(layer.alpha_mask_store),
+                getattr(layer, "mask_disabled", False))
+
+    @staticmethod
+    def _tile_thumbnail(store, size: int = 36) -> QImage:
+        """Thumbnail drawn from the occupied tiles only (no full-canvas image)."""
+        width, height = max(1, store.width), max(1, store.height)
+        scale = size / max(width, height)
+        image = QImage(max(1, round(width * scale)), max(1, round(height * scale)),
+                       QImage.Format.Format_ARGB32_Premultiplied)
+        image.fill(Qt.GlobalColor.transparent)
+        painter = QPainter(image)
+        painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
+        for tx, ty in sorted(store.occupied_keys):
+            rect = store.tile_rect(tx, ty)
+            try:
+                tile = store.tile(tx, ty)
+            except OSError:
+                continue
+            painter.drawImage(QRectF(rect.x() * scale, rect.y() * scale,
+                                     rect.width() * scale, rect.height() * scale), tile)
+        painter.end()
+        return image
 
     def _get_thumb(self, layer) -> QPixmap:
         """Retourne la miniature mise en cache (36×36) du calque.
@@ -663,11 +701,9 @@ class LayersDock(QDockWidget):
         if cached is not None and cached[0] == key:
             return cached[1]
         # Cache miss : matérialisation nécessaire
-        img = layer.image.scaled(
-            36, 36,
-            Qt.AspectRatioMode.KeepAspectRatio,
-            Qt.TransformationMode.SmoothTransformation,
-        )
+        # Built from the sparse tiles: materializing an 80-layer, 10-Mpx
+        # document for thumbnails took seconds on every panel refresh.
+        img = self._tile_thumbnail(layer.tile_store)
         px = QPixmap.fromImage(img)
         self._thumb_cache[layer.id] = (key, px)
         return px
@@ -760,7 +796,11 @@ class LayersDock(QDockWidget):
             True
         )
 
-        self.layer_list.clear()
+        # takeItem() hands each row back to Python, which frees it once; clear()
+        # freed the C++ items while their Python wrappers were still alive and
+        # crashed shiboken (double free) on documents with many folders.
+        while self.layer_list.count():
+            self.layer_list.takeItem(self.layer_list.count() - 1)
 
         self._collapsed_groups.intersection_update({group.id for group in document.layer_groups})
         positions = {layer.id: index for index, layer in enumerate(document.layers)}
@@ -775,7 +815,11 @@ class LayersDock(QDockWidget):
 
         def add_leaf(index, depth=0, group_id=None):
             layer = document.layers[index]
-            item = QListWidgetItem(layer.name)
+            limitations = tuple(getattr(layer, "psd_unsupported", ()) or ())
+            item = QListWidgetItem(f"{layer.name}  ⚠" if limitations else layer.name)
+            if limitations:
+                item.setToolTip("Limites PSD pour ce calque :\n" + "\n".join(
+                    f"• {message}" for message in limitations))
             item.setData(Qt.ItemDataRole.UserRole, index)
             item.setData(Qt.ItemDataRole.UserRole + 1, layer.visible)
             item.setData(Qt.ItemDataRole.UserRole + 2, {"locked": layer.locked, "lock_alpha": layer.lock_alpha,
@@ -908,7 +952,10 @@ class LayersDock(QDockWidget):
         else:
             self._collapsed_groups.add(group_id)
         if self._document is not None:
-            self.refresh_layers(self._document)
+            # Called from the list's own mouse handler: rebuilding the rows
+            # right now deletes the item under the cursor mid-event.
+            document = self._document
+            QTimer.singleShot(0, lambda: self.refresh_layers(document))
 
     def set_mask_editing_layer_id(self, layer_id: str | None) -> None:
         self._mask_editing_layer_id = layer_id

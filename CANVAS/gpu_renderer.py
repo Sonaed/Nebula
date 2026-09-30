@@ -271,6 +271,22 @@ class CanvasGPURenderer:
                 self.transfer_stats[key] = 0
         return snapshot
 
+    def estimated_texture_bytes(self) -> int:
+        """Return the bytes reserved by the renderer's RGBA textures.
+
+        The status indicator must include the persistent OpenGL atlas as well
+        as the per-tile cache.  ``QOpenGLTexture`` does not expose a portable
+        allocation query, so this remains a format/size estimate by design.
+        """
+        tile_bytes = sum(
+            max(0, int(item.width)) * max(0, int(item.height)) * 4
+            for item in self.textures.values()
+        )
+        atlas_bytes = 0
+        if self.atlas_gpu_ready and self.atlas_texture is not None:
+            atlas_bytes = max(0, int(self.atlas_width)) * max(0, int(self.atlas_height)) * 4
+        return tile_bytes + atlas_bytes
+
     @staticmethod
     def compressed_texture_support() -> dict[str, bool]:
         """Report BC4/BC7 support; compression remains opt-in per driver."""
@@ -925,7 +941,11 @@ class CanvasGPURenderer:
                 mask_store.request_tile_async(tx, ty, self.on_tile_ready)
                 return None
             mask_revision = mask_store.tile_revision(tx, ty)
-        revision = (revision, mask_revision)
+        # Preserve the long-standing scalar revision for ordinary layers.
+        # A composite key is needed only once an editable mask participates;
+        # callers and cache snapshots use the scalar form as their compatible
+        # no-mask fast path.
+        revision = (revision, mask_revision) if mask_revision is not None else revision
 
         key = (str(getattr(layer, "id", "__anonymous__")), int(tx), int(ty))
         existing = self.textures.get(key)

@@ -6,6 +6,7 @@ from uuid import uuid4
 
 from PySide6.QtGui import QImage
 from CORE.native_bridge import clone_image_native
+from DOCUMENTS.tile_store import TileStore, TILE_SIZE
 
 
 @dataclass
@@ -25,6 +26,14 @@ class LayerGroup:
     blend_parameters: dict[str, float] = field(default_factory=dict)
     _tile_cache: OrderedDict = field(default_factory=OrderedDict, repr=False)
     cache_limit: int = 256
+    alpha_mask_store: TileStore | None = field(default=None, repr=False, compare=False)
+    mask_disabled: bool = False
+
+    def ensure_alpha_mask(self, width: int, height: int) -> TileStore:
+        if self.alpha_mask_store is None:
+            self.alpha_mask_store = TileStore(width, height, TILE_SIZE,
+                                              QImage.Format.Format_ARGB32)
+        return self.alpha_mask_store
 
     def cached_tile(self, key: tuple[int, int], signature: tuple) -> QImage | None:
         entry = self._tile_cache.get(key)

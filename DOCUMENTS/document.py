@@ -58,6 +58,7 @@ class Document:
         # changes the signature and forces a real recompute.
         self._group_repair_cache: tuple | None = None
         self.selection = SelectionMask(width, height)
+        self.saved_selections: dict[str, object] = {}
         self.reference_images: list[ReferenceImage] = []
         self.text_objects: list[EditableText] = []
         self.blend_presets: dict[str, dict] = {}
@@ -74,9 +75,9 @@ class Document:
 
             if background_color is None:
 
-                if not fill_image_native(background.image, QColor(0, 0, 0, 0)):
-                    raise RuntimeError("CreativeCore a refusé le remplissage du document")
-                background.mark_image_cache_dirty()
+                # Missing tiles already represent transparent pixels. Avoid
+                # allocating and scanning a 256 MB image for an empty 8K canvas.
+                pass
 
             else:
 
@@ -109,12 +110,34 @@ class Document:
 
         return layer
 
+    def save_selection(self, name: str) -> bool:
+        key = str(name).strip()
+        if not key:
+            return False
+        self.saved_selections[key] = self.selection.image.copy()
+        return True
+
+    def load_selection(self, name: str) -> bool:
+        image = self.saved_selections.get(str(name))
+        if image is None:
+            return False
+        self.selection.image = image.copy()
+        self.selection.invalidate()
+        return True
+
     def add_adjustment_layer(self, kind: str, name: str | None = None, spec=None) -> Layer:
         """Create a serializable non-destructive adjustment layer."""
         layer = self.add_layer(name or str(kind).replace("_", " ").title())
         layer.layer_kind = "adjustment"
         layer.adjustment = spec if spec is not None else {"kind": str(kind)}
         layer.visible = True
+        return layer
+
+    def add_retouch_layer(self, name: str = "Retouche") -> Layer:
+        """Create a non-destructive pixel retouch layer above its source."""
+        layer = self.add_layer(name)
+        layer.layer_kind = "retouch"
+        layer.retouch_operations = []
         return layer
 
     def set_color_profile(self, profile: ColorProfile = SRGB) -> None:

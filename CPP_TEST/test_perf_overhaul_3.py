@@ -114,6 +114,7 @@ def _load_group_hierarchy():
           "apply_clipped_adjustment": lambda base, adjusted, cov: adjusted,
           "adjustment_coverage": lambda *a, **k: None,
           "hide_clipped_over_hidden_base": lambda items, base_visible: items,
+          "resolve_stack": lambda tiles, *args: tiles,
           "AdjustmentLayerSpec": object, "CurvesAdjustment": lambda *a: a,
           "LevelsAdjustment": lambda **k: k, "HueSaturationAdjustment": lambda **k: k,
           "ExposureAdjustment": lambda **k: k, "VibranceAdjustment": lambda **k: k,
@@ -138,7 +139,7 @@ def make_group(gid, layer_ids, parent_id=None):
 def make_leaf_layer(lid):
     return SimpleNamespace(id=lid, visible=True, opacity=1.0, blend_mode="normal",
                            blend_parameters={}, layer_kind="raster", adjustment=None,
-                           clipping=False, tile_store=SimpleNamespace(tile_revision=lambda *a: 0),
+                           clipping=False, tile_store=SimpleNamespace(tile_revision=lambda *a: 0, has_tile=lambda *a: False),
                            alpha_mask_store=None)
 
 
@@ -180,5 +181,5 @@ def test_ensure_projection_builds_hierarchy_lazily_and_once_per_frame():
     assert guard in body
     precompute_index = body.index("layer_static = [self._layer_static_signature")
     lazy_build_index = body.index(guard)
-    loop_index = body.index("for tx, ty in keys:")
+    loop_index = body.index("for tx, ty in ordered:")
     assert precompute_index < loop_index < lazy_build_index

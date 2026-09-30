@@ -28,6 +28,9 @@ class ProjectionLayer:
     blend_mode: str
     blend_parameters: dict
     clipping: bool = False
+    # True when the layer has no pixels on this tile (a transparent stand-in):
+    # resolve_stack can then skip it and everything clipped onto it.
+    empty: bool = False
 
 
 class _NativeLayer(ctypes.Structure):

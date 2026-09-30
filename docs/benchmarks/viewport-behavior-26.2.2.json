@@ -1,0 +1,167 @@
+{
+  "scope": "headless CPU viewport policy; GPU long-session excluded",
+  "scenarios": {
+    "slow_pan": {
+      "ready": true,
+      "seconds": 0.0267,
+      "cache": {
+        "visible": 150,
+        "recent": 204,
+        "prefetch": 54,
+        "cold": 0,
+        "requests": 176,
+        "ready": 176,
+        "retained_frames": 176,
+        "pan": [
+          -8.0,
+          0.0
+        ],
+        "zoom": 1.0
+      }
+    },
+    "fast_pan": {
+      "ready": true,
+      "seconds": 0.0055,
+      "cache": {
+        "visible": 150,
+        "recent": 244,
+        "prefetch": 30,
+        "cold": 0,
+        "requests": 216,
+        "ready": 216,
+        "retained_frames": 216,
+        "pan": [
+          -180.0,
+          0.0
+        ],
+        "zoom": 1.0
+      }
+    },
+    "reverse": {
+      "ready": true,
+      "seconds": 0.0057,
+      "cache": {
+        "visible": 140,
+        "recent": 264,
+        "prefetch": 30,
+        "cold": 0,
+        "requests": 216,
+        "ready": 216,
+        "retained_frames": 216,
+        "pan": [
+          200.0,
+          0.0
+        ],
+        "zoom": 1.0
+      }
+    },
+    "zoom_in": {
+      "ready": true,
+      "seconds": 0.0055,
+      "cache": {
+        "visible": 48,
+        "recent": 264,
+        "prefetch": 39,
+        "cold": 0,
+        "requests": 216,
+        "ready": 216,
+        "retained_frames": 216,
+        "pan": [
+          -438.0,
+          -300.0
+        ],
+        "zoom": 2.0
+      }
+    },
+    "zoom_out": {
+      "ready": true,
+      "seconds": 0.0163,
+      "cache": {
+        "visible": 315,
+        "recent": 420,
+        "prefetch": 105,
+        "cold": 0,
+        "requests": 315,
+        "ready": 315,
+        "retained_frames": 315,
+        "pan": [
+          657.0,
+          450.0
+        ],
+        "zoom": 0.5
+      }
+    },
+    "return_recent": {
+      "ready": true,
+      "seconds": 0.0059,
+      "cache": {
+        "visible": 150,
+        "recent": 420,
+        "prefetch": 72,
+        "cold": 0,
+        "requests": 315,
+        "ready": 315,
+        "retained_frames": 315,
+        "pan": [
+          -239.0,
+          -150.0
+        ],
+        "zoom": 1.0
+      }
+    }
+  },
+  "performance": {
+    "input_to_paint": {
+      "samples": 0,
+      "average_ms": 0.0,
+      "p95_ms": 0.0,
+      "max_ms": 0.0
+    },
+    "native_brush_segment": {
+      "samples": 0,
+      "average_ms": 0.0,
+      "p95_ms": 0.0,
+      "max_ms": 0.0
+    },
+    "projection_cache": {
+      "visible_hits": 694,
+      "visible_misses": 259,
+      "prefetch_hits": 111,
+      "prefetch_misses": 56
+    },
+    "tile_cache": {
+      "visible": 150,
+      "recent": 420,
+      "prefetch": 72,
+      "cold": 0,
+      "requests": 315,
+      "ready": 315,
+      "retained_frames": 315,
+      "pan": [
+        -239.0,
+        -150.0
+      ],
+      "zoom": 1.0
+    },
+    "budget_ms": {
+      "target": 8.0,
+      "warning": 16.0,
+      "unacceptable": 40.0
+    }
+  },
+  "gpu": {
+    "full_uploads": 0,
+    "full_upload_bytes": 0,
+    "dirty_uploads": 0,
+    "dirty_upload_bytes": 0,
+    "dirty_staging_bytes": 0,
+    "pbo_uploads": 0,
+    "pbo_upload_bytes": 0,
+    "tile_draw_calls": 0,
+    "mipmap_generations": 0,
+    "occluded_tile_draws": 0,
+    "gpu_composite_passes": 0,
+    "gpu_composite_tiles": 0,
+    "gpu_composite_fallbacks": 0
+  }
+}

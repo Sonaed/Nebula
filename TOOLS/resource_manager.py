@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 import sys
 import shutil
@@ -18,6 +19,9 @@ class ResourceRecord:
     name: str
     path: Path
     apps: tuple = field(default=(), compare=False)   # apps autorisées (bibliothèque centrale d'Existence)
+    version: str = "1"
+    content_hash: str = ""
+    dependencies: tuple = field(default=(), compare=False)
 
 
 APP_ID = "nebula"
@@ -67,6 +71,25 @@ class ResourceManager:
         "reference_sets": (".zip", ".json"),
     }
     MAX_BUNDLE_BYTES = 256 * 1024 * 1024
+
+    @staticmethod
+    def _hash(path: Path) -> str:
+        digest = hashlib.sha256()
+        with path.open("rb") as source:
+            for block in iter(lambda: source.read(1024 * 1024), b""):
+                digest.update(block)
+        return digest.hexdigest()
+
+    @staticmethod
+    def _resource_metadata(path: Path) -> dict:
+        """Read portable resource metadata from JSON payloads when present."""
+        if path.suffix.lower() != ".json":
+            return {}
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+            return data if isinstance(data, dict) else {}
+        except (OSError, UnicodeError, json.JSONDecodeError):
+            return {}
 
     def __init__(self, root: str | Path | None = None) -> None:
         configured_root = os.environ.get("CREATIVE_SYSTEM_DATA_HOME", "").strip()
@@ -134,6 +157,7 @@ class ResourceManager:
             except (OSError, ValueError, KeyError):
                 tags = {}
         records: list[ResourceRecord] = []
+        content_seen: set[tuple[str, str]] = set()
         for selected in kinds:
             if selected not in self.KINDS:
                 raise ValueError(f"Unknown resource kind: {selected}")
@@ -143,7 +167,21 @@ class ResourceManager:
                     apps = tags.get(path.resolve(), ())
                     if app is not None and apps and app not in apps:
                         continue
-                    records.append(ResourceRecord(selected, path.stem, path, apps))
+                    metadata = self._resource_metadata(path)
+                    dependencies = metadata.get("dependencies", ())
+                    if not isinstance(dependencies, (list, tuple)):
+                        dependencies = ()
+                    record = ResourceRecord(
+                        selected, path.stem, path, apps,
+                        str(metadata.get("resource_version", metadata.get("version", "1"))),
+                        self._hash(path), tuple(str(item) for item in dependencies),
+                    )
+                    # SharedLibrary may retain a migration alias beside the
+                    # canonical file. Expose one content-addressed resource.
+                    fingerprint = (selected, record.content_hash)
+                    if fingerprint not in content_seen:
+                        content_seen.add(fingerprint)
+                        records.append(record)
         return records
 
     def set_apps(self, record: ResourceRecord, apps) -> None:
@@ -240,11 +278,24 @@ class ResourceManager:
                    if not self._is_builtin(record)]
         if any(record.kind not in selected for record in records):
             records = [record for record in records if record.kind in selected]
+        # A shared library may expose both its canonical entry and the local
+        # import alias.  Bundles are content-addressed, so ship that payload
+        # once while retaining deterministic ordering.
+        unique_records = []
+        seen_content = set()
+        for record in records:
+            key = (record.kind, record.content_hash)
+            if key not in seen_content:
+                seen_content.add(key)
+                unique_records.append(record)
+        records = unique_records
         destination = Path(destination)
         destination.parent.mkdir(parents=True, exist_ok=True)
-        manifest = [{"kind": r.kind, "name": r.path.name} for r in records]
+        manifest = [{"kind": r.kind, "name": r.path.name, "resource_version": r.version,
+                     "sha256": r.content_hash, "dependencies": list(r.dependencies)}
+                    for r in records]
         with zipfile.ZipFile(destination, "w", compression=zipfile.ZIP_DEFLATED) as archive:
-            archive.writestr("manifest.json", json.dumps({"version": 1, "resources": manifest}))
+            archive.writestr("manifest.json", json.dumps({"version": 2, "resources": manifest}))
             for record in records:
                 archive.write(record.path, f"resources/{record.kind}/{record.path.name}")
         return destination
@@ -256,8 +307,10 @@ class ResourceManager:
             if sum(max(0, item.file_size) for item in infos) > self.MAX_BUNDLE_BYTES:
                 raise ValueError("Resource bundle exceeds the import budget")
             manifest = json.loads(archive.read("manifest.json").decode("utf-8"))
-            if manifest.get("version") != 1 or not isinstance(manifest.get("resources"), list):
+            if manifest.get("version") not in (1, 2) or not isinstance(manifest.get("resources"), list):
                 raise ValueError("Invalid resource bundle manifest")
+            declared = {(str(item.get("kind")), str(item.get("name"))): item
+                        for item in manifest["resources"] if isinstance(item, dict)}
             allowed = {f"resources/{kind}/" for kind in self.KINDS}
             for info in infos:
                 if info.is_dir() or info.filename == "manifest.json":
@@ -284,5 +337,54 @@ class ResourceManager:
                         if written > self.MAX_BUNDLE_BYTES:
                             raise ValueError("Resource bundle exceeds the import budget")
                         dst.write(chunk)
+                descriptor = declared.get((kind, relative.name), {})
+                expected_hash = descriptor.get("sha256")
+                if expected_hash is not None and (not isinstance(expected_hash, str)
+                                                  or self._hash(target) != expected_hash):
+                    target.unlink(missing_ok=True)
+                    raise ValueError("Resource bundle hash mismatch")
                 imported.append(target)
         return imported
+
+    def dependency_status(self, record: ResourceRecord) -> tuple[str, ...]:
+        """Return missing resource identifiers without importing side effects."""
+        available = {f"{item.kind}:{item.name}" for item in self.catalog(app=None)}
+        return tuple(dependency for dependency in record.dependencies if dependency not in available)
+
+    def update_resource(self, record: ResourceRecord, source: str | Path) -> ResourceRecord:
+        """Atomically replace a resource while retaining a content-addressed rollback copy."""
+        source = Path(source)
+        if (record.kind not in self.KINDS or not source.is_file()
+                or source.suffix.lower() not in self.KINDS[record.kind]):
+            raise ValueError("Mise à jour de ressource invalide")
+        previous_hash = self._hash(record.path)
+        history = self.root / ".history" / record.kind / record.path.stem
+        history.mkdir(parents=True, exist_ok=True)
+        backup = history / f"{previous_hash}{record.path.suffix}"
+        if not backup.exists():
+            shutil.copy2(record.path, backup)
+        temporary = record.path.with_name(f".{record.path.name}.{uuid4().hex}.tmp")
+        try:
+            shutil.copy2(source, temporary)
+            os.replace(temporary, record.path)
+        finally:
+            temporary.unlink(missing_ok=True)
+        return next(item for item in self.catalog(record.kind, app=None)
+                    if item.path == record.path)
+
+    def rollback_resource(self, record: ResourceRecord, content_hash: str) -> ResourceRecord:
+        """Restore a previously retained version by its SHA-256 content hash."""
+        token = str(content_hash).lower()
+        if len(token) != 64 or any(char not in "0123456789abcdef" for char in token):
+            raise ValueError("Empreinte de ressource invalide")
+        backup = self.root / ".history" / record.kind / record.path.stem / f"{token}{record.path.suffix}"
+        if not backup.is_file() or self._hash(backup) != token:
+            raise ValueError("Version de ressource introuvable")
+        temporary = record.path.with_name(f".{record.path.name}.{uuid4().hex}.tmp")
+        try:
+            shutil.copy2(backup, temporary)
+            os.replace(temporary, record.path)
+        finally:
+            temporary.unlink(missing_ok=True)
+        return next(item for item in self.catalog(record.kind, app=None)
+                    if item.path == record.path)

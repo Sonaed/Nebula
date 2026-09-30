@@ -71,7 +71,7 @@ class PSDParityTests(unittest.TestCase):
             top.set_alpha_mask(mask)
             self.assertTrue(PSDFormat.save(document, path))
             psd = PSDImage.open(path)
-            self.assertEqual([item.name for item in psd], ["Lumière", "Fond é"])
+            self.assertEqual([item.name for item in psd], ["Fond é", "Lumière"])
             imported = PSDFormat.load(path)
             self.assertIsNotNone(imported)
             self.assertEqual([layer.name for layer in imported.layers], ["Fond é", "Lumière"])
@@ -80,6 +80,20 @@ class PSDParityTests(unittest.TestCase):
             recovered_mask = imported.layers[1].alpha_mask_store.materialize()
             self.assertEqual(recovered_mask.pixelColor(4, 4).alpha(), 255)
             self.assertEqual(recovered_mask.pixelColor(0, 0).alpha(), 0)
+
+    def test_export_round_trip_keeps_curves_adjustment_editable(self):
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "curves.psd"
+            document = Document(16, 16)
+            document.add_adjustment_layer("curves", "Courbes", {
+                "kind": "curves", "curves": {"points": [[0, 0], [128, 160], [255, 255]],
+                                                   "channels": {"red": [[0, 0], [255, 220]]}}})
+            self.assertTrue(PSDFormat.save(document, path))
+            imported = PSDFormat._load_native(path)
+        adjustment = next(layer for layer in imported.layers if layer.layer_kind == "adjustment")
+        self.assertEqual(adjustment.adjustment["kind"], "curves")
+        self.assertEqual(adjustment.adjustment["curves"]["points"], [[0, 0], [128, 160], [255, 255]])
+        self.assertEqual(adjustment.adjustment["curves"]["channels"]["red"], [[0, 0], [255, 220]])
 
 
 if __name__ == "__main__":

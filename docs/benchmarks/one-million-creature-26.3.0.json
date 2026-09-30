@@ -1,0 +1,34 @@
+{
+  "source": "/run/media/deanos/Stockage/one_million_creature.psd",
+  "source_bytes": 747793922,
+  "rss_before_mib": 68.1,
+  "width": 7200,
+  "height": 5400,
+  "metadata_layers": 46,
+  "preview_seconds": 0.826,
+  "preview_source_size": [
+    7200,
+    5400
+  ],
+  "preview_bytes": 1110826,
+  "first_visible_tiles_seconds": 1.083,
+  "first_visible_tile_count": 176,
+  "cold_tiles_seconds": 0.809,
+  "cold_tile_count": 176,
+  "editable_import_seconds": 26.357,
+  "import_report": {
+    "layers": 43,
+    "groups": 3,
+    "adjustments": 0,
+    "clipped_layers": 2,
+    "masks": 0,
+    "warnings": []
+  },
+  "import_warning": "",
+  "resident_tile_bytes": 2470025216,
+  "resident_tiles": 152164,
+  "rss_after_import_mib": 2501.5,
+  "rss_after_close_pretrim_mib": 2501.5,
+  "rss_after_close_mib": 76.6,
+  "result": "pass"
+}

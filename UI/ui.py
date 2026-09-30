@@ -472,6 +472,10 @@ class CreativeSystemUI(QObject):
             memory_manager = getattr(self.window, "memory_manager", None)
             if memory_manager is not None:
                 memory_manager.set_limit_mb(int(_value))
+        elif key == "performance/memory_profile":
+            memory_manager = getattr(self.window, "memory_manager", None)
+            if memory_manager is not None:
+                memory_manager.set_memory_profile(str(_value))
         elif key == "performance/scratch_directory":
             memory_manager = getattr(self.window, "memory_manager", None)
             if memory_manager is not None:
@@ -938,6 +942,10 @@ class CreativeSystemUI(QObject):
         self.backend_label = QLabel(self.backend_badge.text())
         self.backend_label.setObjectName("backendBadge")
         status.addPermanentWidget(self.backend_label)
+        self.import_state_label = QLabel("")
+        self.import_state_label.setObjectName("importState")
+        self.import_state_label.hide()
+        status.addPermanentWidget(self.import_state_label)
         # Le zoom est cliquable : menu des vues courantes.
         self.zoom_label = QToolButton()
         self.zoom_label.setObjectName("zoomButton")
@@ -955,6 +963,17 @@ class CreativeSystemUI(QObject):
         self._info_timer.setInterval(800)
         self._info_timer.timeout.connect(self._refresh_document_info)
         self._info_timer.start()
+
+    def set_import_state(self, text: str = "", warning: bool = False) -> None:
+        """Persistent PSD import state, separate from transient status messages."""
+        label = getattr(self, "import_state_label", None)
+        if label is None:
+            return
+        label.setText(str(text))
+        label.setProperty("warning", bool(warning))
+        label.setVisible(bool(text))
+        label.style().unpolish(label)
+        label.style().polish(label)
 
     def set_module_dock_available(self, dock, available: bool) -> None:
         """Retire complètement (onglet compris) le panneau d'un module débranché.
@@ -1435,4 +1454,3 @@ class CreativeSystemUI(QObject):
         self.zoom_label.setText(
             f"{zoom_percent} %"
         )
-

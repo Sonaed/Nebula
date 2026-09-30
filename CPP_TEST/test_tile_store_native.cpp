@@ -68,6 +68,21 @@ int main()
     assert(unchanged.pixelColor(0, 0) == QColor("red"));
     assert(atomic.tileCount() == 1);
 
+    // A batch touches only its own keys; duplicates are last-write-wins,
+    // including explicit removals, while unrelated resident tiles survive.
+    assert(atomic.setTile(1, 0, initial));
+    const std::vector<NativeTileStore::TileUpdate> repeatedBatch{
+        {0, 0, replacement, true}, {0, 0, QImage(), false},
+        {0, 0, initial, true}};
+    assert(atomic.applyBatch(repeatedBatch));
+    assert(atomic.tileCount() == 2);
+    assert(atomic.copyTile(0, 0, unchanged));
+    assert(unchanged.pixelColor(0, 0) == QColor("red"));
+    assert(atomic.applyBatch({{0, 0, QImage(), false}}));
+    assert(atomic.tileCount() == 1);
+    assert(atomic.tileInfo(0, 0, resident, revision, access));
+    assert(!resident && revision > 0);
+
     NativeTileStore first(64, 64, 64);
     NativeTileStore second(64, 64, 64);
     QImage firstBefore(64, 64, QImage::Format_ARGB32);

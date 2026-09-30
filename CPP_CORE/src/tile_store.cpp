@@ -103,31 +103,41 @@ bool NativeTileStore::applyBatch(const std::vector<TileUpdate>& updates)
         prepared.push_back({update.x, update.y, std::move(owned), true});
     }
 
-    QMutexLocker lock(&mutex_);
-    auto nextTiles = tiles_;
-    auto nextRevisions = revisions_;
-    auto nextAccesses = accesses_;
+    // Allocate nodes only for touched tiles. Copying all three store maps
+    // for every import/history batch made repeated writes quadratic in the
+    // number of resident tiles. Stage everything before acquiring the lock;
+    // erasing and merging these preallocated map nodes cannot allocate.
+    std::map<Key, Entry> nextTiles;
+    std::map<Key, unsigned long long> nextRevisions;
+    std::map<Key, unsigned long long> nextAccesses;
     for (const auto& update : prepared) {
         const Key key{update.x, update.y};
-        if (!update.present) {
-            nextTiles.erase(key);
-        } else {
-            bool empty = true;
+        bool empty = !update.present;
+        if (update.present) {
+            empty = true;
             for (int row = 0; row < update.image.height() && empty; ++row) {
                 const auto* bytes = update.image.constScanLine(row);
                 for (int i = 0; i < update.image.width() * 4; ++i) {
                     if (bytes[i] != 0) { empty = false; break; }
                 }
             }
-            if (empty) nextTiles.erase(key);
-            else nextTiles[key] = Entry{update.image};
         }
-        nextRevisions[key] = g_revision.fetch_add(1, std::memory_order_relaxed);
-        nextAccesses[key] = g_access.fetch_add(1, std::memory_order_relaxed);
+        if (empty) nextTiles.erase(key);
+        else nextTiles[key] = Entry{update.image};
+        nextRevisions[key] = 0;
+        nextAccesses[key] = 0;
     }
-    tiles_.swap(nextTiles);
-    revisions_.swap(nextRevisions);
-    accesses_.swap(nextAccesses);
+    QMutexLocker lock(&mutex_);
+    for (auto& item : nextRevisions) {
+        item.second = g_revision.fetch_add(1, std::memory_order_relaxed);
+        nextAccesses.at(item.first) = g_access.fetch_add(1, std::memory_order_relaxed);
+        tiles_.erase(item.first);
+        revisions_.erase(item.first);
+        accesses_.erase(item.first);
+    }
+    tiles_.merge(nextTiles);
+    revisions_.merge(nextRevisions);
+    accesses_.merge(nextAccesses);
     return true;
 }
 

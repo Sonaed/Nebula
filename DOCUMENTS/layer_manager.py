@@ -1,7 +1,7 @@
 from DOCUMENTS.document import Document
 from DOCUMENTS.layer import Layer
 import math
-from DOCUMENTS.blend_modes import (composite_document,
+from DOCUMENTS.blend_modes import (composite_document, resolve_stack,
                                    composite_document_layers, composite_layers)
 from CORE.native_bridge import (composite_layer_in_place, move_layer_stack,
                                 plan_visible_layer_merge_groups,
@@ -109,6 +109,18 @@ class LayerManager:
         removed = self.document.layers[index]
         order, active_after = result
         layers = self.document.layers
+        if any(parent.parent_id is not None for parent in self.document.layer_groups):
+            # Nested folders (Photoshop documents): a layer belongs to its
+            # folder and every ancestor, which the flat cleanup plan refuses.
+            # Removing one layer keeps every folder contiguous; folders left
+            # empty (and their empty sub-folders) disappear.
+            if not self.document._native_state.remove_layer(index):
+                raise RuntimeError("CreativeCore a refusé la suppression du calque")
+            self.document.layers[:] = [layers[position] for position in order]
+            self.document.active_layer_index = active_after
+            self._drop_from_nested_groups(removed.id)
+            self.document.sync_native_state()
+            return True
         group_indices = {group.id: number for number, group
                          in enumerate(self.document.layer_groups)}
         memberships = []
@@ -382,22 +394,33 @@ class LayerManager:
         # Flattening only these two layers cannot preserve that dependency.
         if lower.clipping:
             return False
-        group_indices = {group.id: number for number, group
-                         in enumerate(self.document.layer_groups)}
-        memberships = []
-        for layer in self.document.layers:
-            owned = [group_indices[group.id] for group in self.document.layer_groups
-                     if layer.id in group.layer_ids]
-            if len(owned) > 1:
+        nested = any(group.parent_id is not None for group in self.document.layer_groups)
+        if nested:
+            # Nested folders: merge only within the same folder chain.
+            upper_groups = {group.id for group in self.document.layer_groups
+                            if upper.id in group.layer_ids}
+            lower_groups = {group.id for group in self.document.layer_groups
+                            if lower.id in group.layer_ids}
+            if upper_groups != lower_groups:
                 return False
-            memberships.append(owned[0] if owned else -1)
-        cleanup = plan_layer_group_cleanup(
-            memberships, [int(position != index) for position in range(len(self.document.layers))],
-            len(self.document.layer_groups))
-        if cleanup is None:
-            raise RuntimeError("CreativeCore is required to clean layer groups")
-        if cleanup is False:
-            return False
+            cleanup = None
+        else:
+            group_indices = {group.id: number for number, group
+                             in enumerate(self.document.layer_groups)}
+            memberships = []
+            for layer in self.document.layers:
+                owned = [group_indices[group.id] for group in self.document.layer_groups
+                         if layer.id in group.layer_ids]
+                if len(owned) > 1:
+                    return False
+                memberships.append(owned[0] if owned else -1)
+            cleanup = plan_layer_group_cleanup(
+                memberships, [int(position != index) for position in range(len(self.document.layers))],
+                len(self.document.layer_groups))
+            if cleanup is None:
+                raise RuntimeError("CreativeCore is required to clean layer groups")
+            if cleanup is False:
+                return False
         # Flush only existing edit caches. From here on, the sparse TileStores
         # are authoritative; merge must not ask either Layer for `.image`.
         upper.commit_image_cache(release=True)
@@ -413,14 +436,18 @@ class LayerManager:
                 rect = lower.tile_store.tile_rect(tx, ty)
                 bottom = lower.tile_store.tile(tx, ty)
                 top = upper.tile_store.tile(tx, ty)
-                rendered = composite_layers(rect.width(), rect.height(), [
+                pair = [
                     SimpleNamespace(image=bottom, visible=lower.visible,
                         opacity=lower.opacity, blend_mode=lower.blend_mode,
                         blend_parameters=lower.blend_parameters, clipping=lower.clipping),
                     SimpleNamespace(image=top, visible=upper.visible,
                         opacity=upper.opacity, blend_mode=upper.blend_mode,
                         blend_parameters=upper.blend_parameters, clipping=upper.clipping),
-                ])
+                ]
+                # Same clipping-set rule as the document projection, so the
+                # merge never changes what is on screen.
+                resolved = resolve_stack(pair, rect.width(), rect.height()) if upper.clipping else pair
+                rendered = composite_layers(rect.width(), rect.height(), resolved)
                 writes.append((tx, ty, rendered))
             if not lower.tile_store.set_tiles_batch(writes):
                 return False
@@ -450,10 +477,27 @@ class LayerManager:
         upper.tile_store.close()
         if upper.alpha_mask_store is not None:
             upper.alpha_mask_store.close()
-        self._apply_group_cleanup(cleanup)
+        if cleanup is None:
+            self._drop_from_nested_groups(upper.id)
+        else:
+            self._apply_group_cleanup(cleanup)
         self.document.active_layer_index = index - 1
         self.document.sync_native_state()
         return True
+
+    def _drop_from_nested_groups(self, layer_id: str) -> None:
+        """Remove a layer from every folder; drop folders left empty."""
+        kept = []
+        for group in self.document.layer_groups:
+            group.layer_ids = [item for item in group.layer_ids if item != layer_id]
+            group.invalidate()
+            if group.layer_ids:
+                kept.append(group)
+        kept_ids = {group.id for group in kept}
+        for group in kept:
+            if group.parent_id is not None and group.parent_id not in kept_ids:
+                group.parent_id = None
+        self.document.layer_groups[:] = kept
 
     def _apply_group_cleanup(self, cleanup) -> None:
         """Apply a native structural group plan to the Qt model."""

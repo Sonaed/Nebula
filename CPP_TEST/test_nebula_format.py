@@ -72,6 +72,20 @@ class NebulaFormatTests(unittest.TestCase):
         self.assertEqual(loaded.reference_images[0].position, QPointF(7.5, 8.5))
         self.assertEqual(loaded.text_objects[0].text, "Nebula")
 
+    def test_named_selections_round_trip_in_native_tiled_format(self) -> None:
+        document = self._document()
+        saved = QImage(document.width, document.height, QImage.Format.Format_ARGB32)
+        saved.fill(QColor(0, 0, 0, 0))
+        saved.setPixelColor(120, 60, QColor(255, 255, 255, 255))
+        document.saved_selections["Sujet"] = saved
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "named-selections.nebula"
+            self.assertTrue(NebulaFormat.save(document, path))
+            loaded = NebulaFormat.load(path)
+        self.assertIsNotNone(loaded)
+        self.assertIn("Sujet", loaded.saved_selections)
+        self.assertEqual(loaded.saved_selections["Sujet"].pixelColor(120, 60).alpha(), 255)
+
     def test_alpha_mask_round_trip_preserves_sparse_mask_and_pixels(self) -> None:
         document = Document(2, 1)
         layer = document.get_active_layer()
@@ -91,6 +105,24 @@ class NebulaFormatTests(unittest.TestCase):
         self.assertEqual(restored_mask.pixelColor(0, 0).alpha(), 128)
         self.assertEqual(restored_mask.pixelColor(1, 0).alpha(), 255)
 
+    def test_brightness_contrast_adjustment_round_trip_preserves_editable_settings(self) -> None:
+        document = Document(24, 12)
+        document.add_adjustment_layer("brightness_contrast", "Luminosité / Contraste", {
+            "kind": "brightness_contrast",
+            "brightness_contrast": {"brightness": 24.5, "contrast": -18.0},
+        })
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "adjustment.nebula"
+            self.assertTrue(NebulaFormat.save(document, path))
+            loaded = NebulaFormat.load(path)
+        self.assertIsNotNone(loaded)
+        adjustment = loaded.get_active_layer()
+        self.assertEqual(adjustment.layer_kind, "adjustment")
+        self.assertEqual(adjustment.adjustment, {
+            "kind": "brightness_contrast",
+            "brightness_contrast": {"brightness": 24.5, "contrast": -18.0},
+        })
+
     def test_nebula_tile_extraction_requires_native_copy(self) -> None:
         image = QImage(16, 16, QImage.Format.Format_ARGB32)
         with patch("DOCUMENTS.format_nebula.crop_image_native", return_value=None):
@@ -106,6 +138,51 @@ class NebulaFormatTests(unittest.TestCase):
         self.assertIsNotNone(loaded)
         self.assertEqual(loaded.get_active_layer().name, "Couleurs")
 
+    def test_migration_creates_a_native_copy_without_replacing_source(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "legacy.csd"
+            self.assertTrue(CSDFormat.save(self._document(), source))
+            original = source.read_bytes()
+            target = NebulaFormat.migrate(source)
+            self.assertEqual(target, Path(directory) / "legacy.nebula")
+            self.assertEqual(source.read_bytes(), original)
+            self.assertEqual(target.read_bytes()[:4], MAGIC)
+            restored = NebulaFormat.load(target)
+        self.assertIsNotNone(restored)
+        self.assertEqual(restored.get_active_layer().name, "Couleurs")
+
+    def test_migration_refuses_to_overwrite_an_existing_file(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "legacy.csd"
+            target = Path(directory) / "legacy.nebula"
+            self.assertTrue(CSDFormat.save(self._document(), source))
+            target.write_bytes(b"keep-me")
+            with self.assertRaises(FileExistsError):
+                NebulaFormat.migrate(source, target)
+            self.assertEqual(target.read_bytes(), b"keep-me")
+
+    def test_large_sparse_recovery_remains_openable_after_interrupted_write(self) -> None:
+        document = Document(8000, 8000)
+        layer = document.get_active_layer()
+        layer.discard_image_cache()
+        tile = QImage(64, 64, QImage.Format.Format_ARGB32)
+        tile.fill(QColor("cyan"))
+        self.assertTrue(layer.tile_store.set_tile(0, 0, tile))
+        self.assertTrue(layer.tile_store.set_tile(124, 124, tile))
+        with tempfile.TemporaryDirectory() as directory:
+            recovery_path = Path(directory) / "large-recovery.nebula"
+            recovery = RecoveryManager(recovery_path)
+            self.assertTrue(recovery.save(document))
+            stable = recovery_path.read_bytes()
+            recovery_path.with_suffix(".nebula.partial").write_bytes(b"interrupted")
+            restored = recovery.load()
+        self.assertEqual(recovery_path.exists(), False)
+        self.assertEqual(stable[:4], MAGIC)
+        self.assertIsNotNone(restored)
+        self.assertEqual((restored.width, restored.height), (8000, 8000))
+        self.assertEqual(restored.get_active_layer().tile_store.tile(124, 124).pixelColor(1, 1),
+                         QColor("cyan"))
+
     def test_blank_document_round_trip_has_no_tile_records(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "blank.nebula"
@@ -113,6 +190,28 @@ class NebulaFormatTests(unittest.TestCase):
             loaded = NebulaFormat.load(path)
         self.assertIsNotNone(loaded)
         self.assertFalse(loaded.get_active_layer().tile_store.occupied_keys)
+
+    def test_lazy_open_builds_structure_then_loads_visible_tiles(self) -> None:
+        document = Document(130, 70)
+        layer = document.get_active_layer()
+        layer.discard_image_cache()
+        first = QImage(64, 64, QImage.Format.Format_ARGB32)
+        first.fill(QColor("red"))
+        distant = QImage(2, 6, QImage.Format.Format_ARGB32)
+        distant.fill(QColor("blue"))
+        self.assertTrue(layer.tile_store.set_tile(0, 0, first))
+        self.assertTrue(layer.tile_store.set_tile(2, 1, distant))
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "lazy.nebula"
+            self.assertTrue(NebulaFormat.save(document, path))
+            loaded = NebulaFormat.load(path, visible_rect=QRect(0, 0, 64, 64))
+            self.assertIsNotNone(loaded)
+            restored = loaded.get_active_layer()
+            self.assertEqual(restored.name, layer.name)
+            self.assertEqual(restored.tile_store.tile(0, 0).pixelColor(1, 1), QColor("red"))
+            self.assertFalse(restored.tile_store.has_tile(2, 1))
+            self.assertEqual(NebulaFormat.warm_tiles(loaded), 1)
+            self.assertEqual(restored.tile_store.tile(2, 1).pixelColor(1, 1), QColor("blue"))
 
     def test_failed_recovery_autosave_preserves_previous_valid_snapshot(self) -> None:
         document = Document(64, 64)

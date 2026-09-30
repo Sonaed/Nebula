@@ -16,26 +16,43 @@ class FakeImage:
 
 def load_blend_modes():
     calls = []
+    # This fixture imports blend_modes against deliberately tiny stand-ins.
+    # Keep them local to the import: leaving replacements in sys.modules made
+    # unrelated GUI tests later receive a fake PySide6/CORE/DOCUMENTS stack.
+    names_to_restore = (
+        "PySide6", "PySide6.QtCore", "PySide6.QtGui", "CORE",
+        "CORE.native_filters", "CORE.native_bridge", "DOCUMENTS",
+        "DOCUMENTS.adjustments",
+    )
+    missing = object()
+    original_modules = {name: sys.modules.get(name, missing) for name in names_to_restore}
     def stub(name, **attrs):
         mod = types.ModuleType(name); mod.__dict__.update(attrs); sys.modules[name] = mod
-    stub("PySide6"); stub("PySide6.QtCore", QRect=object)
-    stub("PySide6.QtGui", QColor=lambda *a: a, QImage=FakeImage)
-    def fill(img, color): img.alpha = color[3]; return True
-    def mask(img, m): img.alpha = img.alpha * m.alpha // 255; return True
-    stub("CORE"); stub("CORE.native_filters", load_filters=lambda: None)
-    names = ["composite_layers_advanced", "composite_layers_native", "clone_image_native",
-             "draw_text_native", "plan_layer_composite_runs"]
-    stub("CORE.native_bridge", apply_alpha_mask_native=mask, fill_image_native=fill,
-         **{n: (lambda *a, **k: None) for n in names})
-    stub("DOCUMENTS"); 
-    adj = {n: object for n in ["AdjustmentLayerSpec", "CurvesAdjustment", "LevelsAdjustment",
-        "HueSaturationAdjustment", "ExposureAdjustment", "VibranceAdjustment",
-        "ColorBalanceAdjustment", "ParametricCurvesAdjustment", "SelectiveColorAdjustment",
-        "LuminosityMaskAdjustment", "apply_adjustment", "apply_layer_effects"]}
-    stub("DOCUMENTS.adjustments", **adj)
-    spec = importlib.util.spec_from_file_location("bm", ROOT / "DOCUMENTS" / "blend_modes.py")
-    mod = importlib.util.module_from_spec(spec); spec.loader.exec_module(mod)
-    return mod
+    try:
+        stub("PySide6"); stub("PySide6.QtCore", QRect=object)
+        stub("PySide6.QtGui", QColor=lambda *a: a, QImage=FakeImage, QPainter=object)
+        def fill(img, color): img.alpha = color[3]; return True
+        def mask(img, m): img.alpha = img.alpha * m.alpha // 255; return True
+        stub("CORE"); stub("CORE.native_filters", load_filters=lambda: None)
+        names = ["composite_layers_advanced", "composite_layers_native", "clone_image_native",
+                 "draw_text_native", "plan_layer_composite_runs"]
+        stub("CORE.native_bridge", apply_alpha_mask_native=mask, fill_image_native=fill,
+             **{n: (lambda *a, **k: None) for n in names})
+        stub("DOCUMENTS")
+        adj = {n: object for n in ["AdjustmentLayerSpec", "CurvesAdjustment", "LevelsAdjustment",
+            "HueSaturationAdjustment", "ExposureAdjustment", "VibranceAdjustment",
+            "ColorBalanceAdjustment", "ParametricCurvesAdjustment", "SelectiveColorAdjustment",
+            "LuminosityMaskAdjustment", "apply_adjustment", "apply_layer_effects", "spec_from_dict"]}
+        stub("DOCUMENTS.adjustments", **adj)
+        spec = importlib.util.spec_from_file_location("bm", ROOT / "DOCUMENTS" / "blend_modes.py")
+        mod = importlib.util.module_from_spec(spec); spec.loader.exec_module(mod)
+        return mod
+    finally:
+        for name, module in original_modules.items():
+            if module is missing:
+                sys.modules.pop(name, None)
+            else:
+                sys.modules[name] = module
 
 
 bm = load_blend_modes()

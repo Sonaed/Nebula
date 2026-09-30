@@ -1,0 +1,93 @@
+{
+  "before": {
+    "version": "before",
+    "layers": [
+      {
+        "name": "Courbe transfert de d\u00e9grad\u00e9 2",
+        "states": [
+          {
+            "seconds": 1.5982449029979762,
+            "digest": "9f76895d352c73bafe4d8009899bee8652b8f1ac0aed1357a4041602c80633fa"
+          },
+          {
+            "seconds": 1.5864538649984752,
+            "digest": "31b9b2c9efefec0989aae279cef615bce8f87864916380a3fffda4fae9fab98a"
+          }
+        ]
+      },
+      {
+        "name": "Courbe transfert de d\u00e9grad\u00e9 1",
+        "states": [
+          {
+            "seconds": 1.771056530000351,
+            "digest": "ad411cae1f9e5bfeaba05849cf374f2b04d4e55aaa4bc8cedd1cadaed7a99cde"
+          },
+          {
+            "seconds": 1.5928295299963793,
+            "digest": "31b9b2c9efefec0989aae279cef615bce8f87864916380a3fffda4fae9fab98a"
+          }
+        ]
+      },
+      {
+        "name": "Correspondance de couleur 1",
+        "states": [
+          {
+            "seconds": 1.8786575660051312,
+            "digest": "7e4ca7f1f79bf0cc059946253038e86f54d30bed0c1261b2d9e4d28cd70e7c7f"
+          },
+          {
+            "seconds": 1.6163145390019054,
+            "digest": "31b9b2c9efefec0989aae279cef615bce8f87864916380a3fffda4fae9fab98a"
+          }
+        ]
+      }
+    ],
+    "source_sha256": "94f5adc9cbc055b76f38c4685eca431edcc6c8f26189776235a458e6733ed390"
+  },
+  "after": {
+    "version": "after",
+    "layers": [
+      {
+        "name": "Courbe transfert de d\u00e9grad\u00e9 2",
+        "states": [
+          {
+            "seconds": 1.465153899996949,
+            "digest": "9f76895d352c73bafe4d8009899bee8652b8f1ac0aed1357a4041602c80633fa"
+          },
+          {
+            "seconds": 0.075570326000161,
+            "digest": "31b9b2c9efefec0989aae279cef615bce8f87864916380a3fffda4fae9fab98a"
+          }
+        ]
+      },
+      {
+        "name": "Courbe transfert de d\u00e9grad\u00e9 1",
+        "states": [
+          {
+            "seconds": 1.7315771380017395,
+            "digest": "ad411cae1f9e5bfeaba05849cf374f2b04d4e55aaa4bc8cedd1cadaed7a99cde"
+          },
+          {
+            "seconds": 0.1027769909997005,
+            "digest": "31b9b2c9efefec0989aae279cef615bce8f87864916380a3fffda4fae9fab98a"
+          }
+        ]
+      },
+      {
+        "name": "Correspondance de couleur 1",
+        "states": [
+          {
+            "seconds": 1.756237626002985,
+            "digest": "7e4ca7f1f79bf0cc059946253038e86f54d30bed0c1261b2d9e4d28cd70e7c7f"
+          },
+          {
+            "seconds": 0.0723197099941899,
+            "digest": "31b9b2c9efefec0989aae279cef615bce8f87864916380a3fffda4fae9fab98a"
+          }
+        ]
+      }
+    ],
+    "source_sha256": "94f5adc9cbc055b76f38c4685eca431edcc6c8f26189776235a458e6733ed390"
+  },
+  "method": "Headless CPU projection, 1000x900 widget, actual FishCommublavers.nebula. Each adjustment toggled once, then restored. Single sequential run per version. GPU painting and UI event latency excluded. Original file read only. Result cache bounded to 8192 64px ARGB tiles (128 MiB pixel data)."
+}

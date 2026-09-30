@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from PySide6.QtCore import QRect
-from PySide6.QtGui import QColor, QImage
+from PySide6.QtGui import QColor, QImage, QPainter
 
 from collections import OrderedDict
 from types import SimpleNamespace
@@ -16,7 +16,7 @@ from DOCUMENTS.adjustments import (AdjustmentLayerSpec, CurvesAdjustment,
                                    ExposureAdjustment, VibranceAdjustment,
                                    ColorBalanceAdjustment, ParametricCurvesAdjustment,
                                    SelectiveColorAdjustment, LuminosityMaskAdjustment,
-                                   apply_adjustment, apply_layer_effects)
+                                   apply_adjustment, apply_layer_effects, spec_from_dict)
 
 
 BLEND_MODES = (
@@ -37,6 +37,7 @@ def has_non_normal(document) -> bool:
             str(getattr(layer, "blend_mode", "normal")).lower() != "normal"
             or bool(getattr(layer, "clipping", False))
             or bool(getattr(layer, "blend_parameters", {}))
+            or str(getattr(layer, "layer_kind", "raster")) != "raster"
         )
         for layer in document.layers
     )
@@ -92,15 +93,15 @@ def _document_layer_entry(layer, rect: QRect | None):
             mask_store = None
         if mask_store is None:
             effects = getattr(layer, "layer_effects", None) or getattr(layer, "psd_effects", None)
-            if not effects:
+            if not effects and not getattr(layer, "transform_state", None):
                 return layer
             return SimpleNamespace(
-                image=apply_layer_effects(layer.image, effects), visible=layer.visible,
+                image=apply_layer_effects(layer.render_image(), effects), visible=layer.visible,
                 opacity=layer.opacity, blend_mode=layer.blend_mode,
                 blend_parameters=layer.blend_parameters,
                 clipping=bool(getattr(layer, "clipping", False)),
             )
-        image = clone_image_native(layer.image)
+        image = clone_image_native(layer.render_image())
         mask = layer.alpha_mask_coverage()
         if image is None or mask is None or mask.isNull() or not apply_alpha_mask_native(image, mask):
             raise RuntimeError("CreativeCore refused to apply the layer alpha mask")
@@ -111,6 +112,13 @@ def _document_layer_entry(layer, rect: QRect | None):
             clipping=bool(getattr(layer, "clipping", False)),
         )
     store = layer.tile_store
+    if getattr(layer, "transform_state", None):
+        tile = layer.render_image().copy(rect)
+        return SimpleNamespace(
+            image=tile, visible=layer.visible, opacity=layer.opacity,
+            blend_mode=layer.blend_mode, blend_parameters=layer.blend_parameters,
+            clipping=bool(getattr(layer, "clipping", False)),
+        )
     tx, ty = rect.x() // store.tile_size, rect.y() // store.tile_size
     if store.has_tile(tx, ty):
         tile = store.tile(tx, ty)
@@ -131,6 +139,7 @@ def _document_layer_entry(layer, rect: QRect | None):
         image=tile, visible=layer.visible, opacity=layer.opacity,
         blend_mode=layer.blend_mode, blend_parameters=layer.blend_parameters,
         clipping=bool(getattr(layer, "clipping", False)),
+        empty=not store.has_tile(tx, ty),
     )
 
 
@@ -145,7 +154,8 @@ def apply_clipped_adjustment(base: QImage, adjusted: QImage, clip_source: QImage
     clip_image = clip_source.convertToFormat(QImage.Format.Format_RGBA8888)
     if adjusted_image.size() != result.size() or clip_image.size() != result.size():
         raise ValueError("Les images d'un réglage écrêté doivent avoir la même taille")
-    result.detach()  # convertToFormat partage les données : ne jamais toucher à `base`
+    if hasattr(result, "detach"):
+        result.detach()  # convertToFormat partage les données : ne jamais toucher à `base`
     if not result.isNull():
         filters.blend_by_alpha(result.bits(), result.width(), result.height(),
                                adjusted_image.constBits(), clip_image.constBits(),
@@ -206,6 +216,199 @@ def _with_visible(entry, visible: bool):
                            clipping=bool(getattr(entry, "clipping", False)))
 
 
+# ---------------------------------------------------------------------------
+# Photoshop stack semantics (clipping sets and adjustment layers)
+# ---------------------------------------------------------------------------
+
+class AdjustmentEntry(SimpleNamespace):
+    """A pending adjustment layer inside a list of composite entries.
+
+    It is resolved by :func:`resolve_stack` against whatever lies below it, so
+    it can carry its own blend mode, opacity, mask and clipping like
+    Photoshop's adjustment layers.
+    """
+
+    image = None
+
+
+def adjustment_entry(layer, mask=None) -> AdjustmentEntry | None:
+    spec = spec_from_dict(getattr(layer, "adjustment", None))
+    if spec is None:
+        return None
+    return AdjustmentEntry(spec=spec, visible=bool(getattr(layer, "visible", True)),
+                           opacity=float(getattr(layer, "opacity", 1.0)),
+                           blend_mode=str(getattr(layer, "blend_mode", "normal")),
+                           blend_parameters=dict(getattr(layer, "blend_parameters", {}) or {}),
+                           clipping=bool(getattr(layer, "clipping", False)), mask=mask)
+
+
+def _plain_entry(image, visible=True, opacity=1.0, blend_mode="normal", blend_parameters=None,
+                 clipping=False):
+    return SimpleNamespace(image=image, visible=visible, opacity=opacity, blend_mode=blend_mode,
+                           blend_parameters=dict(blend_parameters or {}), clipping=clipping)
+
+
+def _psd_filters():
+    filters = load_filters()
+    if filters is None or not getattr(filters, "supports_psd_adjustments", False):
+        return None
+    return filters
+
+
+def _rgba_detached(image: QImage) -> QImage:
+    result = image.convertToFormat(QImage.Format.Format_RGBA8888)
+    if not result.isNull():
+        if hasattr(result, "detach"):
+            result.detach()
+    return result
+
+
+def _opaque(image: QImage, filters) -> QImage:
+    """RGBA copy whose alpha is forced to 255 (colour kept as is)."""
+    result = _rgba_detached(image)
+    if result.isNull():
+        raise RuntimeError("image de composition invalide")
+    filters.set_alpha(result.bits(), result.width(), result.height(), 255,
+                      stride=result.bytesPerLine())
+    return result
+
+
+def _with_alpha_of(image: QImage, alpha_source: QImage, filters) -> QImage:
+    result = _rgba_detached(image)
+    source = alpha_source.convertToFormat(QImage.Format.Format_RGBA8888)
+    if result.isNull() or source.isNull() or result.size() != source.size():
+        raise RuntimeError("alpha de composition incohérent")
+    filters.copy_alpha(result.bits(), result.width(), result.height(), source.constBits(),
+                       stride=result.bytesPerLine(), source_stride=source.bytesPerLine())
+    return result
+
+
+def _adjust_opaque(opaque: QImage, entry: AdjustmentEntry, width: int, height: int) -> QImage:
+    """Apply one adjustment layer onto an opaque backdrop (alpha stays 255)."""
+    adjusted = _rgba_detached(apply_adjustment(opaque, entry.spec))
+    if entry.mask is not None:
+        if entry.mask.size() != adjusted.size() or not apply_alpha_mask_native(adjusted, entry.mask):
+            raise RuntimeError("CreativeCore refused to apply the adjustment mask")
+    return composite_layers(width, height, [
+        _plain_entry(opaque),
+        _plain_entry(adjusted, True, entry.opacity, entry.blend_mode, entry.blend_parameters)])
+
+
+def _isolate_clipping_set(base, clipped, width: int, height: int, filters):
+    """Photoshop clipping set: clipped layers act *atop* the base only.
+
+    The base colour is made opaque, the clipped layers (and clipped
+    adjustments) are blended on it, then the base's own alpha, opacity and
+    blend mode are applied to the result as one layer.  This keeps soft,
+    semi-transparent base edges identical to Photoshop.
+    """
+    working = _opaque(base.image, filters)
+    pending = []
+
+    def flush():
+        nonlocal working
+        if pending:
+            working = composite_layers(width, height, [_plain_entry(working)] + [
+                _plain_entry(item.image, True, item.opacity, item.blend_mode,
+                             item.blend_parameters) for item in pending])
+            pending.clear()
+
+    for item in clipped:
+        if isinstance(item, AdjustmentEntry):
+            flush()
+            working = _adjust_opaque(_rgba_detached(working), item, width, height)
+        else:
+            pending.append(item)
+    flush()
+    result = _with_alpha_of(working, base.image, filters)
+    return _plain_entry(result, True, float(base.opacity), str(base.blend_mode),
+                        getattr(base, "blend_parameters", {}) or {}, False)
+
+
+def _legacy_adjustment(entries, entry, width, height):
+    """Pre-ABI-5 bridge: replace the stack by its adjusted composite."""
+    if entries:
+        base = composite_layers(width, height, entries)
+    else:
+        return entries
+    try:
+        adjusted = apply_adjustment(base, entry.spec)
+    except (RuntimeError, ValueError):
+        return entries
+    clip_image = None
+    if entry.clipping:
+        clip_source = next((item for item in reversed(entries)
+                            if not bool(getattr(item, "clipping", False))), entries[-1])
+        clip_image = clip_source.image
+    coverage = adjustment_coverage(entry.opacity, base.size(), entry.mask, clip_image)
+    if coverage is not None:
+        adjusted = apply_clipped_adjustment(base, adjusted, coverage)
+    return [_plain_entry(adjusted)]
+
+
+def resolve_stack(entries, width: int, height: int) -> list:
+    """Turn entries (possibly holding AdjustmentEntry items and clipping sets)
+    into plain entries any compositor can blend.
+
+    Photoshop rules: a hidden base hides its clipping set; a clipping set is
+    evaluated in isolation on its base; an adjustment layer transforms the
+    composite below it and is blended back with its own mode, opacity and
+    mask without changing the stack's transparency.
+    """
+    entries = list(entries)
+    if not entries:
+        return entries
+    has_clip = any(bool(getattr(item, "clipping", False)) and getattr(item, "visible", True)
+                   and not getattr(item, "empty", False) for item in entries)
+    has_adjustment = any(isinstance(item, AdjustmentEntry) for item in entries)
+    if not has_clip and not has_adjustment:
+        # Empty clipped entries are dropped too: leaving one would push the
+        # whole tile through the slower clipping-aware compositor.
+        return [item for item in entries if getattr(item, "visible", True)
+                and not getattr(item, "empty", False)]
+    filters = _psd_filters()
+    if filters is None:
+        # Old bridge: native clipping as before, adjustments by replacement.
+        result = []
+        for item in entries:
+            if not getattr(item, "visible", True):
+                continue
+            if isinstance(item, AdjustmentEntry):
+                result = _legacy_adjustment(result, item, width, height)
+            else:
+                result.append(item)
+        return result
+    result = []
+    index = 0
+    while index < len(entries):
+        base = entries[index]
+        end = index + 1
+        while end < len(entries) and bool(getattr(entries[end], "clipping", False)):
+            end += 1
+        clipped = [item for item in entries[index + 1:end] if getattr(item, "visible", True)
+                   and not getattr(item, "empty", False)]
+        index = end
+        if not getattr(base, "visible", True) or getattr(base, "empty", False):
+            continue                       # hidden/empty base: its clipping set shows nothing
+        if isinstance(base, AdjustmentEntry):
+            if not result:
+                continue                   # nothing below: nothing to adjust
+            below = composite_layers(width, height, result)
+            adjusted = _adjust_opaque(_opaque(below, filters), base, width, height)
+            flattened = _plain_entry(_with_alpha_of(adjusted, below, filters))
+            if clipped:
+                flattened = _isolate_clipping_set(flattened, clipped, width, height, filters)
+            result = [flattened]
+            continue
+        if base.image is None or base.image.isNull():
+            continue
+        if clipped:
+            result.append(_isolate_clipping_set(base, clipped, width, height, filters))
+        else:
+            result.append(base)
+    return result
+
+
 def _adjustment_spec(layer):
     value = getattr(layer, "adjustment", None)
     if not isinstance(value, dict):
@@ -257,45 +460,18 @@ def composite_document_layers(document, rect: QRect | None = None) -> QImage:
                      else (rect.width(), rect.height()))
     groups = {group.id: group for group in document.layer_groups}
 
-    def apply_adjustment_to_entries(entries, layer, base_visible):
-        """Replace the accumulated lower stack by its adjusted composite."""
-        if not getattr(layer, "visible", True):
-            base_visible[0] = False
-            return entries
-        clipping = bool(getattr(layer, "clipping", False))
-        if clipping and not base_visible[0]:
-            return entries
-        spec = _adjustment_spec(layer)
-        if spec is None:
-            return entries
-        if entries:
-            base = composite_layers(width, height, entries)
-        else:
-            base = QImage(width, height, QImage.Format.Format_RGBA8888)
-            if not fill_image_native(base, QColor(0, 0, 0, 0)):
-                raise RuntimeError("CreativeCore is required to initialize the adjustment composite")
-        adjusted = apply_adjustment(base, spec)
-        clip_image = None
-        if clipping and entries:
-            clip_source = next((entry for entry in reversed(entries)
-                                if not bool(getattr(entry, "clipping", False))), entries[-1])
-            clip_image = clip_source.image
+    def adjustment_for(layer):
         mask = None
         mask_store = getattr(layer, "alpha_mask_store", None)
         if mask_store is not None and not getattr(layer, "mask_disabled", False):
             if rect is None:
                 materialized = layer.alpha_mask_coverage()
-                mask = None if materialized.isNull() else materialized
+                mask = None if materialized is None or materialized.isNull() else materialized
             else:
                 tx, ty = rect.x() // mask_store.tile_size, rect.y() // mask_store.tile_size
                 mask = mask_store.tile(tx, ty) if mask_store.has_tile(tx, ty) else None
-        coverage = adjustment_coverage(getattr(layer, "opacity", 1.0), base.size(), mask, clip_image)
-        if coverage is not None:
-            adjusted = apply_clipped_adjustment(base, adjusted, coverage)
-        base_visible[0] = True
-        return [SimpleNamespace(image=adjusted, visible=True,
-                                opacity=1.0, blend_mode="normal",
-                                blend_parameters={}, clipping=False)]
+        return adjustment_entry(layer, mask)
+
     children = {group_id: [] for group_id in groups}
     roots = []
     for group in document.layer_groups:
@@ -338,14 +514,32 @@ def composite_document_layers(document, rect: QRect | None = None) -> QImage:
             elif position not in covered:
                 layer = document.layers[position]
                 if getattr(layer, "layer_kind", "raster") == "adjustment":
-                    entries[:] = apply_adjustment_to_entries(entries, layer, base_visible)
+                    entry = adjustment_for(layer)
+                    if entry is not None:
+                        entries.extend(hide_clipped_over_hidden_base([entry], base_visible))
                 else:
                     entries.extend(hide_clipped_over_hidden_base(
                         [_document_layer_entry(layer, rect)], base_visible))
                 position += 1
             else:
                 position += 1
-        group_image = composite_layers(width, height, entries)
+        group_image = composite_layers(width, height, resolve_stack(entries, width, height))
+        mask_store = getattr(group, "alpha_mask_store", None)
+        if mask_store is not None and not getattr(group, "mask_disabled", False):
+            if rect is None:
+                mask = QImage(width, height, QImage.Format.Format_ARGB32)
+                mask.fill(QColor(255, 255, 255, 255))
+                painter = QPainter(mask)
+                painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_Source)
+                for tx, ty in mask_store.occupied_keys:
+                    painter.drawImage(mask_store.tile_rect(tx, ty).topLeft(), mask_store.tile(tx, ty))
+                painter.end()
+            else:
+                tx, ty = rect.x() // mask_store.tile_size, rect.y() // mask_store.tile_size
+                mask = mask_store.tile(tx, ty) if mask_store.has_tile(tx, ty) else None
+            if mask is not None and not mask.isNull():
+                if not apply_alpha_mask_native(group_image, mask):
+                    raise RuntimeError("CreativeCore refused to apply the group alpha mask")
         return SimpleNamespace(
             image=group_image, visible=bool(group.visible), opacity=float(group.opacity),
             blend_mode=str(group.blend_mode),
@@ -372,14 +566,22 @@ def composite_document_layers(document, rect: QRect | None = None) -> QImage:
         elif index not in covered_by_root:
             layer = document.layers[index]
             if getattr(layer, "layer_kind", "raster") == "adjustment":
-                entries[:] = apply_adjustment_to_entries(entries, layer, base_visible)
+                entry = adjustment_for(layer)
+                if entry is not None:
+                    entries.extend(hide_clipped_over_hidden_base([entry], base_visible))
             else:
                 entries.extend(hide_clipped_over_hidden_base(
                     [_document_layer_entry(layer, rect)], base_visible))
             index += 1
         else:
             index += 1
-    return composite_layers(width, height, entries)
+    resolved = resolve_stack(entries, width, height)
+    if not resolved:
+        blank = QImage(width, height, QImage.Format.Format_ARGB32)
+        if not fill_image_native(blank, QColor(0, 0, 0, 0)):
+            raise RuntimeError("CreativeCore is required to clear the composite")
+        return blank
+    return composite_layers(width, height, resolved)
 
 
 def composite_document(document) -> QImage:
@@ -442,6 +644,7 @@ def composite_document(document) -> QImage:
     return image
 
 
-__all__ = ["BLEND_MODES", "composition_mode", "composite_document",
+__all__ = ["resolve_stack", "AdjustmentEntry", "adjustment_entry",
+           "BLEND_MODES", "composition_mode", "composite_document",
            "composite_document_layers", "composite_layers", "has_non_normal",
            "apply_clipped_adjustment"]

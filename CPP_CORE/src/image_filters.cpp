@@ -15,11 +15,17 @@
 
 #ifdef _OPENMP
 #define CC_OMP_FOR CC_PRAGMA(omp parallel for schedule(static))
+// Small surfaces (64 px projection tiles) cost more to hand to a thread team
+// than to process: waking OpenMP threads took ~1 ms per call.
+#define CC_OMP_FOR_SIZED(pixels) CC_PRAGMA(omp parallel for schedule(static) if((pixels) >= 65536))
 #define CC_OMP_PARALLEL CC_PRAGMA(omp parallel)
+#define CC_OMP_PARALLEL_SIZED(pixels) CC_PRAGMA(omp parallel if((pixels) >= 65536))
 #define CC_OMP_WORKSHARE CC_PRAGMA(omp for schedule(static))
 #else
 #define CC_OMP_FOR
+#define CC_OMP_FOR_SIZED(pixels)
 #define CC_OMP_PARALLEL
+#define CC_OMP_PARALLEL_SIZED(pixels)
 #define CC_OMP_WORKSHARE
 #endif
 
@@ -68,7 +74,7 @@ inline size_t idx4(int x, int y, int w)
 template <class F>
 void forEachPixel(const Surface& s, const Mask& m, F&& f)
 {
-    CC_OMP_FOR
+    CC_OMP_FOR_SIZED(static_cast<long long>(s.width) * s.height)
     for (int y = 0; y < s.height; ++y) {
         uint8_t* row = s.pixels + static_cast<size_t>(y) * static_cast<size_t>(s.stride);
         const uint8_t* mrow =
@@ -277,7 +283,10 @@ void boxGaussAxis(const std::vector<float>& src, std::vector<float>& dst, int w,
     const size_t elemStep = horizontal ? 4u : static_cast<size_t>(w) * 4u;
     const size_t lineStep = horizontal ? static_cast<size_t>(w) * 4u : 4u;
     const int total = n + 2 * R;
-    CC_OMP_PARALLEL
+    // Creating an OpenMP team for a small tile is slower than the filter
+    // itself and made descriptor validation/fuzzing appear to hang.  Keep
+    // parallel execution for real image-sized work only.
+    CC_OMP_PARALLEL_SIZED(static_cast<long long>(w) * h)
     {
         std::vector<float> bufA(static_cast<size_t>(total) * 4u), bufB(static_cast<size_t>(total) * 4u);
         CC_OMP_WORKSHARE
@@ -1374,6 +1383,111 @@ bool applyLut(const Surface& s, const uint8_t* red, const uint8_t* green,
         out[3] = in[3];
     });
     return true;
+}
+
+
+bool gradientMap(const Surface& s, const uint8_t* table, const Mask& mask)
+{
+    if (!argsOk(s, mask) || !table) return false;
+    forEachPixel(s, mask, [&](int, int, const uint8_t* in, uint8_t* out) {
+        // Fixed-point 0.30/0.59/0.11 scaled by 1024*255 keeps the result
+        // deterministic across compilers.
+        const int lum = in[0] * 307 + in[1] * 604 + in[2] * 113;   // 0 .. 255*1024
+        const int index = lum >> 10;
+        const int frac = lum & 1023;
+        const uint8_t* a = table + static_cast<size_t>(index) * 4u;
+        const uint8_t* b = table + static_cast<size_t>(index < 255 ? index + 1 : 255) * 4u;
+        for (int k = 0; k < 3; ++k)
+            out[k] = static_cast<uint8_t>((a[k] * (1024 - frac) + b[k] * frac + 512) >> 10);
+        out[3] = in[3];
+    });
+    return true;
+}
+
+bool lut3d(const Surface& s, const float* table, int size, const Mask& mask)
+{
+    if (!argsOk(s, mask) || !table || size < 2 || size > 256) return false;
+    const size_t n = static_cast<size_t>(size);
+    const float scale = static_cast<float>(size - 1) / 255.0f;
+    forEachPixel(s, mask, [&](int, int, const uint8_t* in, uint8_t* out) {
+        float f[3];
+        size_t i0[3];
+        for (int k = 0; k < 3; ++k) {
+            const float p = in[k] * scale;
+            size_t base = static_cast<size_t>(p);
+            if (base >= n - 1) base = n - 2;
+            i0[k] = base;
+            f[k] = p - static_cast<float>(base);
+        }
+        float acc[3] = {0.0f, 0.0f, 0.0f};
+        for (int corner = 0; corner < 8; ++corner) {
+            const size_t r = i0[0] + (corner & 1);
+            const size_t g = i0[1] + ((corner >> 1) & 1);
+            const size_t b = i0[2] + ((corner >> 2) & 1);
+            const float w = ((corner & 1) ? f[0] : 1.0f - f[0]) *
+                            (((corner >> 1) & 1) ? f[1] : 1.0f - f[1]) *
+                            (((corner >> 2) & 1) ? f[2] : 1.0f - f[2]);
+            const float* v = table + ((b * n + g) * n + r) * 3u;
+            acc[0] += w * v[0];
+            acc[1] += w * v[1];
+            acc[2] += w * v[2];
+        }
+        for (int k = 0; k < 3; ++k) {
+            const float value = acc[k] * 255.0f + 0.5f;
+            out[k] = static_cast<uint8_t>(value <= 0.0f ? 0 : (value >= 255.0f ? 255 : value));
+        }
+        out[3] = in[3];
+    });
+    return true;
+}
+
+bool setAlpha(const Surface& s, uint8_t alpha)
+{
+    if (!s.valid()) return false;
+    CC_OMP_FOR_SIZED(static_cast<long long>(s.width) * s.height)
+    for (int y = 0; y < s.height; ++y) {
+        uint8_t* row = s.pixels + static_cast<size_t>(y) * static_cast<size_t>(s.stride);
+        for (int x = 0; x < s.width; ++x) row[static_cast<size_t>(x) * 4u + 3u] = alpha;
+    }
+    return true;
+}
+
+bool copyAlpha(const Surface& s, const uint8_t* source, int sourceStride)
+{
+    if (!s.valid() || !source || sourceStride < s.width * 4) return false;
+    CC_OMP_FOR_SIZED(static_cast<long long>(s.width) * s.height)
+    for (int y = 0; y < s.height; ++y) {
+        uint8_t* row = s.pixels + static_cast<size_t>(y) * static_cast<size_t>(s.stride);
+        const uint8_t* src = source + static_cast<size_t>(y) * static_cast<size_t>(sourceStride);
+        for (int x = 0; x < s.width; ++x)
+            row[static_cast<size_t>(x) * 4u + 3u] = src[static_cast<size_t>(x) * 4u + 3u];
+    }
+    return true;
+}
+
+long unpackBits(const uint8_t* input, size_t length, uint8_t* output, size_t capacity)
+{
+    if ((!input && length) || (!output && capacity)) return -1;
+    size_t in = 0, out = 0;
+    while (in < length && out < capacity) {
+        const uint8_t header = input[in++];
+        if (header < 128) {
+            size_t count = static_cast<size_t>(header) + 1u;
+            if (count > length - in) count = length - in;
+            if (count > capacity - out) count = capacity - out;
+            std::memcpy(output + out, input + in, count);
+            in += static_cast<size_t>(header) + 1u;
+            out += count;
+        } else if (header > 128) {
+            size_t count = 257u - header;
+            if (in >= length) break;
+            if (count > capacity - out) count = capacity - out;
+            std::memset(output + out, input[in], count);
+            ++in;
+            out += count;
+        }
+    }
+    return static_cast<long>(out);
 }
 
 } // namespace filters

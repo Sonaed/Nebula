@@ -81,7 +81,7 @@ class BitmapBrushApiTests(unittest.TestCase):
             finally:
                 self.library.cs_brush_destroy(brush)
 
-    def test_native_full_color_bitmap_tip_keeps_source_color(self) -> None:
+    def test_native_bitmap_tip_uses_the_selected_brush_color(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             path = Path(temp_dir) / "red-tip.png"
             bitmap = QImage(8, 8, QImage.Format.Format_RGBA8888)
@@ -103,7 +103,7 @@ class BitmapBrushApiTests(unittest.TestCase):
                     24.0, 24.0, 1.0, 24.0, 24.0, 1.0,
                 )
                 offset = (24 * width + 24) * 4
-                self.assertEqual(tuple(pixels[offset:offset + 4]), (240, 25, 40, 255))
+                self.assertEqual(tuple(pixels[offset:offset + 4]), (20, 220, 60, 255))
             finally:
                 self.library.cs_brush_destroy(brush)
 

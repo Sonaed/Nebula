@@ -1,4 +1,5 @@
 #include "creative_core_api.h"
+#include "tile_store.h"
 
 #include <QDataStream>
 #include <QFile>
@@ -11,6 +12,8 @@
 #include <QtCore/qbytearray.h>
 #include <QtCore/qglobal.h>
 
+#include <zlib.h>
+
 #include <algorithm>
 #include <memory>
 #include <cmath>
@@ -20,7 +23,7 @@
 
 namespace {
 constexpr quint16 kNebulaVersion = 1;
-constexpr quint32 kMaxMetadata = 64u * 1024u * 1024u;
+constexpr quint32 kMaxMetadata = 128u * 1024u * 1024u;
 constexpr quint32 kMaxChunks = 1'000'000u;
 constexpr quint64 kMaxTileBytes = 64u * 64u * 4u;
 constexpr quint64 kMaxPackedBytes = 64u * 1024u;
@@ -55,11 +58,14 @@ bool validTileManifest(const QJsonObject& root, quint32 expectedChunkCount,
                        qint64 width, qint64 height) {
     const QJsonArray layers = root.value("layers").toArray();
     const QJsonArray references = root.value("references").toArray();
+    const QJsonArray savedSelections = root.value("saved_selections").toArray();
+    const QJsonArray groups = root.value("layer_groups").toArray();
     const QJsonArray records = root.value("chunks").toArray();
     if (!root.value("layers").isArray() || layers.isEmpty() ||
         layers.size() > 100000 || !root.value("chunks").isArray() ||
         records.size() != static_cast<qsizetype>(expectedChunkCount) ||
-        expectedChunkCount > kMaxChunks || references.size() > kMaxReferences)
+        expectedChunkCount > kMaxChunks || references.size() > kMaxReferences ||
+        savedSelections.size() > 256)
         return false;
 
     struct Owner { int role; qint64 index; };
@@ -86,6 +92,14 @@ bool validTileManifest(const QJsonObject& root, quint32 expectedChunkCount,
         } else if (roleName == QLatin1String("selection")) {
             role = 1;
             if (owner != 0) return false;
+        } else if (roleName == QLatin1String("saved_selection")) {
+            role = 3;
+            if (owner < 0 || owner >= savedSelections.size() ||
+                !savedSelections[static_cast<qsizetype>(owner)].isObject()) return false;
+        } else if (roleName == QLatin1String("group_mask")) {
+            role = 4;
+            if (owner < 0 || owner >= groups.size() ||
+                !groups[static_cast<qsizetype>(owner)].isObject()) return false;
         } else if (roleName == QLatin1String("reference")) {
             role = 2;
             if (owner < 0 || owner >= references.size() ||
@@ -114,6 +128,10 @@ bool validTileManifest(const QJsonObject& root, quint32 expectedChunkCount,
         completeIndex = completeIndex && value.isObject() && value.toObject().contains("tiles");
     for (const QJsonValue& value : references)
         completeIndex = completeIndex && value.isObject() && value.toObject().contains("tiles");
+    for (const QJsonValue& value : savedSelections)
+        completeIndex = completeIndex && value.isObject() && value.toObject().contains("tiles");
+    for (const QJsonValue& value : groups)
+        completeIndex = completeIndex && value.isObject() && value.toObject().contains("mask_tiles");
     if (!completeIndex) return true; // Compatibility with older schema-1 manifests.
 
     std::unordered_map<quint32, Owner> declarations;
@@ -138,6 +156,13 @@ bool validTileManifest(const QJsonObject& root, quint32 expectedChunkCount,
     QJsonValue selectionIds = root.value("selection_tiles");
     if (selectionIds.isNull()) selectionIds = QJsonArray{};
     if (!registerIds(selectionIds, 1, 0)) return false;
+    for (qsizetype i = 0; i < savedSelections.size(); ++i)
+        if (!registerIds(savedSelections[i].toObject().value("tiles"), 3, i)) return false;
+    for (qsizetype i = 0; i < groups.size(); ++i) {
+        QJsonValue maskIds = groups[i].toObject().value("mask_tiles");
+        if (maskIds.isUndefined()) maskIds = QJsonArray{};
+        if (!registerIds(maskIds, 4, i)) return false;
+    }
     for (qsizetype i = 0; i < references.size(); ++i)
         if (!registerIds(references[i].toObject().value("tiles"), 2, i)) return false;
     if (declarations.size() != tileOwners.size()) return false;
@@ -207,6 +232,20 @@ bool validNebulaManifest(const QByteArray& bytes, quint32 expectedChunkCount,
                 !finiteNumber(reference.value(field.first))) return false;
     }
 
+    const QJsonValue savedSelectionsValue = root.value("saved_selections");
+    if (!savedSelectionsValue.isUndefined() && !savedSelectionsValue.isArray()) return false;
+    const QJsonArray savedSelections = savedSelectionsValue.toArray();
+    if (savedSelections.size() > 256) return false;
+    QSet<QString> savedSelectionNames;
+    for (const QJsonValue& value : savedSelections) {
+        if (!value.isObject()) return false;
+        const QJsonObject selection = value.toObject();
+        if (!selection.value("name").isString() || !selection.value("tiles").isArray()) return false;
+        const QString name = selection.value("name").toString().trimmed();
+        if (name.isEmpty() || name.size() > 128 || savedSelectionNames.contains(name)) return false;
+        savedSelectionNames.insert(name);
+    }
+
     const QJsonValue textsValue = root.value("texts");
     if (!textsValue.isUndefined() && !textsValue.isArray()) return false;
     const QJsonArray texts = textsValue.toArray();
@@ -263,13 +302,9 @@ bool validNebulaManifest(const QByteArray& bytes, quint32 expectedChunkCount,
 }
 
 quint32 crc32_bytes(const uint8_t* data, qsizetype size) {
-    quint32 crc = 0xFFFFFFFFu;
-    for (qsizetype i = 0; i < size; ++i) {
-        crc ^= data[i];
-        for (int bit = 0; bit < 8; ++bit)
-            crc = (crc >> 1) ^ (0xEDB88320u & (0u - (crc & 1u)));
-    }
-    return ~crc;
+    // zlib implements the same IEEE CRC used by format v1, with optimized
+    // block processing instead of eight bit iterations per byte.
+    return static_cast<quint32>(::crc32(0L, data, static_cast<uInt>(size)));
 }
 
 QByteArray make_header(quint32 metadata_size, quint32 chunks) {
@@ -449,6 +484,64 @@ extern "C" int cs_nebula_reader_next_tile(CreativeNebulaReaderHandle handle,
     ++reader->read;
     if (reader->read == reader->expected && !reader->file.atEnd()) return -1;
     return 1;
+}
+
+extern "C" int cs_nebula_writer_add_store_tiles(CreativeNebulaWriterHandle writer,
+                                                const CsNebulaStoreTile* tiles,
+                                                uint32_t count) {
+    if (!writer || (!tiles && count) || count > kMaxChunks) return 0;
+    try {
+        for (uint32_t i = 0; i < count; ++i) {
+            const auto& tile = tiles[i];
+            if (!tile.store || tile.width <= 0 || tile.height <= 0 ||
+                tile.width > kTileSize || tile.height > kTileSize) return 0;
+            auto* store = static_cast<NativeTileStore*>(tile.store);
+            bool resident = false;
+            unsigned long long revision = 0, access = 0;
+            if (!store->tileInfo(tile.x, tile.y, resident, revision, access) || !resident)
+                return 0; // never serialize a scratch tile as empty
+            QImage image(tile.width, tile.height, QImage::Format_ARGB32);
+            if (!store->copyTile(tile.x, tile.y, image)) return 0;
+            const QImage rgba = image.convertToFormat(QImage::Format_RGBA8888);
+            if (rgba.isNull() || !cs_nebula_writer_add_tile(writer, tile.id,
+                    rgba.constBits(), rgba.sizeInBytes())) return 0;
+        }
+        return 1;
+    } catch (...) { return 0; }
+}
+
+extern "C" int cs_nebula_reader_read_store_tiles(CreativeNebulaReaderHandle handle,
+                                                 const CsNebulaStoreTile* tiles,
+                                                 uint32_t count) {
+    auto* reader = static_cast<Reader*>(handle);
+    if (!reader || !reader->valid || reader->read || count != reader->expected ||
+        count > kMaxChunks || (!tiles && count)) return 0;
+    try {
+        std::unordered_map<uint32_t, const CsNebulaStoreTile*> index;
+        index.reserve(count);
+        for (uint32_t i = 0; i < count; ++i) {
+            const auto& tile = tiles[i];
+            if (!tile.store || !tile.id || tile.width <= 0 || tile.height <= 0 ||
+                tile.width > kTileSize || tile.height > kTileSize ||
+                !index.emplace(tile.id, &tile).second) return 0;
+        }
+        uint8_t raw[kMaxTileBytes];
+        for (uint32_t i = 0; i < count; ++i) {
+            uint32_t id = 0;
+            uint64_t size = 0;
+            if (cs_nebula_reader_next_tile(handle, &id, raw, sizeof(raw), &size) != 1)
+                return 0;
+            const auto found = index.find(id);
+            if (found == index.end()) return 0;
+            const auto& tile = *found->second;
+            if (size != uint64_t(tile.width) * tile.height * 4) return 0;
+            QImage image(raw, tile.width, tile.height, tile.width * 4,
+                         QImage::Format_RGBA8888);
+            if (!static_cast<NativeTileStore*>(tile.store)->setTile(tile.x, tile.y, image))
+                return 0;
+        }
+        return reader->file.atEnd() ? 1 : 0;
+    } catch (...) { return 0; }
 }
 
 extern "C" void cs_nebula_reader_close(CreativeNebulaReaderHandle handle) {

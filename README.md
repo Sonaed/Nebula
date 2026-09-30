@@ -68,6 +68,48 @@ sauvegarde les convertit vers le format Nebula sans écraser la source.
 
 La décision produit, la spécification du format et les apports retenus d’Atlas
 sont détaillés dans [`docs/NEBULA_PRODUCT_AND_ENGINE.md`](docs/NEBULA_PRODUCT_AND_ENGINE.md).
+
+## Documents denses et mémoire — 26.2.0
+
+Dans **Préférences → Performance**, choisissez un profil RAM : **Prudent**
+(35 % de la RAM physique), **Équilibré** (60 %), **Performance** (75 %) ou
+**Manuel** pour conserver une limite explicite en MiB. À dépassement, Nebula
+libère les caches de projection puis évince les tuiles froides hors viewport
+vers le dossier scratch configuré. Une tuile évincée est rechargée à la demande.
+
+Avant tout import PSD/PSB, Nebula affiche un budget de travail estimé et le
+coût d’un calque RGBA plein format. Cette estimation décrit les buffers de
+l’import progressif, non la RAM finale d’une pile de calques dense. Conservez
+un scratch local avec de l’espace libre : en cas d’échec d’écriture, la tuile
+reste résidente et le document n’est pas remplacé par des pixels vides.
+Le protocole et les limites de qualification sont dans
+[`docs/ROADMAP_26.2.0.md`](docs/ROADMAP_26.2.0.md).
+
+## Continuité pendant un rechargement — 26.2.1
+
+Nebula conserve les projections récemment visibles pendant un déplacement et
+les remplace seulement quand les tuiles exactes sont prêtes. Le cache distingue
+les tuiles visibles, récentes, préchargées et froides ; le pan lent utilise un
+halo, le pan rapide précharge une bande directionnelle, et le zoom réduit
+favorise le rendu d’ensemble déjà disponible. Un indicateur discret signale un
+chargement, sans remplacer la zone par du vide. Les métriques de cette politique
+sont accessibles dans l’infobulle RAM. Voir
+[`docs/ROADMAP_26.2.1.md`](docs/ROADMAP_26.2.1.md).
+
+La qualification comportementale 26.2.2 et son scénario de viewport sont
+documentés dans [`docs/QUALIFICATION_26.2.2.md`](docs/QUALIFICATION_26.2.2.md).
+
+## Nebula 26.3.0 — édition avancée et automatisation
+
+La 26.3 ajoute les sélections combinables et enregistrables, leur persistance
+tuilée dans le format natif, les outils de sélection/transformations/masks et
+une API de scripts publique `nebula.script.v1` à permissions explicites. Les
+ressources partagées transportent désormais version, empreinte de contenu et
+dépendances vérifiables. Le périmètre, les scénarios et les limites de
+qualification sont consignés dans [`docs/QUALIFICATION_26.3.0.md`](docs/QUALIFICATION_26.3.0.md).
+La fermeture d’un document libère ses TileStores natifs et caches de groupes ;
+sur Linux, Nebula demande ensuite au système de restituer les pages libérées
+afin que le RSS redevienne lisible après un import dense.
 Les frontières entre CreativeCore, les adaptateurs Python et l’interface sont
 définies dans [`docs/ARCHITECTURE_BOUNDARIES.md`](docs/ARCHITECTURE_BOUNDARIES.md).
 La correspondance fonctionnelle Atlas/Nebula, les limites d’import et les

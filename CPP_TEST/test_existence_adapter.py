@@ -13,6 +13,24 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class ExistenceAdapterTests(unittest.TestCase):
+    @staticmethod
+    def require_unix_socket_transport():
+        """Skip transport-only checks where the runner forbids AF_UNIX bind.
+
+        The adapter protocol itself is covered through ``--message`` above;
+        this only makes the process/socket lifecycle assertions portable to
+        sandboxed CI runners.
+        """
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "probe.sock"
+            probe = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            try:
+                probe.bind(str(path))
+            except PermissionError:
+                raise unittest.SkipTest("Sockets Unix indisponibles dans cet environnement isolé")
+            finally:
+                probe.close()
+
     def run_adapter(self, *args, input_text=""):
         return subprocess.run(
             [sys.executable, "-m", "EXISTENCE.adapter", *args],
@@ -72,6 +90,7 @@ class ExistenceAdapterTests(unittest.TestCase):
         return json.loads(buffer.split(b"\n", 1)[0].decode("utf-8"))
 
     def test_unix_socket_full_lifecycle(self):
+        self.require_unix_socket_transport()
         with tempfile.TemporaryDirectory() as tmpdir:
             socket_path = Path(tmpdir) / "nebula.sock"
             process = subprocess.Popen(
@@ -113,6 +132,7 @@ class ExistenceAdapterTests(unittest.TestCase):
                     process.wait(timeout=3)
 
     def test_unix_socket_closes_when_universe_crashes(self):
+        self.require_unix_socket_transport()
         with tempfile.TemporaryDirectory() as tmpdir:
             socket_path = Path(tmpdir) / "nebula-crash.sock"
             process = subprocess.Popen(

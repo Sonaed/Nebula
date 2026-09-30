@@ -147,9 +147,12 @@ class LayerGroupTests(unittest.TestCase):
             rect = QRect(0, 0, 64, 64)
             entries, pending = canvas._tile_projection_layers(0, 0, rect)
             self.assertFalse(pending)
-            self.assertEqual(len(entries), 2)
-            self.assertEqual(entries[1].image.pixelColor(5, 5), QColor(0, 0, 255, 255))
-            self.assertEqual(entries[1].opacity, .5)
+            # The transparent root tile is deliberately elided before the
+            # stack reaches the compositor; the isolated group remains an
+            # independently cached entry.
+            self.assertEqual(len(entries), 1)
+            self.assertEqual(entries[0].image.pixelColor(5, 5), QColor(0, 0, 255, 255))
+            self.assertEqual(entries[0].opacity, .5)
             composite = composite_layers(64, 64, entries)
             pixel = composite.pixelColor(5, 5)
             self.assertEqual(pixel.red(), 0)
@@ -515,6 +518,31 @@ class LayerGroupTests(unittest.TestCase):
         with patch("DOCUMENTS.layer_manager.move_layer_stack", return_value=None):
             with self.assertRaisesRegex(RuntimeError, "CreativeCore is required"):
                 manager.move_layer_up(0)
+
+    def test_group_alpha_mask_is_tiled_and_round_trips(self):
+        from DOCUMENTS.format_nebula import NebulaFormat
+        import tempfile
+        from pathlib import Path
+        document = Document(8, 8)
+        document.layers[0].image.fill(QtTransparent)
+        layer = document.add_layer("Colour")
+        layer.image.fill(QColor(30, 80, 220, 255))
+        second = document.add_layer("Colour 2")
+        second.image.fill(QtTransparent)
+        group = document.group_layers([1, 2], "Masked")
+        self.assertIsNotNone(group)
+        mask = QImage(8, 8, QImage.Format.Format_ARGB32)
+        mask.fill(QColor(255, 255, 255, 128))
+        group.ensure_alpha_mask(8, 8).set_tile(0, 0, mask)
+        composite = composite_document_layers(document)
+        self.assertIn(composite.pixelColor(2, 2).alpha(), (127, 128))
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory) / "group-mask.nebula"
+            self.assertTrue(NebulaFormat.save(document, target))
+            restored = NebulaFormat.load(target)
+        restored_group = restored.layer_groups[0]
+        self.assertIsNotNone(restored_group.alpha_mask_store)
+        self.assertEqual(restored_group.alpha_mask_store.tile(0, 0).pixelColor(1, 1).alpha(), 128)
 
 
 QtTransparent = QColor(0, 0, 0, 0)

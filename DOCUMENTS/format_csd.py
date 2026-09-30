@@ -167,7 +167,7 @@ class CSDFormat:
                     "format": "CreativeSystem Document",
                     "version": CSDFormat.VERSION,
                     "schema_version": CSDFormat.SCHEMA_VERSION,
-                    "application_version": "0.3-dev",
+                    "application_version": __import__("CORE.version", fromlist=["VERSION"]).VERSION,
                     "width": document.width,
                     "height": document.height,
                     "dpi": document.dpi,
@@ -207,6 +207,12 @@ class CSDFormat:
                         "lock_alpha": layer.lock_alpha,
                         "clipping": layer.clipping,
                         "blend_parameters": layer.blend_parameters,
+                        "layer_kind": getattr(layer, "layer_kind", "raster"),
+                        "adjustment": getattr(layer, "adjustment", None),
+                        "layer_effects": getattr(layer, "layer_effects", []),
+                        "psd_effects": getattr(layer, "psd_effects", []),
+                        "retouch_operations": getattr(layer, "retouch_operations", []),
+                        "transform_state": getattr(layer, "transform_state", None),
                     }
 
                     document_data["layers"].append(
@@ -461,6 +467,12 @@ class CSDFormat:
                             for key, value in parameters.items()
                             if isinstance(value, (int, float)) and math.isfinite(float(value))
                         }
+                    layer.layer_kind = str(layer_data.get("layer_kind", "raster"))
+                    layer.adjustment = layer_data.get("adjustment")
+                    layer.layer_effects = list(layer_data.get("layer_effects", []))
+                    layer.psd_effects = list(layer_data.get("psd_effects", []))
+                    layer.retouch_operations = list(layer_data.get("retouch_operations", []))
+                    layer.transform_state = layer_data.get("transform_state")
 
                 document.active_layer_index = (
                     max(0, min(active_layer, len(document.layers) - 1))

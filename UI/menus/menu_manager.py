@@ -144,6 +144,7 @@ class MenuManager:
         self.actions["expand_selection"] = select_menu.addAction("Développer…")
         self.actions["contract_selection"] = select_menu.addAction("Contracter…")
         self.actions["select_color_range"] = select_menu.addAction("Plage de couleurs…")
+        self.actions["select_alpha"] = select_menu.addAction("Transparence du calque")
 
         # AFFICHAGE
         view_menu = menu_bar.addMenu("Affichage")

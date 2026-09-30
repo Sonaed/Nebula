@@ -6,7 +6,7 @@ import numpy as np
 from PySide6.QtCore import QPoint, QPointF, QRectF, Qt
 from PySide6.QtGui import QColor, QImage, QPainter, QPainterPath
 from CORE.native_bridge import (load_creative_core, native_magic_wand,
-                                fill_image_native)
+                                fill_image_native, native_selection_shape_mask)
 
 
 @dataclass
@@ -83,6 +83,12 @@ class SelectionTools:
         mask = _new_mask(size)
         if not points:
             return mask
+        if native_selection_shape_mask(mask, tool, points) is None:
+            raise RuntimeError("CreativeCore is required for shape selection")
+        if anti_alias and tool != "select_rectangle":
+            antialias_mask(mask)
+        feather_mask(mask, feather)
+        return mask
         painter = QPainter(mask)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing,
                               bool(anti_alias) and tool != "select_rectangle")

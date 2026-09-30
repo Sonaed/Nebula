@@ -503,11 +503,9 @@ class TileHistory:
                     store.tile(tx, ty) if (tx, ty) in occupied else None)
 
     def mark_dirty(self, layer, rect: QRect | None) -> None:
-        """Keep the transaction API explicit; tile capture is the source of truth."""
-        # The native history payload records the actual changed tiles.  A
-        # second dirty-rectangle map used to be accumulated here but was never
-        # consumed during commit or replay.
-        return
+        """Publish compatibility-image edits before history reads native tiles."""
+        if self._pending is not None:
+            layer.commit_image_cache(rect)
 
     def _tile_keys(self, width: int, height: int, rect: QRect | None = None):
         if width <= 0 or height <= 0:
@@ -581,9 +579,13 @@ class TileHistory:
             return False
         if not self._native_cursor.transaction_open:
             raise RuntimeError("CreativeCore has no open history transaction to commit")
-        for layer in document.layers:
-            layer.commit_image_cache()
         pending = self._pending
+        # Dirty raster transactions publish only their changed areas through
+        # mark_dirty; general/structural edits may also add new image caches.
+        if pending["mode"] in {"general", "structure"}:
+            for layer in document.layers:
+                # No allocation or tile work when the cache is absent/clean.
+                layer.commit_image_cache()
         if not self._native_cursor.commit_transaction():
             raise RuntimeError("CreativeCore rejected an open history transaction")
         self._pending = None

@@ -322,7 +322,12 @@ void testDescriptorFuzz()
                               std::numeric_limits<double>::quiet_NaN(),
                               std::numeric_limits<double>::infinity()};
     int accepted = 0, rejected = 0;
-    for (int iter = 0; iter < 20000; ++iter) {
+    // Thousands of structurally distinct payloads are enough for this ABI
+    // fuzzer.  Larger counts mostly repeat costly, yet valid, 1000px blur
+    // descriptors on a 7×5 fixture and turn a unit test into a multi-minute
+    // stress run.
+    constexpr int fuzzIterations = 4000;
+    for (int iter = 0; iter < fuzzIterations; ++iter) {
         std::vector<uint8_t> b(kDescriptorBytes, 0);
         b[0] = 'C'; b[1] = 'S'; b[2] = 'F'; b[3] = 'D'; b[4] = 1;
         const int kind = 1 + int(rng() % 18);
@@ -366,8 +371,8 @@ void testDescriptorFuzz()
         const Rect r = expandRectForFilter(d, Rect{2, 1, 5, 4}, 7, 5);
         CHECK(r.x0 <= 2 && r.x1 >= 5 && r.y0 <= 1 && r.y1 >= 4 && r.x0 >= 0 && r.x1 <= 7);
     }
-    std::printf("  %d acceptés, %d refusés sur 20000 tirages\n", accepted, rejected);
-    CHECK(accepted > 2000 && rejected > 2000);
+    std::printf("  %d acceptés, %d refusés sur %d tirages\n", accepted, rejected, fuzzIterations);
+    CHECK(accepted > 400 && rejected > 400);
 }
 
 void testExpandRect()

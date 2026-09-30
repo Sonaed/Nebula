@@ -145,26 +145,84 @@ class BlendCreatorDock(QDockWidget):
         self._refresh_graph()
         self.preview.set_mode(layer.blend_mode)
         self.preview.set_parameters(layer.blend_mode, values)
+        # The preview images are only needed while the dock is shown; building
+        # them materialized every layer below the active one at full size
+        # (seconds on large documents) on every layer-panel refresh.
+        self._preview_dirty = True
+        if self.isVisible():
+            self._update_preview_images()
+
+    def showEvent(self, event) -> None:  # noqa: N802 - Qt override
+        super().showEvent(event)
+        if getattr(self, "_preview_dirty", False):
+            self._update_preview_images()
+
+    @staticmethod
+    def _draw_store(painter, store, size: int) -> None:
+        """Draw a sparse tile store scaled into a size×size square (no full image)."""
+        width, height = max(1, store.width), max(1, store.height)
+        scale_x, scale_y = size / width, size / height
+        for tx, ty in store.occupied_keys:
+            rect = store.tile_rect(tx, ty)
+            try:
+                tile = store.tile(tx, ty)
+            except OSError:
+                continue
+            painter.drawImage(QRectF(rect.x() * scale_x, rect.y() * scale_y,
+                                     rect.width() * scale_x, rect.height() * scale_y), tile)
+
+    def _update_preview_images(self) -> None:
+        document = self._document
+        layer = self._active_layer
+        if document is None or layer is None:
+            return
+        self._preview_dirty = False
         backdrop = QImage(QSize(256, 256), QImage.Format.Format_ARGB32_Premultiplied)
         backdrop.fill(QColor(48, 48, 48))
         painter = QPainter(backdrop)
+        painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
         for y in range(0, 256, 16):
             for x in range(0, 256, 16):
                 if (x // 16 + y // 16) % 2:
                     painter.fillRect(x, y, 16, 16, QColor(64, 64, 64))
-        target = QRectF(0, 0, 256, 256)
         for below in document.layers[:document.active_layer_index]:
-            if below.visible:
+            if below.visible and getattr(below, "layer_kind", "raster") == "raster":
                 painter.setOpacity(max(0.0, min(1.0, float(below.opacity))))
-                painter.drawImage(target, below.image)
+                self._draw_store(painter, below.tile_store, 256)
         painter.end()
-        self.preview.set_images(backdrop, layer.image)
+        top = QImage(QSize(256, 256), QImage.Format.Format_ARGB32_Premultiplied)
+        top.fill(QColor(0, 0, 0, 0))
+        painter = QPainter(top)
+        painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
+        self._draw_store(painter, layer.tile_store, 256)
+        painter.end()
+        self.preview.set_images(backdrop, top)
 
     def _rebuild_parameters(self, mode: str, values: dict) -> None:
+        specs = [spec for spec in BlendPresetManager.parameter_specs(mode) if spec[0] != "opacity"]
+        keys = [spec[0] for spec in specs]
+        if (getattr(self, "_parameter_mode", None) == mode
+                and list(self.parameter_controls) == keys):
+            # Same mode (the usual case on a layer-panel refresh): update the
+            # values in place instead of destroying and recreating widgets.
+            for key, _label, _minimum, _maximum, _step, default in specs:
+                control = self.parameter_controls[key]
+                control.blockSignals(True)
+                try:
+                    control.setValue(float(values.get(key, default)))
+                finally:
+                    control.blockSignals(False)
+            return
+        self._parameter_mode = mode
         while self.parameters_layout.count():
             item = self.parameters_layout.takeAt(0)
-            if item.widget() is not None:
-                item.widget().deleteLater()
+            widget = item.widget()
+            if widget is not None:
+                # Detach synchronously: deleteLater() on these Python-owned
+                # sliders crashed shiboken (free(): invalid size) when a
+                # refresh rebuilt them repeatedly.
+                widget.hide()
+                widget.setParent(None)
         self.parameter_controls.clear()
         for key, label, minimum, maximum, step, default in BlendPresetManager.parameter_specs(mode):
             if key == "opacity":

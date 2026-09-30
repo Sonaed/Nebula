@@ -1,0 +1,27 @@
+{
+  "before": {
+    "version": "before",
+    "load_seconds": 0.4930593979952391,
+    "initial_seconds": 1.980923057999462,
+    "idle_ms": 4.143541509984061,
+    "edit_seconds": 0.012497140000050422,
+    "opacity_seconds": 0.032648548993165605,
+    "original": "31b9b2c9efefec0989aae279cef615bce8f87864916380a3fffda4fae9fab98a",
+    "edited": "c1a0b461c03c432864fa2c04785ec821a8f5cf329cb0e7ece222bab85c954ecf",
+    "changed": "07c16cf501984f026f9e71ac12e828d1ee354dce8c548d7dd304ad1b5f632bf7",
+    "source_sha256": "94f5adc9cbc055b76f38c4685eca431edcc6c8f26189776235a458e6733ed390"
+  },
+  "after": {
+    "version": "after",
+    "load_seconds": 0.5011332079957356,
+    "initial_seconds": 1.6042693709969171,
+    "idle_ms": 0.17450900995754637,
+    "edit_seconds": 0.007879814998887014,
+    "opacity_seconds": 0.026185068003542256,
+    "original": "31b9b2c9efefec0989aae279cef615bce8f87864916380a3fffda4fae9fab98a",
+    "edited": "c1a0b461c03c432864fa2c04785ec821a8f5cf329cb0e7ece222bab85c954ecf",
+    "changed": "07c16cf501984f026f9e71ac12e828d1ee354dce8c548d7dd304ad1b5f632bf7",
+    "source_sha256": "94f5adc9cbc055b76f38c4685eca431edcc6c8f26189776235a458e6733ed390"
+  },
+  "method": "One sequential headless CPU run per version, 1000x900 widget; 100 idle checks. Same document, initial pixels, one resident-tile edit, and layer opacity change. Excludes GPU painting and interactive brush latency. Timings are illustrative, not a performance guarantee."
+}

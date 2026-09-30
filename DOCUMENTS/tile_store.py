@@ -83,7 +83,10 @@ def shutdown_scratch_executor() -> None:
 def _get_scratch_dispatcher():
     global _scratch_dispatcher, _scratch_shutdown
     if _scratch_shutdown:
-        raise RuntimeError("Le dispatcher scratch est arrêté")
+        # A test (or a document window) may have closed the shared worker
+        # while another live QApplication remains.  Recreate it lazily on the
+        # UI thread instead of permanently poisoning subsequent documents.
+        initialize_scratch_dispatcher()
     if _scratch_dispatcher is None:
         initialize_scratch_dispatcher()
     global _scratch_executor
@@ -100,6 +103,41 @@ class TileSnapshot:
     image: QImage
 
 
+class _CountingHandle:
+    """Native tile-store handle that counts content/residency mutations.
+
+    Canvas uses ``TileStore._mutation_count`` to know, in O(1), that a store is
+    untouched since the previous frame instead of re-reading every tile
+    revision through ctypes.
+    """
+
+    _MUTATING = frozenset({"set", "set_many", "write_image", "remove", "load_png", "resize",
+                           "clear", "copy_resident_from", "close"})
+
+    def __init__(self, handle, owner):
+        import weakref
+        self._inner = handle
+        # Weak: a strong back-reference made every TileStore part of a cycle,
+        # so its native pixels were only freed by the cyclic GC.
+        self._owner = weakref.ref(owner)
+
+    def __bool__(self):
+        return bool(self._inner)
+
+    def __getattr__(self, name):
+        value = getattr(self._inner, name)
+        if name in self._MUTATING and callable(value):
+            owner_ref = self._owner
+
+            def counted(*args, **kwargs):
+                owner = owner_ref()
+                if owner is not None:
+                    owner._mutation_count += 1
+                return value(*args, **kwargs)
+            return counted
+        return value
+
+
 class TileStore:
     """Sparse tile map; absent tiles are transparent and consume no pixel RAM."""
 
@@ -110,9 +148,11 @@ class TileStore:
         self.tile_size = max(1, int(tile_size))
         self.image_format = image_format
         self.id = uuid4().hex
-        self._native_handle = create_native_tile_store(self.width, self.height, self.tile_size)
-        if self._native_handle is None:
+        self._mutation_count = 0
+        native = create_native_tile_store(self.width, self.height, self.tile_size)
+        if native is None:
             raise RuntimeError("CreativeCore est requis pour le stockage des tuiles")
+        self._native_handle = _CountingHandle(native, self)
         # CreativeCore owns sparse pixels, revisions and resident-tile metadata.
         # Python keeps only Qt adapters and scratch-file bookkeeping.
         self._scratch_directory: Path | None = None
@@ -276,9 +316,10 @@ class TileStore:
                     self._failed_loads[key] = str(error)
                     raise OSError(f"Unreadable scratch tile {key}: {error}") from error
             result = QImage(rect.size(), self.image_format)
-            if not fill_image_native(result, QColor(0, 0, 0, 0)):
-                raise RuntimeError("CreativeCore could not clear a tile adapter")
-            self._native_handle.copy(tx, ty, result)
+            # copy() overwrites every pixel of a resident tile; only a missing
+            # tile needs clearing (a native fill per tile read cost ~0.2 ms).
+            if not self._native_handle.copy(tx, ty, result):
+                result.fill(0)
             return result
         result = QImage(rect.size(), self.image_format)
         if not fill_image_native(result, QColor(0, 0, 0, 0)):

@@ -8,7 +8,7 @@ from PySide6.QtGui import QColor, QImage, QPainter, QTransform
 
 from DOCUMENTS.selection import SelectionMask, SelectionOperation
 from TOOLS.selection_tools import SelectionTools
-from TOOLS.transform_tool import TransformSpec, TransformTool
+from TOOLS.transform_tool import TransformSpec, TransformState, TransformTool
 from CORE.native_bridge import load_creative_core
 
 
@@ -56,6 +56,31 @@ def _reference_transform(image, spec, selection=None):
 
 
 class TransformToolTests(unittest.TestCase):
+    def test_non_destructive_transform_state_preserves_source_pixels(self) -> None:
+        from DOCUMENTS.document import Document
+        document = Document(20, 20)
+        layer = document.get_active_layer()
+        layer.image.setPixelColor(4, 4, QColor("red"))
+        original = layer.image.copy()
+        TransformTool.set_non_destructive_state(layer, TransformState(translate_x=5))
+        self.assertEqual(layer.image, original)
+        self.assertEqual(layer.render_image().pixelColor(9, 4), QColor("red"))
+        TransformTool.clear_non_destructive_state(layer)
+        self.assertEqual(layer.render_image(), original)
+
+    def test_transform_state_round_trips_with_native_document(self) -> None:
+        import tempfile
+        from pathlib import Path
+        from DOCUMENTS.document import Document
+        from DOCUMENTS.format_nebula import NebulaFormat
+        document = Document(16, 16)
+        TransformTool.set_non_destructive_state(document.get_active_layer(), TransformState(rotation=12))
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory) / "transform.nebula"
+            self.assertTrue(NebulaFormat.save(document, target))
+            restored = NebulaFormat.load(target)
+        self.assertEqual(restored.get_active_layer().transform_state["rotation"], 12.0)
+
     def test_native_selection_transform_matches_independent_reference(self) -> None:
         native = load_creative_core()
         self.assertIsNotNone(native)

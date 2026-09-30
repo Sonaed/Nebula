@@ -408,6 +408,52 @@ int cs_filter_apply_lut(uint8_t* rgba, int width, int height, int stride,
     });
 }
 
+int cs_filter_gradient_map(uint8_t* rgba, int width, int height, int stride,
+                           const uint8_t* table256_rgba, const uint8_t* mask,
+                           int mask_stride)
+{
+    return guarded([&] {
+        return cc::filters::gradientMap(surfaceOf(rgba, width, height, stride), table256_rgba,
+                                        maskOf(mask, mask_stride));
+    });
+}
+
+int cs_filter_lut3d(uint8_t* rgba, int width, int height, int stride,
+                    const float* table, int size, const uint8_t* mask, int mask_stride)
+{
+    return guarded([&] {
+        return cc::filters::lut3d(surfaceOf(rgba, width, height, stride), table, size,
+                                  maskOf(mask, mask_stride));
+    });
+}
+
+int cs_filter_set_alpha(uint8_t* rgba, int width, int height, int stride, int alpha)
+{
+    return guarded([&] {
+        if (alpha < 0 || alpha > 255) return false;
+        return cc::filters::setAlpha(surfaceOf(rgba, width, height, stride),
+                                     static_cast<uint8_t>(alpha));
+    });
+}
+
+int cs_filter_copy_alpha(uint8_t* rgba, int width, int height, int stride,
+                         const uint8_t* source, int source_stride)
+{
+    return guarded([&] {
+        return cc::filters::copyAlpha(surfaceOf(rgba, width, height, stride), source,
+                                      source_stride);
+    });
+}
+
+long cs_psd_unpackbits(const uint8_t* input, size_t length, uint8_t* output, size_t capacity)
+{
+    try {
+        return cc::filters::unpackBits(input, length, output, capacity);
+    } catch (...) {
+        return -1;
+    }
+}
+
 } // extern "C"
 
 // ------------------------------------------------- calques de filtre (v2) ----

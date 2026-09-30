@@ -55,6 +55,8 @@ public:
     void resetLayers();
     bool createGroup(const std::vector<int>& indices, const std::string& name,
                      int& groupIndex);
+    bool createEnclosingGroup(const std::vector<int>& requested, const std::string& name,
+                              int& groupIndex);
     bool removeGroup(int groupIndex);
     bool setGroupProperty(int groupIndex, int property, double requested,
                           double& output);

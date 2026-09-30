@@ -88,7 +88,8 @@ bool DocumentState::createGroup(const std::vector<int>& indices,
                 std::sort(members.begin(), members.end());
                 return group.parentGroup < 0 && members == requested;
             });
-        if (child == groups_.end()) return false;
+        if (child == groups_.end())
+            return createEnclosingGroup(requested, name, groupIndex);
         normalized = std::move(requested);
         const int childIndex = static_cast<int>(std::distance(groups_.begin(), child));
         NativeGroupState group;
@@ -109,6 +110,39 @@ bool DocumentState::createGroup(const std::vector<int>& indices,
     group.layerIndices = std::move(normalized);
     groups_.push_back(std::move(group));
     groupIndex = static_cast<int>(groups_.size()) - 1;
+    return true;
+}
+
+bool DocumentState::createEnclosingGroup(const std::vector<int>& requested,
+                                         const std::string& name, int& groupIndex)
+{
+    // Photoshop-style folder nesting (PSD import, restored documents): the new
+    // folder may enclose several complete root folders plus loose layers, as
+    // long as the selection is one contiguous run and never cuts a folder in
+    // two.  Folders are created children-first, so the enclosed folders
+    // already exist and simply get this one as their parent.
+    if (requested.size() < 2) return false;
+    if (requested.front() < 0 || requested.back() >= layerCount()) return false;
+    if (requested.back() - requested.front() + 1 != static_cast<int>(requested.size()))
+        return false;
+    std::vector<int> children;
+    for (int index = 0; index < groupCount(); ++index) {
+        const auto& group = groups_[static_cast<std::size_t>(index)];
+        std::size_t inside = 0;
+        for (int member : group.layerIndices)
+            if (std::binary_search(requested.begin(), requested.end(), member)) ++inside;
+        if (inside == 0) continue;
+        if (inside != group.layerIndices.size()) return false;   // folder cut in two
+        if (group.parentGroup < 0) children.push_back(index);
+    }
+    if (children.empty()) return false;
+    NativeGroupState group;
+    group.id = nextGroupId_++;
+    group.name = name;
+    group.layerIndices = requested;
+    groups_.push_back(std::move(group));
+    groupIndex = static_cast<int>(groups_.size()) - 1;
+    for (int child : children) groups_[static_cast<std::size_t>(child)].parentGroup = groupIndex;
     return true;
 }
 

@@ -20,7 +20,7 @@ from __future__ import annotations
 import ctypes
 from typing import Optional
 
-ABI_VERSION = 4          # version que cet adaptateur attend au mieux
+ABI_VERSION = 5          # version que cet adaptateur attend au mieux
 # Modes du mélange par luminosité ; tout autre nom = masque plein (comportement
 # historique).  Alias français conservés.
 LUMINOSITY_MODES = {"lights": 1, "highlights": 1, "lumières": 1, "shadows": 2, "ombres": 2,
@@ -129,6 +129,16 @@ class NativeFilters:
     def supports_adjustments(self) -> bool:
         """Vrai si le bridge exporte les noyaux de calques de réglage (ABI >= 4)."""
         return self.abi_version >= 4
+
+    @property
+    def supports_psd_adjustments(self) -> bool:
+        """Vrai si le bridge exporte courbe de dégradé, LUT 3D et outils alpha (ABI >= 5)."""
+        return self.abi_version >= 5
+
+    def _require_psd(self) -> None:
+        if not self.supports_psd_adjustments:
+            raise FilterError("ce bridge est antérieur aux réglages Photoshop (ABI < 5) : "
+                              "recompilez CreativeCore")
 
     def _require_adjustments(self) -> None:
         if not self.supports_adjustments:
@@ -353,6 +363,59 @@ class NativeFilters:
         del keep
         if not ok:
             raise FilterError("cs_filter_stroke : arguments refusés par CreativeCore")
+
+    def gradient_map(self, pixels, width, height, table, *, mask=None, stride=None,
+                     mask_stride=None):
+        """Courbe de transfert de dégradé : ``table`` = 256 couleurs RGBA (1024 octets)."""
+        self._require_psd()
+        data = bytes(table)
+        if len(data) != 1024:
+            raise ValueError("la table d'une courbe de dégradé fait 1024 octets")
+        table_array = (ctypes.c_uint8 * 1024).from_buffer_copy(data)
+        self._call("cs_filter_gradient_map", pixels, width, height, stride, mask, mask_stride,
+                   lambda fn, a, s, m, ms: fn(a, width, height, s, table_array, m, ms))
+
+    def lut3d(self, pixels, width, height, table, size, *, mask=None, stride=None,
+              mask_stride=None):
+        """LUT 3D : ``table`` = size³×3 floats 0..1 (rouge le plus rapide)."""
+        self._require_psd()
+        size = int(size)
+        count = size ** 3 * 3
+        try:
+            import numpy as np
+            values = np.ascontiguousarray(table, dtype=np.float32).reshape(-1)
+            if values.size != count:
+                raise ValueError
+            table_array = (ctypes.c_float * count).from_buffer_copy(values.tobytes())
+        except ImportError:
+            values = [float(v) for v in table]
+            if len(values) != count:
+                raise ValueError("taille de LUT 3D incohérente")
+            table_array = (ctypes.c_float * count)(*values)
+        except ValueError:
+            raise ValueError("taille de LUT 3D incohérente") from None
+        self._call("cs_filter_lut3d", pixels, width, height, stride, mask, mask_stride,
+                   lambda fn, a, s, m, ms: fn(a, width, height, s, table_array, size, m, ms))
+
+    def set_alpha(self, pixels, width, height, alpha=255, *, stride=None):
+        self._require_psd()
+        array, keep, stride = self._geometry(pixels, width, height, stride)
+        ok = self._lib.cs_filter_set_alpha(array, width, height, stride, int(alpha))
+        del keep
+        if not ok:
+            raise FilterError("cs_filter_set_alpha : arguments refusés par CreativeCore")
+
+    def copy_alpha(self, pixels, width, height, source, *, stride=None, source_stride=None):
+        """Copie l'alpha de ``source`` (RGBA8888 même taille) dans ``pixels``."""
+        self._require_psd()
+        array, keep_p, stride = self._geometry(pixels, width, height, stride)
+        source_array, keep_s, source_stride = self._readable_pair(
+            source, width, height, source_stride, "source")
+        ok = self._lib.cs_filter_copy_alpha(array, width, height, stride, source_array,
+                                            source_stride)
+        del keep_p, keep_s
+        if not ok:
+            raise FilterError("cs_filter_copy_alpha : arguments refusés par CreativeCore")
 
     def _readable_pair(self, source, width, height, source_stride, what):
         source_stride = width * 4 if source_stride is None else int(source_stride)
@@ -729,6 +792,21 @@ def _declare(library) -> None:
         function.restype = i
     library.cs_filter_abi_version.argtypes = []
     library.cs_filter_abi_version.restype = i
+    try:
+        abi = library.cs_filter_abi_version()
+    except Exception:  # noqa: BLE001
+        abi = 0
+    if abi >= 5:
+        optional = {
+            "cs_filter_gradient_map": common + [u8] + tail,
+            "cs_filter_lut3d": common + [ctypes.POINTER(ctypes.c_float), i] + tail,
+            "cs_filter_set_alpha": common + [i],
+            "cs_filter_copy_alpha": common + [u8, i],
+        }
+        for name, argtypes in optional.items():
+            function = getattr(library, name)
+            function.argtypes = argtypes
+            function.restype = i
 
 
 def load_filters() -> Optional[NativeFilters]:
@@ -739,10 +817,18 @@ def load_filters() -> Optional[NativeFilters]:
     """
     from .native_bridge import load_creative_core
 
+    global _CACHED_FILTERS
     library = load_creative_core()
     if library is None or not hasattr(library, "cs_filter_abi_version"):
         return None
+    cached = _CACHED_FILTERS
+    if cached is not None and cached._lib is library:
+        return cached          # declaring every ctypes signature per call was costly
     try:
-        return NativeFilters(library)
+        _CACHED_FILTERS = NativeFilters(library)
+        return _CACHED_FILTERS
     except (AttributeError, OSError):
         return None
+
+
+_CACHED_FILTERS = None

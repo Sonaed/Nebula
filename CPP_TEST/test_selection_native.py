@@ -55,6 +55,15 @@ class SelectionWiringTests(unittest.TestCase):
         patcher = mock.patch.object(blend_modes, "QImage", FakeImage)
         patcher.start()
         self.addCleanup(patcher.stop)
+        # This module checks native kernels with a minimal image double, not
+        # TileStore persistence. Keep invalidation observable without asking
+        # the double to emulate the tiled backing introduced in 26.3.
+        patcher = mock.patch.object(
+            selection.SelectionMask, "invalidate",
+            lambda mask: setattr(mask, "_bounds_cache", None),
+        )
+        patcher.start()
+        self.addCleanup(patcher.stop)
         self.mask = selection.SelectionMask.__new__(selection.SelectionMask)
         self.mask.image = FakeImage.from_array(self.data)
         self.mask._bounds_cache = "stale"

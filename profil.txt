@@ -1,0 +1,110 @@
+Mon Sep 28 10:21:12 2026    /tmp/neb4.prof
+
+         25252118 function calls (25186790 primitive calls) in 94.157 seconds
+
+   Ordered by: internal time
+   List reduced from 3026 to 40 due to restriction <40>
+
+   ncalls  tottime  percall  cumtime  percall filename:lineno(function)
+        1   56.135   56.135   92.798   92.798 {built-in method exec}
+     5387   11.757    0.002   12.181    0.002 /home/deanos/Documents/Nebula/DOCUMENTS/stack_program.py:211(compose_program)
+    15781    2.684    0.000    2.715    0.000 /home/deanos/Documents/Nebula/CORE/native_bridge.py:1832(next_tile)
+     1144    1.901    0.002   25.202    0.022 /home/deanos/Documents/Nebula/CANVAS/canvas.py:3603(_draw_projection_overview)
+  6392451    1.139    0.000    1.139    0.000 {method 'get' of 'dict' objects}
+   425303    1.123    0.000    4.798    0.000 /home/deanos/Documents/Nebula/DOCUMENTS/stack_program.py:109(emit_layer)
+     5655    1.080    0.000    1.614    0.000 /home/deanos/Documents/Nebula/CORE/native_bridge.py:622(key_revisions)
+     2288    0.917    0.000    0.950    0.000 /home/deanos/Documents/Nebula/CANVAS/canvas.py:4593(visible_document_tile_keys)
+    72389    0.826    0.000    1.480    0.000 /home/deanos/Documents/Nebula/CORE/native_bridge.py:648(_image_call)
+     1235    0.807    0.001    0.807    0.001 /home/deanos/Documents/Nebula/CORE/native_bridge.py:612(keys)
+4727866/4727832    0.675    0.000    0.678    0.000 {built-in method builtins.getattr}
+     6343    0.671    0.000    0.671    0.000 {method 'copy' of 'PySide6.QtGui.QImage' objects}
+   138371    0.582    0.000    0.582    0.000 {method 'bits' of 'PySide6.QtGui.QImage' objects}
+      955    0.466    0.000    1.015    0.001 /home/deanos/Documents/Nebula/CANVAS/gpu_renderer.py:312(_upload_client_memory)
+     1144    0.422    0.000    3.421    0.003 /home/deanos/Documents/Nebula/CANVAS/canvas.py:4010(_ensure_projection)
+    51187    0.383    0.000    2.000    0.000 /home/deanos/Documents/Nebula/DOCUMENTS/tile_store.py:283(tile)
+     1144    0.375    0.000   29.703    0.026 /home/deanos/Documents/Nebula/CANVAS/canvas.py:3532(_paint_gpu_projection)
+5387/1570    0.352    0.000    0.830    0.001 /home/deanos/Documents/Nebula/CORE/projection_worker.py:80(receive)
+     5655    0.333    0.000    2.097    0.000 /home/deanos/Documents/Nebula/DOCUMENTS/tile_store.py:171(resident_revisions)
+    48456    0.301    0.000    0.327    0.000 /home/deanos/Documents/Nebula/CORE/native_bridge.py:603(info)
+   107740    0.275    0.000    0.351    0.000 /home/deanos/Documents/Nebula/DOCUMENTS/stack_program.py:100(members)
+   165406    0.271    0.000    0.271    0.000 /usr/lib/python3.14/ctypes/__init__.py:613(cast)
+   104242    0.269    0.000    0.269    0.000 {built-in method builtins.repr}
+32187/5387    0.267    0.000    5.714    0.001 /home/deanos/Documents/Nebula/DOCUMENTS/stack_program.py:145(emit_range)
+   452238    0.264    0.000    0.414    0.000 /home/deanos/Documents/Nebula/DOCUMENTS/stack_program.py:71(_mode)
+    13408    0.262    0.000    0.502    0.000 /home/deanos/Documents/Nebula/DOCUMENTS/adjustments.py:386(spec_from_dict)
+10795/6986    0.259    0.000    5.621    0.001 {method 'emit' of 'PySide6.QtCore.SignalInstance' objects}
+        6    0.230    0.038    0.344    0.057 /home/deanos/Documents/Nebula/TOOLS/brush_preset_manager.py:332(_render_builtin_bitmap_tip)
+    15781    0.228    0.000    0.823    0.000 /home/deanos/Documents/Nebula/CORE/native_bridge.py:2071(clone_image_native)
+   115475    0.222    0.000    0.261    0.000 /home/deanos/Documents/Nebula/DOCUMENTS/tile_store.py:204(tile_rect)
+   132025    0.217    0.000    0.592    0.000 /home/deanos/Documents/Nebula/CORE/native_bridge.py:2351(qimage_pointer)
+   232778    0.205    0.000    0.327    0.000 /home/deanos/Documents/Nebula/DOCUMENTS/stack_program.py:106(hidden_base)
+    90376    0.183    0.000    0.368    0.000 /home/deanos/Documents/Nebula/CANVAS/canvas.py:4451(_layer_static_signature)
+    15781    0.181    0.000    0.414    0.000 /home/deanos/Documents/Nebula/CORE/native_bridge.py:1963(copy_image_rect_native)
+       19    0.174    0.009    0.289    0.015 /home/deanos/Documents/Nebula/CANVAS/canvas.py:4488(_tile_signature_index)
+    91520    0.174    0.000    0.260    0.000 /home/deanos/Documents/Nebula/CANVAS/gpu_tile_compositor.py:156(<genexpr>)
+    26970    0.171    0.000    0.171    0.000 {method 'drawImage' of 'PySide6.QtGui.QPainter' objects}
+     5387    0.162    0.000    0.452    0.000 /home/deanos/Documents/Nebula/CANVAS/canvas.py:3914(_screen_rect_for_document_rect)
+  1026906    0.159    0.000    0.159    0.000 {method 'append' of 'list' objects}
+    21567    0.157    0.000    0.194    0.000 /home/deanos/Documents/Nebula/CANVAS/view_state.py:8(transform_point)
+
+
+Mon Sep 28 10:21:12 2026    /tmp/neb4.prof
+
+         25252118 function calls (25186790 primitive calls) in 94.157 seconds
+
+   Ordered by: cumulative time
+   List reduced from 3026 to 50 due to restriction <50>
+
+   ncalls  tottime  percall  cumtime  percall filename:lineno(function)
+    319/1    0.014    0.000   94.403   94.403 {built-in method builtins.exec}
+        1    0.000    0.000   94.403   94.403 main.py:1(<module>)
+        1    0.045    0.045   94.403   94.403 main.py:74(main)
+        1   56.135   56.135   92.798   92.798 {built-in method exec}
+     1144    0.006    0.000   29.753    0.026 /home/deanos/Documents/Nebula/CANVAS/canvas.py:3304(paintGL)
+     1144    0.012    0.000   29.745    0.026 /home/deanos/Documents/Nebula/CANVAS/canvas.py:3319(_paint_gl_frame)
+     1144    0.375    0.000   29.703    0.026 /home/deanos/Documents/Nebula/CANVAS/canvas.py:3532(_paint_gpu_projection)
+     1144    1.901    0.002   25.202    0.022 /home/deanos/Documents/Nebula/CANVAS/canvas.py:3603(_draw_projection_overview)
+     5387    0.152    0.000   18.220    0.003 /home/deanos/Documents/Nebula/CANVAS/canvas.py:4168(_native_tile_image)
+     5387   11.757    0.002   12.181    0.002 /home/deanos/Documents/Nebula/DOCUMENTS/stack_program.py:211(compose_program)
+     5387    0.025    0.000    5.825    0.001 /home/deanos/Documents/Nebula/DOCUMENTS/stack_program.py:75(build_stack_program)
+32187/5387    0.267    0.000    5.714    0.001 /home/deanos/Documents/Nebula/DOCUMENTS/stack_program.py:145(emit_range)
+10795/6986    0.259    0.000    5.621    0.001 {method 'emit' of 'PySide6.QtCore.SignalInstance' objects}
+   425303    1.123    0.000    4.798    0.000 /home/deanos/Documents/Nebula/DOCUMENTS/stack_program.py:109(emit_layer)
+        1    0.000    0.000    4.296    4.296 /home/deanos/Documents/Nebula/UI/home/home_page.py:529(<lambda>)
+        1    0.004    0.004    4.296    4.296 /home/deanos/Documents/Nebula/CORE/application.py:988(open_file)
+26935/10774    0.140    0.000    4.285    0.000 /home/deanos/Documents/Nebula/DOCUMENTS/stack_program.py:162(emit_group)
+        1    0.002    0.002    4.218    4.218 /home/deanos/Documents/Nebula/DOCUMENTS/format_nebula.py:544(load_document)
+        1    0.125    0.125    4.215    4.215 /home/deanos/Documents/Nebula/DOCUMENTS/format_nebula.py:391(load)
+     1144    0.422    0.000    3.421    0.003 /home/deanos/Documents/Nebula/CANVAS/canvas.py:4010(_ensure_projection)
+    15781    2.684    0.000    2.715    0.000 /home/deanos/Documents/Nebula/CORE/native_bridge.py:1832(next_tile)
+     5655    0.333    0.000    2.097    0.000 /home/deanos/Documents/Nebula/DOCUMENTS/tile_store.py:171(resident_revisions)
+    51187    0.383    0.000    2.000    0.000 /home/deanos/Documents/Nebula/DOCUMENTS/tile_store.py:283(tile)
+        1    0.000    0.000    1.756    1.756 /home/deanos/Documents/Nebula/UI/context/context_menu_manager.py:56(show_canvas_menu)
+        1    0.052    0.052    1.755    1.755 {staticmethod(<built-in method exec of Shiboken.ObjectType object at 0x55e3bce141f0>)}
+     5655    1.080    0.000    1.614    0.000 /home/deanos/Documents/Nebula/CORE/native_bridge.py:622(key_revisions)
+   376591    0.137    0.000    1.506    0.000 /home/deanos/Documents/Nebula/CANVAS/canvas.py:4184(fetch)
+    72389    0.826    0.000    1.480    0.000 /home/deanos/Documents/Nebula/CORE/native_bridge.py:648(_image_call)
+   325609    0.150    0.000    1.407    0.000 /home/deanos/Documents/Nebula/CANVAS/canvas.py:4194(layer_image)
+    51187    0.074    0.000    1.278    0.000 /home/deanos/Documents/Nebula/CORE/native_bridge.py:672(copy)
+  6392451    1.139    0.000    1.139    0.000 {method 'get' of 'dict' objects}
+       26    0.012    0.000    1.093    0.042 /home/deanos/Documents/Nebula/UI/docks/layers_dock.py:766(refresh_layers)
+        1    0.001    0.001    1.077    1.077 /home/deanos/Documents/Nebula/CORE/application.py:81(__init__)
+       20    0.000    0.000    1.071    0.054 /home/deanos/Documents/Nebula/CORE/application.py:1563(_do_refresh_layers)
+       20    0.000    0.000    1.071    0.054 /home/deanos/Documents/Nebula/UI/ui.py:1262(refresh_layers)
+     1976    0.017    0.000    1.037    0.001 /home/deanos/Documents/Nebula/UI/docks/layers_dock.py:810(add_leaf)
+      955    0.466    0.000    1.015    0.001 /home/deanos/Documents/Nebula/CANVAS/gpu_renderer.py:312(_upload_client_memory)
+     2288    0.917    0.000    0.950    0.000 /home/deanos/Documents/Nebula/CANVAS/canvas.py:4593(visible_document_tile_keys)
+     5387    0.014    0.000    0.843    0.000 /home/deanos/Documents/Nebula/CORE/projection_worker.py:180(_deliver_native_result)
+5387/1570    0.352    0.000    0.830    0.001 /home/deanos/Documents/Nebula/CORE/projection_worker.py:80(receive)
+    15781    0.228    0.000    0.823    0.000 /home/deanos/Documents/Nebula/CORE/native_bridge.py:2071(clone_image_native)
+     1235    0.005    0.000    0.815    0.001 /home/deanos/Documents/Nebula/DOCUMENTS/tile_store.py:168(resident_keys)
+     1235    0.807    0.001    0.807    0.001 /home/deanos/Documents/Nebula/CORE/native_bridge.py:612(keys)
+     5387    0.026    0.000    0.786    0.000 /home/deanos/Documents/Nebula/CANVAS/canvas.py:4431(_on_projected_tile)
+   125/50    0.003    0.000    0.769    0.015 /home/deanos/Documents/Nebula/UI/docks/layers_dock.py:827(add_folder)
+    13408    0.034    0.000    0.757    0.000 /home/deanos/Documents/Nebula/DOCUMENTS/adjustments.py:439(stack_table)
+4727866/4727832    0.675    0.000    0.678    0.000 {built-in method builtins.getattr}
+    21168    0.094    0.000    0.676    0.000 /home/deanos/Documents/Nebula/DOCUMENTS/tile_store.py:424(set_tile)
+     6343    0.671    0.000    0.671    0.000 {method 'copy' of 'PySide6.QtGui.QImage' objects}
+     1976    0.003    0.000    0.639    0.000 /home/deanos/Documents/Nebula/UI/docks/layers_dock.py:686(_get_thumb)
+
+
