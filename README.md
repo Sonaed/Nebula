@@ -1,3 +1,12 @@
+Next Update: 
+Je suis en train de pousser nebula a fond afin de voir les endroit qui peuvent causer des bug et ralentissement ainsi que les manque fonctionnel ou optimisation UI
+la Version 26.4.x Sera une Update Majeur 
+
+Un petit Aperçu:
+<img width="2558" height="1428" alt="image" src="https://github.com/user-attachments/assets/d96656e2-9b76-4798-9893-052e7faa8206" />
+
+
+
 # CreativeSystem Nebula
 
 Application de dessin PySide6/Qt 6 avec Canvas OpenGL et moteur de brush C++.
