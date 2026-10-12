@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from PySide6.QtCore import QPointF, QRectF, Qt
-from PySide6.QtGui import QColor, QImage, QMouseEvent, QWheelEvent
+from PySide6.QtGui import QImage, QMouseEvent, QWheelEvent
 from PySide6.QtOpenGL import QOpenGLTexture, QOpenGLTextureBlitter
 from PySide6.QtOpenGLWidgets import QOpenGLWidget
 
@@ -299,75 +299,6 @@ class GPUViewport(QOpenGLWidget):
     # API
     # ==========================================================
 
-    def set_image(
-        self,
-        image: QImage,
-    ) -> None:
-
-        self.image = image.copy()
-
-        if (
-            self.gpu_ready
-            and self.context() is not None
-        ):
-
-            self.makeCurrent()
-
-            try:
-                self._upload_texture()
-            finally:
-                self.doneCurrent()
-
-        self.update()
-
-    def fit_image(self) -> None:
-
-        if self.image.isNull():
-            return
-
-        if (
-            self.image.width() <= 0
-            or self.image.height() <= 0
-        ):
-            return
-
-        scale_x = (
-            self.width()
-            / self.image.width()
-        )
-
-        scale_y = (
-            self.height()
-            / self.image.height()
-        )
-
-        self.zoom = min(
-            scale_x,
-            scale_y,
-        ) * 0.90
-
-        self.zoom = max(
-            self.min_zoom,
-            min(
-                self.zoom,
-                self.max_zoom,
-            ),
-        )
-
-        self.offset = QPointF(
-            (
-                self.width()
-                - self.image.width()
-                * self.zoom
-            ) * 0.5,
-            (
-                self.height()
-                - self.image.height()
-                * self.zoom
-            ) * 0.5,
-        )
-
-        self.update()
 
     # ==========================================================
     # SOURIS

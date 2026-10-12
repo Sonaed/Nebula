@@ -16,6 +16,7 @@ DEFAULT_SHORTCUTS = {
     "invert_selection": "Ctrl+I", "preferences": "Ctrl+,",
     "hand": "H", "zoom_view": "Z", "rotate_view": "Shift+R",
     "command_palette": "Ctrl+K", "shortcuts_help": "F1",
+    "quick_mask": "Q", "wrap_around": "W",
 }
 
 

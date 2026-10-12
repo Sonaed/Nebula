@@ -1,0 +1,61 @@
+         8258390 function calls (8258377 primitive calls) in 17.658 seconds
+
+   Ordered by: cumulative time
+   List reduced from 380 to 55 due to restriction <55>
+
+   ncalls  tottime  percall  cumtime  percall filename:lineno(function)
+        1    0.333    0.333   17.659   17.659 /home/deanos/Documents/Nebula/CPP_TEST/benchmark_psd_workspace.py:58(wait_for_view)
+      304    2.012    0.007   15.790    0.052 /home/deanos/Documents/Nebula/CANVAS/canvas.py:4909(_ensure_projection)
+      304    0.086    0.000    6.026    0.020 /home/deanos/Documents/Nebula/CANVAS/canvas.py:5230(_compose_native_batch)
+      304    3.458    0.011    5.930    0.020 /home/deanos/Documents/Nebula/DOCUMENTS/stack_program.py:341(compose_batch)
+     9605    0.016    0.000    4.481    0.000 /home/deanos/Documents/Nebula/CANVAS/canvas.py:5204(_native_tile_program)
+     9605    0.265    0.000    4.463    0.000 /home/deanos/Documents/Nebula/DOCUMENTS/stack_program.py:198(instantiate)
+   163285    0.073    0.000    4.099    0.000 /home/deanos/Documents/Nebula/CANVAS/canvas.py:5220(layer_image)
+   163285    0.179    0.000    4.026    0.000 /home/deanos/Documents/Nebula/CANVAS/canvas.py:5210(fetch)
+    79726    0.440    0.000    2.411    0.000 /home/deanos/Documents/Nebula/DOCUMENTS/tile_store.py:291(tile)
+     9605    1.529    0.000    2.362    0.000 /home/deanos/Documents/Nebula/DOCUMENTS/stack_program.py:365(_records)
+    79726    0.053    0.000    1.533    0.000 /home/deanos/Documents/Nebula/CORE/native_bridge.py:678(copy)
+      302    1.529    0.005    1.529    0.005 {built-in method time.sleep}
+    79726    0.876    0.000    1.480    0.000 /home/deanos/Documents/Nebula/CORE/native_bridge.py:654(_image_call)
+   159452    0.192    0.000    1.328    0.000 /home/deanos/Documents/Nebula/DOCUMENTS/tile_store.py:186(_native_info)
+      304    0.002    0.000    1.294    0.004 /home/deanos/Documents/Nebula/DOCUMENTS/tile_store.py:176(resident_keys)
+      304    1.291    0.004    1.291    0.004 /home/deanos/Documents/Nebula/CORE/native_bridge.py:618(keys)
+   159452    0.886    0.000    0.960    0.000 /home/deanos/Documents/Nebula/CORE/native_bridge.py:609(info)
+    79726    0.066    0.000    0.884    0.000 /home/deanos/Documents/Nebula/DOCUMENTS/tile_store.py:230(has_tile)
+   178662    0.288    0.000    0.883    0.000 /home/deanos/Documents/Nebula/CORE/native_bridge.py:2465(qimage_pointer)
+    79726    0.137    0.000    0.773    0.000 /home/deanos/Documents/Nebula/CANVAS/canvas.py:5237(pixels_of)
+      304    0.592    0.002    0.598    0.002 /home/deanos/Documents/Nebula/CANVAS/canvas.py:5738(visible_document_tile_keys)
+    79726    0.041    0.000    0.552    0.000 /home/deanos/Documents/Nebula/DOCUMENTS/tile_store.py:329(tile_is_resident)
+   267993    0.542    0.000    0.542    0.000 /usr/lib/python3.14/ctypes/__init__.py:613(cast)
+      304    0.348    0.001    0.355    0.001 /home/deanos/Documents/Nebula/CORE/tile_cache_manager.py:44(update)
+      304    0.005    0.000    0.294    0.001 /home/deanos/Documents/Nebula/CANVAS/canvas.py:5544(_publish_projection_frame)
+        1    0.020    0.020    0.285    0.285 /home/deanos/Documents/Nebula/DOCUMENTS/tile_store.py:450(set_tiles_batch)
+   169057    0.135    0.000    0.250    0.000 {method 'format' of 'PySide6.QtGui.QImage' objects}
+        1    0.007    0.007    0.241    0.241 /home/deanos/Documents/Nebula/DOCUMENTS/tile_store.py:132(counted)
+        1    0.118    0.118    0.234    0.234 /home/deanos/Documents/Nebula/CORE/native_bridge.py:662(set_many)
+   108541    0.183    0.000    0.218    0.000 /home/deanos/Documents/Nebula/DOCUMENTS/tile_store.py:212(tile_rect)
+  1024658    0.165    0.000    0.165    0.000 {method 'append' of 'list' objects}
+        1    0.088    0.088    0.161    0.161 /home/deanos/Documents/Nebula/CANVAS/canvas.py:5633(_tile_signature_index)
+   239526    0.103    0.000    0.154    0.000 /home/deanos/Documents/Nebula/DOCUMENTS/tile_store.py:124(__bool__)
+    39216    0.087    0.000    0.142    0.000 /home/deanos/Documents/Nebula/CANVAS/canvas.py:5596(_layer_static_signature)
+   169065    0.065    0.000    0.115    0.000 /usr/lib/python3.14/enum.py:677(__call__)
+   239526    0.075    0.000    0.112    0.000 /home/deanos/Documents/Nebula/DOCUMENTS/tile_store.py:127(__getattr__)
+      304    0.005    0.000    0.110    0.000 /home/deanos/Documents/Nebula/CANVAS/canvas.py:3274(_validate_visibility_preview)
+      304    0.005    0.000    0.104    0.000 /home/deanos/Documents/Nebula/CANVAS/canvas.py:3261(_visibility_preview_state)
+     9605    0.042    0.000    0.099    0.000 /home/deanos/Documents/Nebula/CANVAS/canvas.py:5249(new_target)
+    13376    0.025    0.000    0.092    0.000 /home/deanos/Documents/Nebula/CANVAS/canvas.py:3265(<genexpr>)
+       86    0.001    0.000    0.084    0.001 /home/deanos/Documents/Nebula/CANVAS/canvas.py:5619(_store_revision_map)
+   178662    0.063    0.000    0.083    0.000 /usr/lib/python3.14/enum.py:187(__get__)
+       43    0.000    0.000    0.083    0.002 /home/deanos/Documents/Nebula/DOCUMENTS/tile_store.py:179(resident_revisions)
+       43    0.082    0.002    0.082    0.002 /home/deanos/Documents/Nebula/CORE/native_bridge.py:628(key_revisions)
+   264481    0.081    0.000    0.081    0.000 {method 'get' of 'dict' objects}
+   478356    0.074    0.000    0.074    0.000 {built-in method _ctypes.byref}
+466157/466156    0.071    0.000    0.071    0.000 {built-in method builtins.getattr}
+    13376    0.015    0.000    0.070    0.000 /home/deanos/Documents/Nebula/CANVAS/canvas.py:4936(<genexpr>)
+   178662    0.065    0.000    0.065    0.000 {method 'bits' of 'PySide6.QtGui.QImage' objects}
+   178662    0.061    0.000    0.061    0.000 {method 'from_buffer' of '_ctypes.PyCSimpleType' objects}
+    79726    0.058    0.000    0.058    0.000 {method 'size' of 'PySide6.QtCore.QRect' objects}
+    79726    0.022    0.000    0.053    0.000 <frozen abc>:117(__instancecheck__)
+   239526    0.051    0.000    0.051    0.000 /home/deanos/Documents/Nebula/CORE/native_bridge.py:601(__bool__)
+   169065    0.049    0.000    0.049    0.000 /usr/lib/python3.14/enum.py:1147(__new__)
+   178662    0.041    0.000    0.041    0.000 {method 'bytesPerLine' of 'PySide6.QtGui.QImage' objects}

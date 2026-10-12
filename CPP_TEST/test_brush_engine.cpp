@@ -199,6 +199,45 @@ static void testPressure()
         "Pressure -> interpolated size"
     );
 
+    // Tilt dynamics use the normalized stylus tilt carried by BrushInput.
+    // They must influence the same native engine used by the canvas, rather
+    // than being merely exposed as inactive controls in the brush editor.
+    settings.pressureSize = false;
+    settings.pressureOpacity = false;
+    settings.tiltSize = 0.75f;
+    settings.tiltOpacity = 0.60f;
+    settings.randomSize = 2.0f;
+    settings.randomOpacity = -2.0f;
+    settings.velocitySpacing = 2.0f;
+    engine.setSettings(settings);
+    check(engine.settings().randomSize == 1.0f && engine.settings().randomOpacity == 0.0f &&
+          engine.settings().velocitySpacing == 1.0f,
+          "Random dynamics clamp");
+    settings.randomSize = 0.0f;
+    settings.randomOpacity = 0.0f;
+    settings.velocitySpacing = 0.0f;
+    engine.setSettings(settings);
+    check(
+        approximately(engine.evaluateSize(1.0f, 0.0f, 0.0f), 25.0f),
+        "Tilt -> size at upright pen"
+    );
+    check(
+        approximately(engine.evaluateSize(1.0f, 0.0f, 1.0f), 100.0f),
+        "Tilt -> size at full tilt"
+    );
+    check(
+        approximately(engine.evaluateOpacity(1.0f, 0.0f, 0.0f), 0.40f),
+        "Tilt -> opacity at upright pen"
+    );
+    check(
+        approximately(engine.evaluateOpacity(1.0f, 0.0f, 1.0f), 1.0f),
+        "Tilt -> opacity at full tilt"
+    );
+
+    settings.pressureSize = true;
+    settings.pressureOpacity = true;
+    settings.tiltSize = 0.0f;
+    settings.tiltOpacity = 0.0f;
     settings.pressureCurve = 1;
     engine.setSettings(settings);
     check(

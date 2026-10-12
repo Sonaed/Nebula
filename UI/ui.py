@@ -1,11 +1,12 @@
 from PySide6.QtCore import (
     QObject,
+    QSettings,
     Signal,
     Qt,
     QSize,
     QTimer,
 )
-from PySide6.QtGui import QAction, QIcon, QKeySequence, QShortcut
+from PySide6.QtGui import QAction, QColor, QIcon, QKeySequence, QPixmap, QShortcut
 
 from PySide6.QtWidgets import (
     QMainWindow,
@@ -20,6 +21,8 @@ from PySide6.QtWidgets import (
     QPushButton,
     QButtonGroup,
     QHBoxLayout,
+    QVBoxLayout,
+    QColorDialog,
     QSizePolicy,
     QSlider,
     QTabWidget,
@@ -50,16 +53,36 @@ from UI.docks.color_dock import ColorDock
 from UI.docks.resource_dock import ResourceDock
 from UI.docks.adjustment_settings_dock import AdjustmentSettingsDock
 from UI.docks.assistants_dock import AssistantsDock
+from UI.docks.history_dock import HistoryDock
+from UI.docks.navigator_dock import NavigatorDock
+from UI.docks.mixer_dock import MixerDock
 from UI.theme import ThemeManager
-from UI.widgets.dock_title_bar import install_dock_title
+from UI.widgets.dock_title_bar import install_dock_grip, install_dock_title
 from UI.dialogs import PreferencesDialog
 from UI.models import WorkspaceManager
 from UI.widgets.command_palette import CommandPalette, ShortcutSheet
 
 # Version de l'agencement par défaut. L'incrémenter remplace une seule fois la
 # session enregistrée et les espaces de travail intégrés par le nouvel agencement.
-LAYOUT_VERSION = 2
-BUILTIN_WORKSPACES_V1 = ("Painting", "Drawing", "Minimal")
+LAYOUT_VERSION = 6
+BUILTIN_WORKSPACES = ("Painting", "Drawing", "Minimal", "Peinture", "Dessin", "Retouche")
+# Named visibility avoids positional shifts when optional module docks change.
+WORKSPACE_PANELS = ("ToolsDock", "ToolRailDock", "BrushPanelDock", "ColorDock",
+                    "BrushPresetsDock", "LayersDock", "BlendCreatorDock",
+                    "adjustmentSettingsDock", "assistants_dock", "ResourceDock", "history_dock")
+BUILTIN_WORKSPACE_OPEN = {
+    "Peinture": {"ToolRailDock", "ColorDock", "BrushPresetsDock", "LayersDock", "history_dock"},
+    "Dessin": {"ToolRailDock", "ColorDock", "LayersDock", "assistants_dock", "history_dock"},
+    "Retouche": {"ToolRailDock", "ColorDock", "LayersDock", "adjustmentSettingsDock", "history_dock"},
+    "Minimal": {"ToolRailDock"},
+}
+BUILTIN_WORKSPACE_VISIBILITY = {
+    name: tuple(key in opened for key in WORKSPACE_PANELS)
+    for name, opened in BUILTIN_WORKSPACE_OPEN.items()
+}
+BUILTIN_WORKSPACE_VISIBILITY["Painting"] = BUILTIN_WORKSPACE_VISIBILITY["Peinture"]
+BUILTIN_WORKSPACE_VISIBILITY["Drawing"] = BUILTIN_WORKSPACE_VISIBILITY["Dessin"]
+
 
 # Outils qui utilisent le moteur de pinceau (taille / opacité / flux utiles).
 PAINT_TOOLS = {"brush", "eraser", "smudge", "blur", "sharpen", "clone_stamp",
@@ -73,6 +96,7 @@ TOOL_HINTS = {
     "clone_stamp": "Maj+clic : définir la source · glisser : dupliquer",
     "fill": "Clic : remplir la zone de couleur",
     "gradient": "Glisser pour tracer un dégradé",
+    "lasso_fill": "Dessiner une forme : elle est remplie avec la couleur active au relâchement",
     "line": "Glisser pour tracer une ligne au pinceau actif",
     "rectangle": "Glisser pour tracer un rectangle au pinceau actif",
     "ellipse": "Glisser pour tracer une ellipse au pinceau actif",
@@ -99,6 +123,7 @@ class CreativeSystemUI(QObject):
 
     home_open_requested = Signal()
     home_recent_requested = Signal(str)
+    home_preset_requested = Signal(str)
 
     def __init__(
         self,
@@ -146,6 +171,7 @@ class CreativeSystemUI(QObject):
             self.home_open_requested.emit
         )
         self.home_page.recent_document_requested.connect(self.home_recent_requested.emit)
+        self.home_page.preset_requested.connect(self.home_preset_requested.emit)
 
         # -----------------------------------------------------
         # COMPOSANTS
@@ -192,6 +218,9 @@ class CreativeSystemUI(QObject):
 
         self.tool_rail_dock = ToolRailDock(canvas, window)
         self.color_dock = ColorDock(canvas, window)
+        self.history_dock = HistoryDock(canvas, window)
+        self.navigator_dock = NavigatorDock(canvas, window)
+        self.mixer_dock = MixerDock(canvas, window)
         self.assistants_dock = AssistantsDock(window)
         self.assistants_dock.set_manager(canvas.assistants)
         self.resource_dock = ResourceDock(resource_manager, window, canvas) if resource_manager is not None else None
@@ -208,6 +237,9 @@ class CreativeSystemUI(QObject):
             (self.color_dock, "Couleur"),
             (self.adjustment_settings_dock, "Réglages"),
             (self.assistants_dock, "Assistants de dessin"),
+            (self.history_dock, "Historique"),
+            (self.navigator_dock, "Navigateur"),
+            (self.mixer_dock, "Mélangeur"),
         ):
             install_dock_title(dock, title)
             dock.setWindowTitle(title)
@@ -217,6 +249,9 @@ class CreativeSystemUI(QObject):
         for dock, title in ((self.tool_rail_dock, "Outils"), (self.brush_panel_dock, "Pinceau"),
                             (self.tools_dock, "Outils (classique)")):
             dock.setWindowTitle(title)
+        install_dock_title(self.brush_panel_dock, "Pinceau")
+        install_dock_title(self.tools_dock, "Outils (classique)")
+        install_dock_grip(self.tool_rail_dock)
         self.tool_rail_dock.color_button.clicked.connect(
             self.tools_dock.color_button.click
         )
@@ -227,6 +262,9 @@ class CreativeSystemUI(QObject):
 
         self.create_main_toolbar()
         self.create_selection_options_bar()
+        self.create_gradient_options_bar()
+        self.create_fill_options_bar()
+        self.create_picker_options_bar()
         icon_size = int(str(QSettings("CreativeSystem", "CreativeSystem").value(
             "interface/icon_size", "24 px")).split()[0])
         self.tool_rail_dock.set_icon_size(icon_size)
@@ -298,13 +336,14 @@ class CreativeSystemUI(QObject):
 
     def install_customization_menus(self) -> None:
         self.menu_manager.actions["preferences"].triggered.connect(self.open_preferences)
+        self.menu_manager.actions["pressure_curve"].triggered.connect(self.open_pressure_curve)
         window_menu = self.menu_manager.menus["window"]
         dockers = window_menu.addMenu("Panneaux")
         self.dockers_menu = dockers
         for dock in (self.tool_rail_dock, self.brush_panel_dock, self.color_dock,
                      self.brush_presets_dock, self.layers_dock, self.blend_creator_dock,
                      self.adjustment_settings_dock, self.tools_dock, self.resource_dock,
-                     self.assistants_dock):
+                     self.assistants_dock, self.history_dock, self.navigator_dock, self.mixer_dock):
             if dock is None:
                 continue
             dockers.addAction(dock.toggleViewAction())
@@ -320,33 +359,26 @@ class CreativeSystemUI(QObject):
         existing = set(manager.names())
         if "Default" not in existing or manager.settings.value("workspaces/Default/visibility") is None:
             manager.save("Default")
-        # Un booléen par dock de _workspace_docks(), dans le même ordre :
-        # rail, brush, couleur, presets, calques, blend, ressources.
-        # zip() tronquait silencieusement et le dock Ressources n'était jamais
-        # enregistré dans les workspaces intégrés.
-        # Ordre : rail, pinceau, couleur, presets, calques, fusion, réglages, assistants, ressources
-        presets = {
-            "Peinture": (True, True, True, True, True, False, False, False, True),
-            "Dessin": (True, False, True, False, True, False, False, True, False),
-            "Retouche": (True, False, False, False, True, True, True, False, True),
-            "Minimal": (True, False, False, False, False, False, False, False, False),
-        }
+        # Use object names so optional module panels never shift visibility.
+        presets = {name: visibility for name, visibility in BUILTIN_WORKSPACE_VISIBILITY.items()
+                   if name in ("Peinture", "Dessin", "Retouche", "Minimal")}
         original = self.workspace_manager._visibility()
         for name, visibility in presets.items():
             if name in existing and manager.settings.value(f"workspaces/{name}/visibility") is not None:
                 continue
-            for dock, visible in zip(self._workspace_docks(), visibility):
-                dock.setVisible(bool(visible))
+            opened = BUILTIN_WORKSPACE_OPEN[name]
+            for dock in self._workspace_docks():
+                dock.setVisible(dock.objectName() in opened)
             manager.save(name)
         for dock in self._workspace_docks():
             if dock.objectName() in original:
                 dock.setVisible(bool(original[dock.objectName()]))
 
     def _workspace_docks(self):
-        docks = (self.tool_rail_dock, self.brush_panel_dock, self.color_dock,
+        docks = (self.tools_dock, self.tool_rail_dock, self.brush_panel_dock, self.color_dock,
                  self.brush_presets_dock, self.layers_dock, self.blend_creator_dock,
                  self.adjustment_settings_dock, self.assistants_dock)
-        return docks if self.resource_dock is None else docks + (self.resource_dock,)
+        return docks + ((self.resource_dock,) if self.resource_dock is not None else ()) + (self.history_dock,)
 
     @staticmethod
     def _previous_session_crashed() -> bool:
@@ -377,8 +409,11 @@ class CreativeSystemUI(QObject):
             return False
         for key in ("window/geometry", "window/state", "window/visibility"):
             settings.remove(key)
-        for name in BUILTIN_WORKSPACES_V1 + ("Default",):
+        for name in BUILTIN_WORKSPACES + ("Default",):
             settings.remove(f"workspaces/{name}")
+        # Resource library is discoverable in Panels; do not steal the colour tab.
+        settings.setValue("interface/resources_restored_v1", True)
+        settings.setValue("interface/resources_restored_v2", True)
         settings.setValue("interface/layout_version", LAYOUT_VERSION)
         return True
 
@@ -386,7 +421,7 @@ class CreativeSystemUI(QObject):
         menu = self.workspaces_menu
         menu.clear()
         for name in self.workspace_manager.names():
-            action = menu.addAction(name)
+            action = menu.addAction(self._workspace_label(name))
             action.triggered.connect(lambda _checked=False, workspace=name: self.load_workspace(workspace))
         if menu.actions():
             menu.addSeparator()
@@ -460,14 +495,17 @@ class CreativeSystemUI(QObject):
         elif key == "performance/use_gpu":
             self.canvas.use_gpu = bool(_value)
             self.canvas.update()
-        elif key == "input/right_click_color_picker":
-            self.canvas.right_click_color_picker = bool(_value)
+        elif key == "input/right_click_palette":
+            self.canvas.right_click_palette = bool(_value)
         elif key == "performance/undo_steps":
             maximum = max(1, min(1000, int(_value)))
             history = self.canvas.tile_history
             history.set_max_steps(maximum)
             self.canvas.max_history = maximum
             self.canvas.history_index = history.index
+        elif key == "performance/undo_memory_limit_mb":
+            self.canvas.tile_history.set_max_snapshot_bytes(
+                max(8, min(8192, int(_value))) * 1024 * 1024)
         elif key == "performance/memory_limit_mb":
             memory_manager = getattr(self.window, "memory_manager", None)
             if memory_manager is not None:
@@ -509,9 +547,24 @@ class CreativeSystemUI(QObject):
             self._refresh_workspace_combo(name.strip())
 
     def load_workspace(self, name: str) -> None:
+        builtin = BUILTIN_WORKSPACE_VISIBILITY.get(name)
+        if builtin is not None:
+            # Built-ins must work even if a previous Qt state was saved with
+            # a different dock topology. Apply their visible panels directly
+            # before refreshing the serialized state.
+            visibility = dict(zip(WORKSPACE_PANELS, builtin))
+            for dock in self._workspace_docks():
+                dock.setVisible(visibility.get(dock.objectName(), False))
+            self.workspace_manager.save(name)
+            self._workspace_visibility = self.workspace_manager._visibility()
+            self.workspace_manager.session_visibility = self._workspace_visibility
+            self.workspace_manager.save_session()
+            self._refresh_workspace_combo(name)
+            return
         if not self.workspace_manager.load(name):
-            # Built-ins initially capture the current stable layout and become
-            # independently editable after their first save.
+            # Never replace a failed/corrupted workspace by an all-hidden
+            # layout. The factory layout is the explicit recovery preset.
+            self.workspace_manager.reset()
             self.workspace_manager.save(name)
         self._workspace_visibility = self.workspace_manager._visibility()
         self.workspace_manager.session_visibility = self._workspace_visibility
@@ -531,9 +584,11 @@ class CreativeSystemUI(QObject):
             pass
 
     def _track_workspace_visibility(self, _visible: bool) -> None:
+        QTimer.singleShot(0, self._tidy_dock_tab_bars)
         # Le mode focus masque tout temporairement : ne pas l'enregistrer comme
         # l'agencement voulu (sinon les panneaux restaient cachés au retour).
-        if getattr(self, "_focus_restore", None) is not None:
+        if (getattr(self, "_focus_restore", None) is not None
+                or getattr(self, "_restoring_workspace_visibility", False)):
             return
         if self.stack.currentWidget() is self.canvas:
             self._workspace_visibility = self.workspace_manager._visibility()
@@ -551,6 +606,9 @@ class CreativeSystemUI(QObject):
         self.main_toolbar.setObjectName("MainToolbar")
         self.main_toolbar.setMovable(False)
         self.main_toolbar.setIconSize(QSize(18, 18))
+        # One stable options row for every tool. Tool-specific controls must
+        # adapt within the row instead of resizing the whole top panel.
+        self.main_toolbar.setFixedHeight(52)
         self.window.addToolBar(Qt.TopToolBarArea, self.main_toolbar)
         bar = self.main_toolbar
 
@@ -577,38 +635,52 @@ class CreativeSystemUI(QObject):
 
         settings = self.canvas.get_cpp_brush_settings()
         self._paint_actions = []
-        self.toolbar_presets = QComboBox()
-        self.toolbar_presets.setObjectName("presetCombo")
-        self.toolbar_presets.addItem("Presets…")
-        self.toolbar_presets.addItems(self.canvas.brush_preset_manager.list_presets())
-        self.toolbar_presets.setToolTip("Preset de pinceau (moteur CreativeCore)")
-        self.toolbar_presets.setMinimumWidth(150)
-        self.toolbar_presets.currentTextChanged.connect(self._load_toolbar_preset)
+        # Active brush chip (stroke preview + name), like Photoshop's preset
+        # picker: the old combo only ever read "Presets…".
+        # QPushButton, not QToolButton: QToolBar forces its own small icon
+        # size onto tool buttons, which shrank the stroke preview to a dash.
+        self.toolbar_presets = QPushButton()
+        self.toolbar_presets.setObjectName("presetButton")
+        self.toolbar_presets.setIconSize(QSize(92, 21))
+        self.toolbar_presets.setFixedSize(236, 36)
+        self.toolbar_presets.setToolTip("Pinceau actif — cliquer pour en choisir un autre")
+        self._preset_menu = QMenu(self.toolbar_presets)
+        self._preset_menu.aboutToShow.connect(self._fill_preset_menu)
+        self.toolbar_presets.setMenu(self._preset_menu)
+        self._shown_preset = None
+        self._refresh_preset_chip()
         self._paint_actions.append(bar.addWidget(self.toolbar_presets))
 
         def slider_pair(label, minimum, maximum, value, suffix, apply):
             box = QWidget()
             box.setObjectName("optionPair")
-            row = QHBoxLayout(box)
-            row.setContentsMargins(6, 0, 2, 0)
-            row.setSpacing(6)
+            box.setFixedSize(128, 40)
+            column = QVBoxLayout(box)
+            column.setContentsMargins(8, 1, 8, 4)
+            column.setSpacing(0)
+            row = QHBoxLayout()
+            row.setSpacing(2)
             caption = QLabel(label)
             caption.setObjectName("optionCaption")
-            slider = QSlider(Qt.Orientation.Horizontal)
-            slider.setRange(minimum, maximum)
-            slider.setFixedWidth(110)
-            slider.setValue(value)
             spin = QSpinBox()
+            spin.setButtonSymbols(QSpinBox.ButtonSymbols.NoButtons)
             spin.setRange(minimum, maximum)
             spin.setSuffix(suffix)
             spin.setValue(value)
-            spin.setFixedWidth(74)
+            spin.setAlignment(Qt.AlignmentFlag.AlignRight)
+            spin.setFixedWidth(65)
+            spin.setAccessibleName(label)
+            slider = QSlider(Qt.Orientation.Horizontal)
+            slider.setRange(minimum, maximum)
+            slider.setValue(value)
+            slider.setAccessibleName(label)
             slider.valueChanged.connect(spin.setValue)
             spin.valueChanged.connect(lambda v: (slider.blockSignals(True), slider.setValue(v), slider.blockSignals(False)))
             spin.valueChanged.connect(apply)
             row.addWidget(caption)
-            row.addWidget(slider)
             row.addWidget(spin)
+            column.addLayout(row)
+            column.addWidget(slider)
             self._paint_actions.append(bar.addWidget(box))
             return spin, slider
 
@@ -638,6 +710,16 @@ class CreativeSystemUI(QObject):
                                                   self.toolbar_smoothing.setValue(v),
                                                   self.toolbar_smoothing_slider.setValue(v),
                                                   self.toolbar_smoothing.blockSignals(False)))
+        self.toolbar_smoothing_mode = QComboBox()
+        self.toolbar_smoothing_mode.setObjectName("smoothingMode")
+        self.toolbar_smoothing_mode.addItems(["Direct", "Inertie", "Corde", "Stabilisé"])
+        self.toolbar_smoothing_mode.setToolTip(
+            "Réponse du stabilisateur : Direct désactive tout lissage ; Corde suit le stylet "
+            "avec une traction naturelle ; Stabilisé privilégie les lignes très régulières.")
+        self.toolbar_smoothing_mode.setCurrentIndex(int(settings.get("smoothMode", 0)))
+        self.toolbar_smoothing_mode.currentIndexChanged.connect(
+            lambda index: self.canvas.set_brush_setting("smoothMode", index))
+        self._paint_actions.append(bar.addWidget(self.toolbar_smoothing_mode))
 
         self.tool_hint = QLabel("")
         self.tool_hint.setObjectName("toolHint")
@@ -645,15 +727,15 @@ class CreativeSystemUI(QObject):
 
         spacer = QWidget()
         spacer.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
-        bar.addWidget(spacer)
+        self._options_tail = bar.addWidget(spacer)
         self._toolbar_tail = []
         self.workspace_combo = QComboBox()
         self.workspace_combo.setObjectName("workspaceCombo")
         self.workspace_combo.setToolTip("Espace de travail : change l'agencement des panneaux")
-        self.workspace_combo.setMinimumWidth(120)
+        self.workspace_combo.setFixedWidth(118)
         self.workspace_combo.activated.connect(self._on_workspace_combo)
         self._toolbar_tail.append(bar.addWidget(self.workspace_combo))
-        self.search_button = QPushButton("⌕  Rechercher   Ctrl+K")
+        self.search_button = QPushButton("⌕  Ctrl+K")
         self.search_button.setObjectName("searchButton")
         self.search_button.setToolTip("Trouver n'importe quelle commande, outil ou panneau")
         self.search_button.clicked.connect(lambda: self.command_palette.open())
@@ -678,7 +760,7 @@ class CreativeSystemUI(QObject):
         # Les options de sélection/transformation vivent dans la même barre
         # d'options que le pinceau : une seule rangée, qui change selon l'outil.
         toolbar = self.main_toolbar
-        tail = self._toolbar_tail[0]
+        tail = self._options_tail
         self.selection_options_bar = toolbar
 
         class _Inserter:
@@ -780,9 +862,180 @@ class CreativeSystemUI(QObject):
             for action in actions:
                 action.setVisible(visible[key])
 
+    def create_gradient_options_bar(self) -> None:
+        """Expose the native gradient state next to the canvas, with no dialogs."""
+        bar, tail = self.main_toolbar, self._options_tail
+        tool = self.canvas.tools.gradient_tool
+        self._gradient_actions = []
+        def add(widget):
+            self._gradient_actions.append(bar.insertWidget(tail, widget))
+            return widget
+        self.gradient_geometry = add(QComboBox())
+        self.gradient_geometry.setObjectName("gradientGeometry")
+        self.gradient_geometry.setAccessibleName("Géométrie du dégradé")
+        for label, value in (("Linéaire", "linear"), ("Radial", "radial"), ("Angulaire", "conical")):
+            self.gradient_geometry.addItem(label, value)
+        self.gradient_colors = add(QComboBox())
+        self.gradient_colors.setObjectName("gradientColors")
+        self.gradient_colors.setAccessibleName("Couleurs du dégradé")
+        self.gradient_colors.addItem("Vers transparent", "transparent")
+        self.gradient_colors.addItem("Deux couleurs", "color")
+        self.gradient_end_color = add(QPushButton("Couleur d’arrivée"))
+        self.gradient_end_color.setToolTip("Choisir la seconde couleur du dégradé")
+        self.gradient_end_color.clicked.connect(self._choose_gradient_end_color)
+        self.gradient_spread = add(QComboBox())
+        self.gradient_spread.setObjectName("gradientSpread")
+        self.gradient_spread.setAccessibleName("Répétition du dégradé")
+        for label, value in (("Prolonger", "pad"), ("Répéter", "repeat"), ("Réfléchir", "reflect")):
+            self.gradient_spread.addItem(label, value)
+        self.gradient_reverse = add(QCheckBox("Inverser"))
+        self.gradient_opacity = add(QSpinBox())
+        self.gradient_opacity.setRange(0, 100)
+        self.gradient_opacity.setSuffix(" %")
+        self.gradient_opacity.setValue(round(tool.opacity * 100))
+        self.gradient_opacity.setAccessibleName("Opacité du dégradé")
+        self.gradient_opacity.setToolTip("Opacité du dégradé")
+        self.gradient_opacity.setFixedWidth(74)
+        for combo, attr in ((self.gradient_geometry, "geometry"), (self.gradient_colors, "color_mode"),
+                            (self.gradient_spread, "spread")):
+            combo.setCurrentIndex(max(0, combo.findData(getattr(tool, attr))))
+            combo.currentIndexChanged.connect(lambda _, c=combo, a=attr: self._set_gradient_option(a, c.currentData()))
+        self.gradient_reverse.setChecked(tool.reverse)
+        self.gradient_reverse.toggled.connect(lambda value: setattr(tool, "reverse", value))
+        self.gradient_opacity.valueChanged.connect(lambda value: setattr(tool, "opacity", value / 100.0))
+        self._update_gradient_controls()
+        self._sync_active_tool(self.canvas.tools.current_tool)
+
+    def create_fill_options_bar(self) -> None:
+        """Paint bucket options: tolerance, reference, gap closing, grow."""
+        bar, tail = self.main_toolbar, self._options_tail
+        options = self.canvas.tools.fill_tool.options
+        settings = QSettings("CreativeSystem", "CreativeSystem")
+        from TOOLS.fill_tool import STUDIO_DEFAULTS
+        for name, kind in (("tolerance", int), ("gap", int), ("grow", int), ("sample_all_layers", bool)):
+            stored = settings.value(f"fill/{name}", None)
+            if stored is None:
+                setattr(options, name, STUDIO_DEFAULTS[name])
+            else:
+                setattr(options, name, (str(stored).lower() in ("true", "1")) if kind is bool else int(stored))
+        self._fill_actions = []
+
+        def add(widget):
+            self._fill_actions.append(bar.insertWidget(tail, widget))
+            return widget
+
+        def spin(label, minimum, maximum, name, suffix, tooltip):
+            add(QLabel(f" {label} "))
+            box = add(QSpinBox())
+            box.setRange(minimum, maximum)
+            box.setSuffix(suffix)
+            box.setValue(getattr(options, name))
+            box.setToolTip(tooltip)
+            box.setFixedWidth(72)
+            box.valueChanged.connect(lambda v, n=name: (setattr(options, n, int(v)),
+                                                         settings.setValue(f"fill/{n}", int(v))))
+            return box
+
+        self.fill_tolerance = spin("Tolérance", 0, 255, "tolerance", "",
+                                   "Écart de couleur accepté autour du point cliqué")
+        self.fill_sample_all = add(QCheckBox("Suivre tous les calques"))
+        self.fill_sample_all.setToolTip("Détecte la zone sur l'image visible (l'encrage d'un autre "
+                                        "calque) et remplit le calque actif")
+        self.fill_sample_all.setChecked(options.sample_all_layers)
+        self.fill_sample_all.toggled.connect(lambda v: (setattr(options, "sample_all_layers", bool(v)),
+                                                        settings.setValue("fill/sample_all_layers", bool(v))))
+        self.fill_gap = spin("Fermer les trous", 0, 20, "gap", " px",
+                             "Referme les petites ouvertures du trait pour que la couleur ne fuie pas")
+        self.fill_grow = spin("Étendre", 0, 10, "grow", " px",
+                              "Fait passer la couleur sous le trait (pas de liseré blanc)")
+        self._sync_active_tool(self.canvas.tools.current_tool)
+
+    def create_picker_options_bar(self) -> None:
+        """Colour picker: sample size (also used by Alt+click)."""
+        bar, tail = self.main_toolbar, self._options_tail
+        settings = QSettings("CreativeSystem", "CreativeSystem")
+        self.canvas.picker_sample_size = int(settings.value("picker/sample_size", 3))
+        self._picker_actions = [bar.insertWidget(tail, QLabel(" Échantillon "))]
+        combo = QComboBox()
+        combo.setToolTip("Moyenne prélevée autour du point cliqué (aussi pour Alt + clic)")
+        for label, size in (("Pixel", 1), ("Moyenne 3 × 3", 3), ("Moyenne 5 × 5", 5),
+                            ("Moyenne 11 × 11", 11), ("Moyenne 31 × 31", 31)):
+            combo.addItem(label, size)
+        combo.setCurrentIndex(max(0, combo.findData(self.canvas.picker_sample_size)))
+
+        def changed(_index):
+            self.canvas.picker_sample_size = int(combo.currentData())
+            settings.setValue("picker/sample_size", self.canvas.picker_sample_size)
+        combo.currentIndexChanged.connect(changed)
+        self.picker_sample_combo = combo
+        self._picker_actions.append(bar.insertWidget(tail, combo))
+        self._sync_active_tool(self.canvas.tools.current_tool)
+
+    def _set_gradient_option(self, name, value):
+        setattr(self.canvas.tools.gradient_tool, name, value)
+        self._update_gradient_controls()
+
+    def _update_gradient_controls(self):
+        tool = self.canvas.tools.gradient_tool
+        self.gradient_end_color.setEnabled(tool.color_mode == "color")
+        self.gradient_spread.setEnabled(tool.geometry != "conical")
+        color = tool.end_color
+        self.gradient_end_color.setText(color.name().upper())
+        self.gradient_end_color.setStyleSheet(
+            f"border-bottom: 3px solid {color.name()}; padding: 4px 10px;")
+
+    def _choose_gradient_end_color(self):
+        tool = self.canvas.tools.gradient_tool
+        color = QColorDialog.getColor(tool.end_color, self.window, "Couleur d’arrivée")
+        if color.isValid():
+            tool.end_color = QColor(color)
+            self._update_gradient_controls()
+
     def _load_toolbar_preset(self, name: str) -> None:
-        if name != "Presets…":
+        if name:
             self.canvas.load_cpp_brush_preset(name)
+            self._refresh_preset_chip()
+
+    def _fill_preset_menu(self) -> None:
+        """Favourites first, then every category, each with its stroke preview."""
+        from UI.docks.brush_presets_dock import BrushPresetsDock
+        menu = self._preset_menu
+        menu.clear()
+        manager = self.canvas.brush_preset_manager
+        records = [manager.metadata(name) for name in manager.list_presets()]
+        current = self.canvas.get_cpp_brush_preset_name()
+
+        def add(name):
+            action = menu.addAction(name)
+            action.setIcon(QIcon(QPixmap.fromImage(
+                BrushPresetsDock._render_thumbnail(manager.load(name) or {}, name))))
+            action.setCheckable(True)
+            action.setChecked(name == current)
+            action.triggered.connect(lambda _=False, n=name: self._load_toolbar_preset(n))
+
+        favorites = [r["name"] for r in records if r["favorite"]]
+        if favorites:
+            menu.addSection("Favoris")
+            for name in favorites:
+                add(name)
+        for category in manager.categories():
+            names = [r["name"] for r in records if r["category"] == category]
+            if names:
+                menu.addSection(BrushPresetsDock.category_label(category))
+                for name in names:
+                    add(name)
+
+    def _refresh_preset_chip(self) -> None:
+        from UI.docks.brush_presets_dock import BrushPresetsDock
+        name = self.canvas.get_cpp_brush_preset_name()
+        if name == self._shown_preset and name is not None:
+            return
+        self._shown_preset = name
+        settings = (self.canvas.brush_preset_manager.load(name) if name else None) or \
+            self.canvas.get_cpp_brush_settings()
+        self.toolbar_presets.setText(name or "Pinceau personnalisé")
+        image = BrushPresetsDock._render_thumbnail(settings, name or "custom")
+        self.toolbar_presets.setIcon(QIcon(QPixmap.fromImage(image)))
 
     def _sync_active_tool(self, tool_name: str) -> None:
         for name, action in self.toolbar_tool_actions.items():
@@ -800,10 +1053,19 @@ class CreativeSystemUI(QObject):
         self.tool_hint.setText(hint)
         self._hint_action.setVisible(bool(hint) and not paint and tool_name not in self.SELECTION_TOOLS
                                      and tool_name != "transform")
+        for action in getattr(self, "_gradient_actions", ()):
+            action.setVisible(tool_name == "gradient")
+        for action in getattr(self, "_fill_actions", ()):
+            action.setVisible(tool_name == "fill")
+        for action in getattr(self, "_picker_actions", ()):
+            action.setVisible(tool_name == "picker")
+        if tool_name in ("gradient", "fill", "picker"):
+            self._hint_action.setVisible(False)
         if hasattr(self, "status_hint"):
             self.status_hint.setText(hint)
 
     def _sync_toolbar(self, settings) -> None:
+        self._refresh_preset_chip()
         for control, value in (
             (self.toolbar_size, round(float(settings["size"]))),
             (self.toolbar_opacity, round(float(settings["opacity"]) * 100)),
@@ -812,6 +1074,16 @@ class CreativeSystemUI(QObject):
             blocked = control.blockSignals(True)
             control.setValue(value)
             control.blockSignals(blocked)
+        for spin, slider in ((self.toolbar_size, self.toolbar_size_slider),
+                             (self.toolbar_opacity, self.toolbar_opacity_slider),
+                             (self.toolbar_flow, self.toolbar_flow_slider)):
+            blocked = slider.blockSignals(True)
+            slider.setValue(spin.value())
+            slider.blockSignals(blocked)
+        if hasattr(self, "toolbar_smoothing_mode"):
+            blocked = self.toolbar_smoothing_mode.blockSignals(True)
+            self.toolbar_smoothing_mode.setCurrentIndex(int(settings.get("smoothMode", 0)))
+            self.toolbar_smoothing_mode.blockSignals(blocked)
 
     # =========================================================
     # VUES
@@ -838,38 +1110,53 @@ class CreativeSystemUI(QObject):
             dock.hide()
         if hasattr(self, "main_toolbar"):
             self.main_toolbar.hide()
+        # No document yet: document size, layer count and tool hints in the
+        # status bar would describe a canvas that is not there.
+        self.window.statusBar().hide()
 
     def show_workspace(
         self
     ) -> None:
 
-        self.stack.setCurrentWidget(
-            self.canvas
-        )
+        self._restoring_workspace_visibility = True
+        try:
+            self.stack.setCurrentWidget(
+                self.canvas
+            )
 
-        self.tools_dock.hide()
+            self._focus_restore = None
+            settings = QSettings("CreativeSystem", "CreativeSystem")
+            # A malformed/old session must never reopen into an empty shell.  A
+            # user may hide individual panels, but an all-hidden workspace is an
+            # invalid recovery state: restore the factory arrangement instead.
+            if not any(self._workspace_visibility.values()):
+                self._workspace_visibility = self.workspace_manager._factory_visibility.copy()
+                self.workspace_manager.session_visibility = self._workspace_visibility
+                self.workspace_manager.save_session()
+            if self.resource_dock is not None and not settings.value("interface/resources_restored_v2", False, bool):
+                settings.setValue("interface/resources_restored_v2", True)
+                QTimer.singleShot(0, self.reveal_resources)
+            if self.resource_dock is not None and not settings.value("interface/resources_restored_v1", False, bool):
+                # Réparation unique : le panneau Ressources avait pu être enregistré
+                # comme masqué par le mode focus.
+                settings.setValue("interface/resources_restored_v1", True)
+                self._workspace_visibility = dict(self._workspace_visibility)
+                self._workspace_visibility[self.resource_dock.objectName()] = True
+            for dock in self._workspace_docks():
+                if dock.objectName() in self._workspace_visibility:
+                    dock.setVisible(self._workspace_visibility[dock.objectName()])
+            if self.resource_dock is not None and self.window.dockWidgetArea(self.resource_dock) == Qt.DockWidgetArea.NoDockWidgetArea:
+                self.window.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.resource_dock)
+                self.window.tabifyDockWidget(self.color_dock, self.resource_dock)
+            self.main_toolbar.show()
+            self.window.statusBar().show()
+            QTimer.singleShot(0, self._tidy_dock_tab_bars)
+            self._refresh_document_info()
 
-        self._focus_restore = None
-        settings = QSettings("CreativeSystem", "CreativeSystem")
-        if self.resource_dock is not None and not settings.value("interface/resources_restored_v2", False, bool):
-            settings.setValue("interface/resources_restored_v2", True)
-            QTimer.singleShot(0, self.reveal_resources)
-        if self.resource_dock is not None and not settings.value("interface/resources_restored_v1", False, bool):
-            # Réparation unique : le panneau Ressources avait pu être enregistré
-            # comme masqué par le mode focus.
-            settings.setValue("interface/resources_restored_v1", True)
-            self._workspace_visibility = dict(self._workspace_visibility)
-            self._workspace_visibility[self.resource_dock.objectName()] = True
-        for dock in self._workspace_docks():
-            if dock.objectName() in self._workspace_visibility:
-                dock.setVisible(self._workspace_visibility[dock.objectName()])
-        if self.resource_dock is not None and self.window.dockWidgetArea(self.resource_dock) == Qt.DockWidgetArea.NoDockWidgetArea:
-            self.window.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.resource_dock)
-            self.window.tabifyDockWidget(self.color_dock, self.resource_dock)
-        self.main_toolbar.show()
-        self._refresh_document_info()
+            self.canvas.setFocus()
 
-        self.canvas.setFocus()
+        finally:
+            self._restoring_workspace_visibility = False
 
     # =========================================================
     # DOCKS
@@ -918,10 +1205,22 @@ class CreativeSystemUI(QObject):
         # que lorsqu'il est branché (voir set_module_dock_available).
         window.addDockWidget(right, self.blend_creator_dock)
         window.tabifyDockWidget(self.layers_dock, self.blend_creator_dock)
+        window.addDockWidget(right, self.history_dock)
+        window.tabifyDockWidget(self.layers_dock, self.history_dock)
+        # Optional panels, opened from Fenêtre ▸ Panneaux.
+        window.addDockWidget(right, self.navigator_dock)
+        window.tabifyDockWidget(self.color_dock, self.navigator_dock)
+        window.addDockWidget(right, self.mixer_dock)
+        window.tabifyDockWidget(self.color_dock, self.mixer_dock)
+        self.navigator_dock.hide()
+        self.mixer_dock.hide()
+        for dock in self._workspace_docks():
+            dock.setVisible(dock.objectName() in BUILTIN_WORKSPACE_OPEN["Peinture"])
         self.color_dock.raise_()
         self.layers_dock.raise_()
 
-        window.resizeDocks([self.color_dock, self.layers_dock], [360, 480], Qt.Orientation.Vertical)
+        # The colour panel's content is ~320 px tall: give the rest to layers.
+        window.resizeDocks([self.color_dock, self.layers_dock], [330, 560], Qt.Orientation.Vertical)
         window.resizeDocks([self.color_dock, self.brush_panel_dock], [320, 250], Qt.Orientation.Horizontal)
 
     # =========================================================
@@ -936,12 +1235,32 @@ class CreativeSystemUI(QObject):
         self.status_hint = QLabel(TOOL_HINTS.get(self.canvas.tools.current_tool, ""))
         self.status_hint.setObjectName("statusHint")
         status.addWidget(self.status_hint, 1)
+        # A temporary QStatusBar message is painted in the normal-widget lane.
+        # Defer the restoration by one event-loop turn: Qt finishes its own
+        # message cleanup after emitting ``messageChanged(\"\")``.
+        status.messageChanged.connect(self._sync_status_hint_visibility)
         self.document_label = QLabel("")
-        self.document_label.setObjectName("valueLabel")
+        self.document_label.setObjectName("documentStatus")
+        self.document_label.setToolTip("Dimensions et nombre de calques du document")
         status.addPermanentWidget(self.document_label)
+        self.layer_status = QLabel("")
+        self.layer_status.setObjectName("layerStatus")
+        self.layer_status.setToolTip("Calque actif")
+        status.addPermanentWidget(self.layer_status)
+        self.cursor_status = QLabel("—, —")
+        self.cursor_status.setObjectName("cursorStatus")
+        self.cursor_status.setMinimumWidth(92)
+        self.cursor_status.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        self.cursor_status.setToolTip("Position du curseur dans le document")
+        status.addPermanentWidget(self.cursor_status)
+        # Engine badge kept for compatibility but no longer shown: it is a
+        # developer diagnostic, not information an artist acts on.  It is
+        # surfaced again only when the native engine is missing.
         self.backend_label = QLabel(self.backend_badge.text())
+
         self.backend_label.setObjectName("backendBadge")
-        status.addPermanentWidget(self.backend_label)
+        if not self.canvas.cpp_brush_enabled:
+            status.addPermanentWidget(self.backend_label)
         self.import_state_label = QLabel("")
         self.import_state_label.setObjectName("importState")
         self.import_state_label.hide()
@@ -963,6 +1282,33 @@ class CreativeSystemUI(QObject):
         self._info_timer.setInterval(800)
         self._info_timer.timeout.connect(self._refresh_document_info)
         self._info_timer.start()
+
+    def _sync_status_hint_visibility(self, message: str) -> None:
+        if message:
+            self.status_hint.hide()
+        else:
+            QTimer.singleShot(0, self.status_hint.show)
+
+    def _front_dock_of(self, dock):
+        """Return the dock currently shown in ``dock``'s tab group."""
+        group = [dock] + list(self.window.tabifiedDockWidgets(dock))
+        for candidate in group:
+            if candidate.isVisible() and not candidate.visibleRegion().isEmpty():
+                return candidate
+        return dock if dock.isVisible() else None
+
+    def _tidy_dock_tab_bars(self) -> None:
+        """Hide dock tab bars Qt leaves behind for an all-hidden tab group.
+
+        With the Pinceau/Outils (classique) group closed, QMainWindow kept its
+        empty tab bar on screen as a stray line under the menu bar.
+        """
+        from PySide6.QtWidgets import QTabBar
+        for bar in self.window.findChildren(QTabBar, options=Qt.FindChildOption.FindDirectChildrenOnly):
+            bar.setDrawBase(False)
+            bar.setExpanding(False)
+            if bar.count() < 2 and bar.isVisible():
+                bar.hide()
 
     def set_import_state(self, text: str = "", warning: bool = False) -> None:
         """Persistent PSD import state, separate from transient status messages."""
@@ -992,8 +1338,18 @@ class CreativeSystemUI(QObject):
             return
         if available:
             if not in_layout:
+                # Connecting a module must never rearrange the artist's
+                # panels: its dock joins the Layers group *hidden* (Fenêtre ▸
+                # Panneaux opens it) instead of popping up as the front tab,
+                # on the welcome page included.
+                current = self._front_dock_of(self.layers_dock)
                 window.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, dock)
                 window.tabifyDockWidget(self.layers_dock, dock)
+                wanted = (self.stack.currentWidget() is self.canvas
+                          and bool(getattr(self, "_workspace_visibility", {}).get(dock.objectName(), False)))
+                dock.setVisible(wanted)
+                if current is not None and current is not dock and current.isVisible():
+                    current.raise_()
             dock.setEnabled(True)
         else:
             dock.setEnabled(False)
@@ -1006,6 +1362,14 @@ class CreativeSystemUI(QObject):
             document = self.canvas.document
             layers = len(getattr(document, "layers", []) or [])
             self.document_label.setText(f"{document.width} × {document.height} px  ·  {layers} calque(s)")
+            layer = self.canvas.get_active_layer()
+            layer_name = getattr(layer, "name", "Aucun calque")
+            self.layer_status.setText(f"Calque : {layer_name}")
+            position = self.canvas.screen_to_image_f(self.canvas.cursor_position)
+            if 0 <= position.x() < document.width and 0 <= position.y() < document.height:
+                self.cursor_status.setText(f"{round(position.x())}, {round(position.y())}")
+            else:
+                self.cursor_status.setText("—, —")
             self.set_zoom(float(getattr(self.canvas, "zoom", 1.0)))
         except (AttributeError, RuntimeError, TypeError, ValueError):
             pass
@@ -1033,12 +1397,11 @@ class CreativeSystemUI(QObject):
         self._focus_shortcut.activated.connect(self.toggle_focus_mode)
         self._refresh_workspace_combo()
         if self.resource_dock is not None:
+            # Shortcut-only: Fenêtre ▸ Panneaux ▸ Ressources already lists it.
             reveal = QAction("Afficher les Ressources", self.window)
             reveal.setShortcut(QKeySequence("Ctrl+Shift+R"))
             reveal.triggered.connect(self.reveal_resources)
-            window_menu = self.menu_manager.menus["window"]
-            first = window_menu.actions()[0] if window_menu.actions() else None
-            window_menu.insertAction(first, reveal)
+            self.window.addAction(reveal)
             actions["show_resources"] = reveal
             self.resource_dock.sync_central_library()
             self._library_timer = QTimer(self)
@@ -1068,14 +1431,17 @@ class CreativeSystemUI(QObject):
 
     def _on_library_brushes(self, names) -> None:
         self.brush_presets_dock.refresh()
-        combo = self.toolbar_presets
-        combo.blockSignals(True)
-        combo.clear()
-        combo.addItem("Presets…")
-        combo.addItems(self.canvas.brush_preset_manager.list_presets())
-        combo.blockSignals(False)
-        self.window.statusBar().showMessage(
-            f"Bibliothèque : {len(names)} pinceau(x) disponible(s) — " + ", ".join(list(names)[:3]), 5000)
+        self._shown_preset = None
+        self._refresh_preset_chip()
+        # The first sync happens while Nebula opens. It is not a user action,
+        # so it should not cover the status hint; later resource publications
+        # remain visible as a useful cross-application notification.
+        announced = getattr(self, "_library_announced", False)
+        self._library_announced = True
+        if announced:
+            self.window.statusBar().showMessage(
+                f"Bibliothèque : {len(names)} pinceau(x) disponible(s) — "
+                + ", ".join(list(names)[:3]), 5000)
 
     def _watch_library(self) -> None:
         """Rafraîchit le panneau quand une autre app (StarDust…) publie."""
@@ -1110,6 +1476,10 @@ class CreativeSystemUI(QObject):
             self._focus_restore = None
         self.canvas.setFocus()
 
+    def open_pressure_curve(self) -> None:
+        from UI.dialogs.pressure_curve_dialog import PressureCurveDialog
+        PressureCurveDialog(self.canvas, self.window).exec()
+
     def show_shortcuts(self) -> None:
         gestures = (
             ("Tab", "Mode focus : masquer / afficher tous les panneaux"),
@@ -1119,7 +1489,20 @@ class CreativeSystemUI(QObject):
             ("Ctrl+5 / Ctrl+6", "Miroir de vue / tourner de 15°"),
             ("Clic droit ou appui long sur le rail", "Autres outils du groupe"),
         )
-        ShortcutSheet(self.window, (("Gestes", gestures),)).exec()
+        painting = (
+            ("[ / ]", "Réduire / agrandir le pinceau"),
+            ("1 … 0", "Opacité de 10 % à 100 %"),
+            ("X", "Inverser couleur principale et arrière-plan"),
+            ("D", "Couleurs par défaut (noir / blanc)"),
+            ("Clic droit sur la toile", "Palette rapide : couleur, taille, pinceaux favoris"),
+            ("Alt + clic", "Pipette"),
+            ("Maj + clic", "Tracer une ligne droite depuis la fin du dernier trait"),
+            ("Ctrl+Alt+1 … 4", "Crayon HB, Stylo encre, Huile ronde, Fusain"),
+            ("Maj+F", "Remplissage au lasso"),
+            ("Q", "Masque rapide : peindre une sélection"),
+            ("W", "Mode tuile (motif sans raccord)"),
+        )
+        ShortcutSheet(self.window, (("Gestes", gestures), ("Peinture", painting))).exec()
 
     def _refresh_workspace_combo(self, current: str | None = None) -> None:
         combo = getattr(self, "workspace_combo", None)
@@ -1127,14 +1510,20 @@ class CreativeSystemUI(QObject):
             return
         combo.blockSignals(True)
         combo.clear()
-        combo.addItem("Espace…")
-        combo.addItems(self.workspace_manager.names())
+        for name in self.workspace_manager.names():
+            combo.addItem(self._workspace_label(name), name)
         combo.insertSeparator(combo.count())
         combo.addItem("Enregistrer l'espace actuel…")
         combo.addItem("Réinitialiser l'agencement")
-        index = combo.findText(current) if current else -1
+        current = current or getattr(self, "_current_workspace", None) or "Default"
+        self._current_workspace = current
+        index = combo.findData(current)
         combo.setCurrentIndex(max(0, index))
         combo.blockSignals(False)
+
+    @staticmethod
+    def _workspace_label(name: str) -> str:
+        return {"Default": "Par défaut"}.get(name, name)
 
     def _on_workspace_combo(self, index: int) -> None:
         text = self.workspace_combo.itemText(index)
@@ -1144,8 +1533,9 @@ class CreativeSystemUI(QObject):
         elif text == "Réinitialiser l'agencement":
             self.reset_workspace()
             self._refresh_workspace_combo()
-        elif index > 0 and text:
-            self.load_workspace(text)
+        elif self.workspace_combo.itemData(index):
+            self._current_workspace = self.workspace_combo.itemData(index)
+            self.load_workspace(self._current_workspace)
 
     # =========================================================
     # COMPATIBILITÉ

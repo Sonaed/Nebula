@@ -1,0 +1,38 @@
+Sun Oct  4 15:44:24 2026    /tmp/nebula-psd-before.prof
+
+         5642962 function calls (5632409 primitive calls) in 33.407 seconds
+
+   Ordered by: cumulative time
+   List reduced from 1758 to 30 due to restriction <30>
+
+   ncalls  tottime  percall  cumtime  percall filename:lineno(function)
+    194/1    0.008    0.000   33.411   33.411 {built-in method builtins.exec}
+        1    0.001    0.001   33.411   33.411 qualify_real_psd.py:1(<module>)
+        1    0.003    0.003   33.070   33.070 qualify_real_psd.py:18(main)
+        4    0.000    0.000   32.723    8.181 qualify_real_psd.py:15(timed)
+        1    0.000    0.000   29.111   29.111 qualify_real_psd.py:27(<lambda>)
+        1    0.000    0.000   29.111   29.111 format_psd.py:124(_load_native)
+        1    0.000    0.000   29.087   29.087 format_psd.py:136(_import_native_document)
+       43   14.330    0.333   20.118    0.468 format_psd.py:417(_write_pixels)
+      4/1    0.001    0.000   18.677   18.677 format_psd.py:217(_import_children)
+       32    0.006    0.000   12.776    0.399 format_psd.py:294(_import_leaf)
+       43    0.000    0.000    8.920    0.207 psd_reader.py:102(decode_pixels)
+       43    0.042    0.001    8.920    0.207 psd_reader.py:866(load)
+       43    0.002    0.000    8.878    0.206 psd_reader.py:881(_decode_layer_pixels)
+      171    1.816    0.011    5.190    0.030 psd_reader.py:314(_decode_channel)
+     2188    0.670    0.000    4.240    0.002 format_psd.py:387(_store_tiles)
+    65838    3.017    0.000    3.886    0.000 psd_reader.py:207(unpackbits)
+      396    0.008    0.000    3.808    0.010 psd_reader.py:907(_assemble_rgba)
+      396    3.776    0.010    3.781    0.010 _shape_base_impl.py:655(dstack)
+     2219    0.031    0.000    2.802    0.001 tile_store.py:132(counted)
+        2    0.003    0.001    2.751    1.376 psd_import.py:258(decode_composite_tiles)
+        2    0.002    0.001    2.483    1.242 psd_reader.py:1174(read_composite_regions)
+      352    1.781    0.005    2.471    0.007 psd_reader.py:1002(_read_composite_region)
+     2166    0.200    0.000    1.904    0.001 tile_store.py:450(set_tiles_batch)
+        1    0.000    0.000    1.512    1.512 qualify_real_psd.py:25(<lambda>)
+     2166    0.853    0.000    1.430    0.001 native_bridge.py:656(set_many)
+        8    0.030    0.004    1.329    0.166 tile_store.py:473(write_image)
+        8    1.267    0.158    1.268    0.158 native_bridge.py:682(write_image)
+        1    0.000    0.000    1.240    1.240 qualify_real_psd.py:26(<lambda>)
+   197859    0.086    0.000    0.921    0.000 {method 'any' of 'numpy.ndarray' objects}
+        1    0.001    0.001    0.861    0.861 qualify_real_psd.py:24(<lambda>)

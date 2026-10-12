@@ -23,7 +23,6 @@ class ArchitectureBoundaryTests(unittest.TestCase):
             self.ROOT / "DOCUMENTS" / "psd_reader.py": {".copy()"},
             self.ROOT / "DOCUMENTS" / "selection.py": {".copy()"},
             self.ROOT / "DOCUMENTS" / "tile_store.py": {"QPainter("},
-            self.ROOT / "TOOLS" / "retouch_tool.py": {".copy()"},
             self.ROOT / "TOOLS" / "selection_tools.py": {"QPainter("},
             self.ROOT / "TOOLS" / "transform_tool.py": {"QPainter(", ".copy()"},
         }

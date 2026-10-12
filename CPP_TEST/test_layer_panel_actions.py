@@ -67,7 +67,8 @@ def make_app(names, selected, active=0):
                           move_layer_to_group=mock.Mock(return_value=True))
     app = SimpleNamespace()
     app.canvas = SimpleNamespace(document=doc, prune_gpu_layers=mock.Mock(), sync_gpu_layer=mock.Mock(),
-                                 _projection_tile_signatures=mock.Mock(), update=mock.Mock())
+                                 _projection_tile_signatures=mock.Mock(), update=mock.Mock(),
+                                 invalidate_projection_for_layers=mock.Mock())
     app.ui = SimpleNamespace(layers_dock=SimpleNamespace(get_selected_layer_indices=lambda: list(selected)))
     app.layer_manager = FakeManager(doc)
     app.refresh_layers = mock.Mock()

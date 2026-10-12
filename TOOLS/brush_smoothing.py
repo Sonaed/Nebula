@@ -102,11 +102,6 @@ class BrushSmoothing:
         if mode in ("basic", "weighted", "stabilize"):
             self.mode = mode
 
-    def set_buffer_size(self, buffer_size: int) -> None:
-        self.buffer_size = max(2, int(buffer_size))
-        # Rebuild deque with new maxlen, preserving the most-recent samples.
-        self.points = deque(self.points, maxlen=self.buffer_size)
-
     # ── stroke lifecycle ──────────────────────────────────────────────────────
 
     def begin_stroke(self) -> None:
@@ -145,13 +140,37 @@ class BrushSmoothing:
         return self._basic(point)
 
     def flush_tail(self) -> list[QPointF]:
-        """Return any buffered points that were held back (stabilize mode).
+        """Advance a delayed stabilizer smoothly to the lifted pen point.
 
-        Call on pen-lift to let the canvas draw the remaining tail.
+        The previous implementation returned raw samples evicted from the
+        averaging window.  Those points can lie *behind* the last emitted
+        centroid, causing a subtle backward hook at the end of a slow line.
+        Replacing the oldest buffered samples with the final input instead
+        makes the centroid travel forward until it reaches that point.
         """
-        tail = list(self._stab_tail)
+        if self.mode != "stabilize" or not self._stab_buf:
+            self._stab_tail = []
+            return []
+        target = QPointF(self.last_input if self.last_input is not None else self._stab_buf[-1])
+        points: list[QPointF] = []
+        while self._stab_buf:
+            evicted = self._stab_buf.popleft()
+            self._stab_sx -= evicted.x()
+            self._stab_sy -= evicted.y()
+            self._stab_buf.append(QPointF(target))
+            self._stab_sx += target.x()
+            self._stab_sy += target.y()
+            centroid = QPointF(self._stab_sx / len(self._stab_buf),
+                               self._stab_sy / len(self._stab_buf))
+            if (self._stab_emitted is None or _dist(self._stab_emitted, centroid) >= 0.05):
+                self._stab_emitted = QPointF(centroid)
+                points.append(QPointF(centroid))
+            # Every original sample has now been replaced; retaining only the
+            # final point lets ``end_stroke`` clear state without a stale tail.
+            if all(_dist(point, target) < 1e-6 for point in self._stab_buf):
+                break
         self._stab_tail = []
-        return tail
+        return points
 
     # ── basic mode (original inertia smoother) ────────────────────────────────
 
@@ -251,13 +270,14 @@ class BrushSmoothing:
         Running sums (_stab_sx/_stab_sy) are maintained incrementally so
         centroid computation is O(evictions) per call, not O(buffer_size).
 
-        Unflushable tail is collected in *_stab_tail*; call flush_tail() on
-        pen-lift and submit those points to the canvas individually.
+        ``flush_tail()`` advances the remaining centroid window to the lifted
+        point, so the canvas can finish the stroke without a blunt segment.
         """
         buf_size = max(2, int(self.buffer_size + self.strength * 20))
 
         # Enqueue new sample and add to running sums.
         pt = QPointF(point)
+        self.last_input = QPointF(pt)
         self._stab_buf.append(pt)
         self._stab_sx += pt.x()
         self._stab_sy += pt.y()
@@ -282,10 +302,3 @@ class BrushSmoothing:
         return QPointF(self._stab_emitted)
 
     # ── batch helper ──────────────────────────────────────────────────────────
-
-    def smooth_points(self, points: list[QPointF]) -> list[QPointF]:
-        self.begin_stroke()
-        smoothed = [self.add_point(p) for p in points]
-        tail = self.flush_tail()
-        self.end_stroke()
-        return smoothed + tail

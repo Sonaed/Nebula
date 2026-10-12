@@ -15,10 +15,28 @@ DEFAULT_BRUSH_SETTINGS: dict[str, Any] = {
     "scatter": 0.0,
     "sizeJitter": 0.0,
     "rotationJitter": 0.0,
+    # Dab orientation follows the stroke tangent (bristle and flat tips).
+    "directionFollow": 0.0,
+    # Paper grain fixed to the canvas instead of repeated per dab.
+    "textureCanvasSpace": False,
+    # Pixel/texture workflow controls; presets must retain both exactly.
+    "wrapAround": False,
+    "antialiasing": True,
+    # Dual brush: second tip (image in the preset as _csbr_dual_tip_png).
+    "dualBrush": False,
+    "dualSizeRatio": 1.0,
+    "dualSpacing": 0.25,
+    "dualScatter": 0.0,
+    "dualCount": 1.0,
+    "dualHardness": 1.0,
+    "dualMode": 0.0,
     # Advanced dynamics (shared by the Python engine and future C++ inputs).
     "velocitySize": 0.0,
     "velocityOpacity": 0.0,
     "velocityFlow": 0.0,
+    # Tablet tilt controls the flat-tip azimuth, flattening and paint response.
+    "tiltFollow": 0.0,
+    "tiltElongation": 0.0,
     "tiltSize": 0.0,
     "tiltOpacity": 0.0,
     "tiltAngle": 0.0,
@@ -85,6 +103,10 @@ class BrushSettingsState:
 
     def get(self, key: str, default: Any = None) -> Any:
         return deepcopy(self._values.get(key, default))
+
+    def peek(self, key: str, default: Any = None) -> Any:
+        """Read without copying; callers must not mutate returned containers."""
+        return self._values.get(key, default)
 
     def update(
         self,

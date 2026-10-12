@@ -100,12 +100,23 @@ class CppBrushPresetApplier:
 
             # Orientation du dab : tangente du trait et inclinaison du stylet.
             "directionFollow": "cs_brush_set_direction_follow",
+            "dualSizeRatio": "cs_brush_set_dual_size_ratio",
+            "dualSpacing": "cs_brush_set_dual_spacing",
+            "dualScatter": "cs_brush_set_dual_scatter",
+            "dualCount": "cs_brush_set_dual_count",
+            "dualHardness": "cs_brush_set_dual_hardness",
+            "dualMode": "cs_brush_set_dual_mode",
             "tiltFollow": "cs_brush_set_tilt_follow",
             "tiltElongation": "cs_brush_set_tilt_elongation",
+            "tiltSize": "cs_brush_set_tilt_size",
+            "tiltOpacity": "cs_brush_set_tilt_opacity",
+            "randomSize": "cs_brush_set_random_size",
+            "randomOpacity": "cs_brush_set_random_opacity",
 
             "velocitySize": "cs_brush_set_velocity_size",
             "velocityOpacity": "cs_brush_set_velocity_opacity",
             "velocityFlow": "cs_brush_set_velocity_flow",
+            "velocitySpacing": "cs_brush_set_velocity_spacing",
 
             "textureStrength":
                 "cs_brush_set_texture_strength",
@@ -177,6 +188,15 @@ class CppBrushPresetApplier:
 
             "textureAffectOpacity":
                 "cs_brush_set_texture_affect_opacity",
+
+            "textureCanvasSpace":
+                "cs_brush_set_texture_canvas_space",
+
+            "dualBrush":
+                "cs_brush_set_dual_brush",
+
+            "wrapAround":
+                "cs_brush_set_wrap_around",
 
             "dirtyColor":
                 "cs_brush_set_dirty_color",

@@ -25,9 +25,22 @@ from pathlib import Path
 from PySide6.QtCore import QEvent, QObject, QPointF, QRect, QSettings, Qt, Signal
 from PySide6.QtGui import QColor, QImage, QPainter, QPen, QTransform, qRgba
 from PySide6.QtWidgets import (
-    QButtonGroup, QCheckBox, QComboBox, QDockWidget, QFileDialog, QGridLayout, QHBoxLayout,
-    QInputDialog, QLabel, QMessageBox, QPushButton, QScrollArea, QSlider, QSpinBox, QToolButton,
-    QVBoxLayout, QWidget,
+    QButtonGroup,
+    QCheckBox,
+    QComboBox,
+    QDockWidget,
+    QFileDialog,
+    QGridLayout,
+    QHBoxLayout,
+    QInputDialog,
+    QLabel,
+    QMessageBox,
+    QPushButton,
+    QScrollArea,
+    QSpinBox,
+    QToolButton,
+    QVBoxLayout,
+    QWidget,
 )
 
 from PIXEL import pixel_core as core

@@ -56,6 +56,8 @@ int main()
                               stateAfter, 2, branch, dropped) == 0);
 
     cursor.append(branch, dropped);
+    assert(branch == 1);
+    assert(cursor.stateSize(1, 0) == 0 && cursor.stateSize(1, 1) == 0);
     cursor.append(branch, dropped);
     assert(cursor.stepCount() == 3 && cursor.index() == 3);
     assert(cursor.setMaximumSteps(2) == 1);

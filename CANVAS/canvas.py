@@ -23,6 +23,7 @@ from PySide6.QtGui import (
     QFont,
     QFontMetricsF,
     QPainterPath,
+    QPolygonF,
     QKeyEvent,
     QEnterEvent,
 )
@@ -36,7 +37,37 @@ from CANVAS.live_stroke_preview import LiveStrokePreview
 # modules.  They deliberately do not use PySide's QOpenGLFunctions wrapper:
 # that wrapper is unstable on the currently supported Python/Qt combination.
 GPU_SHADER_COMPOSITING_ENABLED = True
-GPU_SHADER_STROKES_ENABLED = True
+# The instanced GPU stroke path rendered its own approximation of the brush
+# (no stroke buffer, no pressure curve, 8-bit accumulation, doubled dabs at
+# segment joints) and committed THAT as the final pixels, so a stroke looked
+# different depending on whether the GPU path happened to qualify.  Every
+# stroke is now rasterized by CreativeCore (threaded when the GPU canvas is
+# up), so what you see while painting is exactly what gets committed.
+GPU_SHADER_STROKES_ENABLED = False
+
+# A compact confirmation at the canvas edge makes tool changes legible without
+# asking artists to look away at the rail.  This is intentionally not a toast
+# system: it only confirms a deliberate change of working mode, then disappears.
+TOOL_FEEDBACK = {
+    "brush": ("Pinceau", "B", "Maj+clic : ligne droite depuis le dernier trait"),
+    "eraser": ("Gomme", "E", "Maj+clic : ligne droite depuis le dernier trait"),
+    "smudge": ("Estompe", "S", "Étaler la peinture"),
+    "blur": ("Flou", "", "Adoucir localement"),
+    "sharpen": ("Netteté", "", "Renforcer les détails localement"),
+    "clone_stamp": ("Tampon", "K", "Maj+clic pour définir la source"),
+    "fill": ("Remplissage", "F", "Cliquer dans une zone"),
+    "gradient": ("Dégradé", "G", "Glisser pour définir la direction"),
+    "select_rectangle": ("Sélection rectangulaire", "", "Maj ajoute · Alt soustrait"),
+    "select_ellipse": ("Sélection elliptique", "", "Maj ajoute · Alt soustrait"),
+    "lasso": ("Lasso", "", "Dessiner le contour de sélection"),
+    "magic_wand": ("Baguette magique", "", "Cliquer une couleur"),
+    "move": ("Déplacer", "M", "Glisser le calque actif"),
+    "transform": ("Transformation", "T", "Entrée valide · Échap annule"),
+    "crop": ("Recadrage", "C", "Glisser le cadre"),
+    "picker": ("Pipette", "I", "Cliquer pour prélever une couleur"),
+    "hand": ("Main", "H", "Glisser pour déplacer la vue"),
+    "zoom_view": ("Zoom", "Z", "Clic pour zoomer"),
+}
 
 from PySide6.QtCore import (
     Qt,
@@ -55,7 +86,7 @@ from TOOLS.tool_manager import ToolManager
 from TOOLS.cpp_brush_presets import CanvasBrushPresetController
 from TOOLS.brush_settings_state import BrushSettingsState, DEFAULT_BRUSH_SETTINGS
 from TOOLS.brush_preset_manager import BrushPresetManager
-from TOOLS.transform_tool import TransformSpec, PerspectiveSpec, LiquifyStroke, WarpControl
+from TOOLS.transform_tool import TransformSpec
 from TOOLS.crop_tool import CropTool
 from DOCUMENTS.document import Document
 from DOCUMENTS.canvas_objects import EditableText, ReferenceImage
@@ -63,15 +94,14 @@ from DOCUMENTS.layer import Layer
 from DOCUMENTS.selection import SelectionOperation
 from CANVAS.free_transform import FreeTransformSession, CURSORS as FREE_TRANSFORM_CURSORS
 from CORE.native_bridge import native_selection_bounds
-from DOCUMENTS.blend_modes import (has_non_normal, composite_layers, apply_clipped_adjustment,
-                                   adjustment_coverage, hide_clipped_over_hidden_base,
-                                   adjustment_entry, resolve_stack)
-from DOCUMENTS.adjustments import (AdjustmentLayerSpec, CurvesAdjustment,
-                                   LevelsAdjustment, HueSaturationAdjustment,
-                                   ExposureAdjustment, VibranceAdjustment,
-                                   ColorBalanceAdjustment, ParametricCurvesAdjustment,
-                                   SelectiveColorAdjustment, LuminosityMaskAdjustment,
-                                   apply_adjustment)
+from DOCUMENTS.blend_modes import (
+    has_non_normal,
+    composite_layers,
+    hide_clipped_over_hidden_base,
+    adjustment_entry,
+    resolve_stack,
+)
+from DOCUMENTS.adjustments import apply_adjustment
 from UI.qt_blend_modes import composition_mode
 from CANVAS.tile_history import TileHistory
 from CORE.projection_worker import ProjectionWorker, ProjectionLayer
@@ -93,11 +123,16 @@ class Canvas(QOpenGLWidget):
     color_sampled = Signal(QColor)
     color_picked = Signal(QColor)          # emitted at end of brush stroke
     brush_settings_changed = Signal(dict)
+    # "swap" (X) or "reset" (D) for the foreground/background colours.
+    color_shortcut_requested = Signal(str)
     tool_changed = Signal(str)
     canvas_only_changed = Signal(bool)
     view_flip_changed = Signal(bool, bool)
     symmetry_changed = Signal(bool, bool)
+    radial_symmetry_changed = Signal(int)
+    radial_center_placement_changed = Signal(bool)
     history_restored = Signal()
+    history_changed = Signal()
     history_operation_deferred = Signal(str)
     performance_warning = Signal(str)
     # Emitted with the painted-on layer's id whenever a stroke finishes.
@@ -108,7 +143,7 @@ class Canvas(QOpenGLWidget):
     # refreshed from painting. Application connects this to invalidate the
     # cache and trigger a layers-panel refresh.
     layer_thumbnail_dirty = Signal(str)
-    async_brush_patch = Signal(int, int, int, int, object, bool, str)
+    async_brush_patch = Signal(int, int, int, int, int, object, bool, str)
     assistant_build_step = Signal(int, int)   # (handles_placed, handles_needed)
 
     def __init__(
@@ -138,21 +173,27 @@ class Canvas(QOpenGLWidget):
         self._projection_tile_signatures: dict[tuple[int, int], tuple] = {}
         self._projection_tile_generation: dict[tuple[int, int], int] = {}
         self._projection_ready_tiles: set[tuple[int, int]] = set()
+        # Tiles whose final pixels are provably hidden by an unchanged opaque
+        # stack above a visibility edit. Their old projection is also the new
+        # projection, so only its signature needs refreshing.
+        self._visibility_occluded_keys: set[tuple[int, int]] = set()
+        self._visibility_occlusion_key = None
         self._projection_pending_images = {}
         self._projection_publish_keys = set()
         self._projection_waiting_visible = set()
         self._projection_display_ready = False
         self._editing_alpha_mask_layer_id: str | None = None
         self._editing_alpha_mask_image: QImage | None = None
+        # Set while the mask being painted belongs to the active layer's
+        # group (folder mask) instead of the layer itself.
+        self._editing_mask_group_id: str | None = None
         self._async_brush_handle = None
         self._async_brush_layer_id: str | None = None
         self._async_symmetry_handles: list = []   # [(async_handle, tilt_sign_x, tilt_sign_y), …]
         self._async_stroke_pending: int = 0        # workers not yet complete
-        # Bumped every _begin_async_brush() call. A worker's `receive`
-        # callback closes over the generation it was started with, so a
-        # patch that arrives from a worker whose stroke has since been
-        # abandoned (see _begin_async_brush's cancel-stale-handle guard) is
-        # dropped instead of being misapplied to whatever stroke is current.
+        self._async_finish_requested = False      # pen lifted, tail rendering
+        # Validate generations both on the native thread and at Qt delivery;
+        # cancelling a document must reject already-enqueued patches too.
         self._async_stroke_generation: int = 0
         # Keeps the async stroke's source QImage (and the raw ctypes view
         # over its buffer handed to the native worker(s)) alive for as long
@@ -160,7 +201,15 @@ class Canvas(QOpenGLWidget):
         # _begin_async_brush for why this is load-bearing, not just tidiness.
         self._async_brush_source_image = None
         self._async_brush_source_raw = None
-        self.async_brush_patch.connect(self._apply_async_brush_patch)
+        self._async_brush_source_store = None
+        self._async_tablet_events = deque()
+        self._async_tablet_context = None
+        self._async_tablet_capture_active = False
+        self._replaying_async_tablet = False
+        self._async_tablet_timer = QTimer(self)
+        self._async_tablet_timer.setSingleShot(True)
+        self._async_tablet_timer.timeout.connect(self._drain_async_tablet_events)
+        self.async_brush_patch.connect(self._dispatch_async_brush_patch)
         # Retain one tile beyond the visible viewport.  Panning then presents
         # already-composed pixels instead of rebuilding every layer as soon
         # as a tile crosses the viewport edge.  The store remains sparse and
@@ -175,6 +224,7 @@ class Canvas(QOpenGLWidget):
         self._projection_cache_stats = {
             "visible_hits": 0, "visible_misses": 0,
             "prefetch_hits": 0, "prefetch_misses": 0,
+            "visibility_occlusion_skips": 0,
         }
 
         background = (
@@ -198,8 +248,13 @@ class Canvas(QOpenGLWidget):
         self.cpp_brush_enabled: bool = False
         self.cpp_brush = None
         self.cpp_brush_library = None
+        self._brush_texture_png: bytes | None = None
+        self._cpp_texture_png: bytes | None = None
+        self._brush_procedural_source = None
         self._brush_bitmap_tip_png: bytes | None = None
         self._cpp_bitmap_tip_png: bytes | None = None
+        self._brush_dual_tip_png: bytes | None = None
+        self._cpp_dual_tip_png: bytes | None = None
         self.cpp_brush_buffer = None
         self._connected_gl_context = None
         self._gl_cleanup_in_progress = False
@@ -214,6 +269,11 @@ class Canvas(QOpenGLWidget):
         self.brush_settings.update({"spacing": max(1, min(500, default_spacing)) / 100.0}, notify=False)
         preferences = QSettings("CreativeSystem", "CreativeSystem")
         self._preferences = preferences
+        self.radial_symmetry_count = max(1, min(12, preferences.value("canvas/radial_symmetry_copies", 1, int)))
+        self.radial_symmetry_center = QPointF(
+            max(0.0, min(1.0, preferences.value("canvas/radial_symmetry_center_x", 0.5, float))),
+            max(0.0, min(1.0, preferences.value("canvas/radial_symmetry_center_y", 0.5, float))),
+        )
         self.use_gpu = preferences.value("performance/use_gpu", True, bool)
         self.zoom_behavior = preferences.value("canvas/zoom_behavior", "At cursor", str)
         self.canvas_background = preferences.value("canvas/background", "Checkerboard", str)
@@ -231,7 +291,13 @@ class Canvas(QOpenGLWidget):
         # Drawing assistants (ruler, ellipse, perspective …)
         self.assistants = AssistantManager()
 
-        # Popup palette — injected by application.py after construction
+        # Right-click palette (wheel, size, opacity, recent colours), created
+        # on first use.  Preference "input/right_click_palette" turns it off
+        # and restores the temporary colour picker.
+        self.right_click_palette = preferences.value("input/right_click_palette", True, bool)
+        # Global stylus response (Édition ▸ Courbe de pression du stylet…).
+        from TOOLS.pressure_curve import PressureCurve
+        self.pressure_curve = PressureCurve.load(preferences)
         self.popup_palette = None
 
         self._init_cpp_brush()
@@ -289,6 +355,12 @@ class Canvas(QOpenGLWidget):
         self.free_transform: FreeTransformSession | None = None
 
         self.last_point: QPoint = QPoint()
+        # Endpoint of the last committed paint stroke. Shift+click uses it to
+        # draw a precise straight segment without switching tools.
+        self._last_paint_endpoint: QPointF | None = None
+        # Latest raw (unsmoothed) pen position of the stroke in progress.
+        self._stroke_raw_point: QPointF | None = None
+        self._cpp_smoothed_point: QPointF | None = None
 
         self.zoom: float = 1.0
         self.view_rotation: float = 0.0
@@ -297,6 +369,11 @@ class Canvas(QOpenGLWidget):
         self.canvas_only: bool = False
         self.symmetry_horizontal: bool = False
         self.symmetry_vertical: bool = False
+        # Number of evenly-spaced rotational copies. One keeps mirror symmetry
+        # behaviour unchanged; 2–12 provide a production-ready radial guide.
+        self.radial_symmetry_count: int = 1
+        self.radial_symmetry_center = QPointF(0.5, 0.5)
+        self.radial_center_placing = False
         self.assistant_mode: str = "none"
         self.assistant_vanishing_point = QPointF(0.5, 0.5)
         self._assistant_angle: float | None = None
@@ -327,6 +404,8 @@ class Canvas(QOpenGLWidget):
         )
 
         self.cursor_visible: bool = False
+        self._tool_feedback_name: str | None = None
+        self._tool_feedback_until: float = 0.0
 
         # -----------------------------------------------------
         # OUTIL TRANSFORMER
@@ -357,9 +436,17 @@ class Canvas(QOpenGLWidget):
         self.crop_current: QPoint = QPoint()
 
         self.selection_moving: bool = False
+        # A released floating selection remains editable until Enter or
+        # deselection; releasing only ends the pointer gesture.
+        self.selection_floating_active: bool = False
         self.selection_move_start: QPoint = QPoint()
+        self.selection_move_layer_id: str | None = None
         self.selection_move_original: QImage | None = None
         self.selection_move_original_mask: QImage | None = None
+        self.selection_move_remainder: QImage | None = None
+        self.selection_move_floating: QImage | None = None
+        self.selection_move_mask_piece: QImage | None = None
+        self.selection_move_bounds: QRect = QRect()
         self.selected_reference_id: str | None = None
         self.reference_drag_id: str | None = None
         self.reference_drag_anchor = QPointF()
@@ -376,6 +463,8 @@ class Canvas(QOpenGLWidget):
         self.tile_history = TileHistory(
             tile_size=TILE_SIZE,
             max_steps=max(1, min(1000, preferences.value("performance/undo_steps", 30, int))),
+            max_snapshot_bytes=max(8, min(8192, preferences.value(
+                "performance/undo_memory_limit_mb", 512, int))) * 1024 * 1024,
         )
         self.history = self.tile_history.steps
         self.history_index = 0
@@ -469,7 +558,19 @@ class Canvas(QOpenGLWidget):
         # Presets may explicitly opt into crisp pixel-art dabs.  The global
         # preference remains the default for ordinary brushes.
         brush.antialiasing = bool(settings.get("antialiasing", preferences.value("canvas/antialias", True, bool)))
-        brush.smoothing = max(0.0, min(1.0, float(settings.get("stabilization", 0.0))))
+        # Stabilization is the user's input preference (Tools dock slider /
+        # Preferences).  It is not part of the canonical brush state, so this
+        # used to force it back to 0 at the start of EVERY stroke: the
+        # stabilizer slider had no effect at all.  Only a preset that
+        # explicitly carries a value may override it.
+        if "stabilization" in settings:
+            brush.set_smoothing(max(0.0, min(1.0, float(settings["stabilization"]))))
+        smooth_modes = ("none", "basic", "weighted", "stabilize")
+        try:
+            smooth_mode = smooth_modes[int(settings.get("smoothMode", 0))]
+        except (TypeError, ValueError, IndexError):
+            smooth_mode = "none"
+        brush.set_smoothing_mode(smooth_mode)
         brush.sync_engine()
         python_map = {
             "size": "size",
@@ -509,7 +610,10 @@ class Canvas(QOpenGLWidget):
         if color is not None and len(color) >= 4:
             brush.color = QColor(*[int(value) for value in color[:4]])
 
-        eraser = self.tools.current_tool == "eraser"
+        # An eraser preset erases even when picked from the Brush tool, like
+        # in every other painting application.
+        eraser = self.tools.current_tool == "eraser" or (
+            self.tools.current_tool == "brush" and bool(settings.get("eraser", False)))
         brush.eraser = eraser
 
         if self.cpp_brush_enabled:
@@ -519,7 +623,11 @@ class Canvas(QOpenGLWidget):
         if self.cpp_brush_enabled and self.cpp_preset_controller is not None:
             cpp_settings = dict(settings)
             cpp_settings["eraser"] = eraser
-            cpp_settings["smudgeTool"] = False
+            cpp_settings["wrapAround"] = bool(self.wrap_around)
+            # Blender/Smudge presets carry ``smudgeTool``: without it they
+            # deposited the paint colour instead of moving existing paint.
+            cpp_settings["smudgeTool"] = (self.tools.current_tool == "brush"
+                                          and bool(settings.get("smudgeTool", False)))
             if self.tools.current_tool == "smudge":
                 cpp_settings.update({
                     "eraser": False,
@@ -532,6 +640,15 @@ class Canvas(QOpenGLWidget):
                     "paintMix": max(0.01, float(settings["paintMix"])),
                 })
             self.cpp_preset_controller.applier.apply(cpp_settings)
+            dual_png = self._brush_dual_tip_png
+            if dual_png != self._cpp_dual_tip_png:
+                if dual_png:
+                    encoded = (ctypes.c_uint8 * len(dual_png)).from_buffer_copy(dual_png)
+                    if self.cpp_brush_library.cs_brush_set_dual_tip_png(self.cpp_brush, encoded, len(dual_png)):
+                        self._cpp_dual_tip_png = dual_png
+                else:
+                    self.cpp_brush_library.cs_brush_clear_dual_tip(self.cpp_brush)
+                    self._cpp_dual_tip_png = None
             tip_png = self._brush_bitmap_tip_png
             if tip_png != self._cpp_bitmap_tip_png:
                 if tip_png:
@@ -545,6 +662,21 @@ class Canvas(QOpenGLWidget):
                     self.cpp_brush_library.cs_brush_clear_bitmap_tip(self.cpp_brush)
                     self._cpp_bitmap_tip_png = None
 
+        if self.cpp_brush_enabled:
+            texture = self._brush_texture_png
+            if texture != self._cpp_texture_png:
+                if texture:
+                    from PySide6.QtCore import QTemporaryFile
+                    temporary = QTemporaryFile()
+                    if temporary.open():
+                        temporary.write(texture); temporary.flush()
+                        if self.cpp_brush_library.cs_brush_set_texture_path(self.cpp_brush,temporary.fileName().encode("utf-8")):
+                            self._cpp_texture_png = texture
+                        temporary.close()
+                else:
+                    self.cpp_brush_library.cs_brush_clear_texture(self.cpp_brush)
+                    self._cpp_texture_png = None
+
         self.brush_settings_changed.emit(dict(settings))
 
     def set_brush_setting(self, key, value) -> None:
@@ -554,17 +686,35 @@ class Canvas(QOpenGLWidget):
         """Ask CreativeCore to decode and own a brush texture image."""
         if not self.cpp_brush_enabled or not path:
             return False
+        image = QImage(path)
+        if image.isNull() or max(image.width(), image.height()) > 4096:
+            return False
+        from PySide6.QtCore import QByteArray, QBuffer, QIODevice
+        data = QByteArray()
+        stream = QBuffer(data)
+        stream.open(QIODevice.OpenModeFlag.WriteOnly)
+        if not image.save(stream, "PNG"):
+            return False
+        encoded_png = bytes(data)
         encoded_path = path.encode("utf-8")
         if not self.cpp_brush_library.cs_brush_set_texture_path(
             self.cpp_brush, encoded_path
         ):
             return False
+        self._brush_texture_png = encoded_png
+        self._cpp_texture_png = encoded_png
+        if self._brush_procedural_source and self._brush_procedural_source.get("_procedural_texture_role") == "grain":
+            self._brush_procedural_source = None
         self.set_brush_setting("textureStrength", 1.0)
         return True
 
     def clear_brush_texture(self) -> None:
         if self.cpp_brush_enabled:
             self.cpp_brush_library.cs_brush_clear_texture(self.cpp_brush)
+        self._brush_texture_png = None
+        self._cpp_texture_png = None
+        if self._brush_procedural_source and self._brush_procedural_source.get("_procedural_texture_role") == "grain":
+            self._brush_procedural_source = None
 
     def load_brush_bitmap_tip(self, path: str) -> bool:
         """Load a full-color stamp tip directly into CreativeCore."""
@@ -585,6 +735,8 @@ class Canvas(QOpenGLWidget):
             return False
         self._brush_bitmap_tip_png = encoded_png
         self._cpp_bitmap_tip_png = encoded_png
+        if self._brush_procedural_source and self._brush_procedural_source.get("_procedural_texture_role") == "tip":
+            self._brush_procedural_source = None
         return True
 
     def clear_brush_bitmap_tip(self) -> None:
@@ -592,6 +744,8 @@ class Canvas(QOpenGLWidget):
             self.cpp_brush_library.cs_brush_clear_bitmap_tip(self.cpp_brush)
         self._brush_bitmap_tip_png = None
         self._cpp_bitmap_tip_png = None
+        if self._brush_procedural_source and self._brush_procedural_source.get("_procedural_texture_role") == "tip":
+            self._brush_procedural_source = None
 
     def set_brush_settings(self, values) -> None:
         self.brush_settings.update(values)
@@ -615,6 +769,7 @@ class Canvas(QOpenGLWidget):
 
     def _tool_changed(self, _name: str) -> None:
         preferences = QSettings("CreativeSystem", "CreativeSystem")
+        preferences.setValue("session/active_tool", _name)
         if preferences.value("brush/remember_per_tool", True, bool):
             preferences.setValue(
                 f"brush/tool_settings/{self._brush_settings_tool}",
@@ -637,9 +792,41 @@ class Canvas(QOpenGLWidget):
             self.bezier_dragging = False
         if hasattr(self, "brush_settings"):
             self._apply_brush_settings(self.brush_settings.snapshot())
+        # The rail is compact by design. Confirm a change beside the artwork
+        # for a moment so keyboard and stylus users never have to hunt for the
+        # active mode. This never interrupts a stroke or steals focus.
+        self._tool_feedback_name = _name
+        self._tool_feedback_until = time.monotonic() + 1.8
+        QTimer.singleShot(1850, self.update)
+        self.update()
         self.tool_changed.emit(_name)
 
-    def sample_composite_color(self, position: QPoint) -> QColor | None:
+    # Picker sample size in pixels (1, 3, 5, 11, 31): on textured paintings a
+    # single pixel is noise; Photoshop/Krita average a small square.
+    picker_sample_size = 1
+
+    def sample_composite_color(self, position: QPoint, apply: bool = True,
+                               size: int | None = None) -> QColor | None:
+        size = int(self.picker_sample_size if size is None else size)
+        if size > 1:
+            half = size // 2
+            total = [0.0, 0.0, 0.0]
+            count = 0
+            step = max(1, size // 11)            # cap the work for big squares
+            for dy in range(-half, half + 1, step):
+                for dx in range(-half, half + 1, step):
+                    sample = self.sample_composite_color(
+                        QPoint(position.x() + dx, position.y() + dy), apply=False, size=1)
+                    if sample is not None:
+                        total[0] += sample.redF(); total[1] += sample.greenF(); total[2] += sample.blueF()
+                        count += 1
+            if not count:
+                return None
+            color = QColor.fromRgbF(total[0] / count, total[1] / count, total[2] / count, 1.0)
+            if apply:
+                self.apply_sampled_brush_color(color)
+                self.color_sampled.emit(color)
+            return color
         if not (0 <= position.x() < self.document.width and
                 0 <= position.y() < self.document.height):
             return None
@@ -684,8 +871,9 @@ class Canvas(QOpenGLWidget):
                         item.color):
                     raise RuntimeError("CreativeCore is required to sample document text")
             color = composite_tile.pixelColor(position.x() - rect.x(), position.y() - rect.y())
-            self.apply_sampled_brush_color(color)
-            self.color_sampled.emit(color)
+            if apply:
+                self.apply_sampled_brush_color(color)
+                self.color_sampled.emit(color)
             return color
 
         # Composition d'un seul pixel : évite d'allouer une image complète
@@ -715,8 +903,9 @@ class Canvas(QOpenGLWidget):
             out_b / out_a,
             1.0,
         )
-        self.apply_sampled_brush_color(color)
-        self.color_sampled.emit(color)
+        if apply:
+            self.apply_sampled_brush_color(color)
+            self.color_sampled.emit(color)
         return color
 
     def _prepare_cpp_image(
@@ -819,6 +1008,7 @@ class Canvas(QOpenGLWidget):
         if self.clone_source_point is None:
             return False
         self.clone_source = layer.image.convertToFormat(QImage.Format.Format_RGBA8888)
+        target = QPointF(target).toPoint()
         self.clone_offset = self.clone_source_point - target
         return True
 
@@ -827,21 +1017,16 @@ class Canvas(QOpenGLWidget):
                               sharpen: bool) -> QImage:
         settings = self.brush_settings.snapshot()
         image = image if image.format() == QImage.Format.Format_RGBA8888 else image.convertToFormat(QImage.Format.Format_RGBA8888)
-        dirty = self._brush_dirty_rect(start, end)
-        selection_before = self._selection_edit_snapshot(image, dirty)
         layer = self.get_active_layer()
-        if layer is not None:
-            self.tile_history.capture_before(layer, dirty)
-        segments = [(start, end)]
-        cx, cy = self.document.width - 1, self.document.height - 1
-        if self.symmetry_horizontal:
-            segments.append((QPoint(cx - start.x(), start.y()), QPoint(cx - end.x(), end.y())))
-        if self.symmetry_vertical:
-            segments.append((QPoint(start.x(), cy - start.y()), QPoint(end.x(), cy - end.y())))
-        if self.symmetry_horizontal and self.symmetry_vertical:
-            segments.append((QPoint(cx - start.x(), cy - start.y()), QPoint(cx - end.x(), cy - end.y())))
+        segments = self._symmetry_segments(start, end)
+        dirty_regions = []
         native_filter = True
-        for a, b in segments:
+        for a, b, _tilt_start, _tilt_end, _transform in segments:
+            dirty = self._brush_dirty_rect_single(a, b)
+            dirty_regions.append(dirty)
+            selection_before = self._selection_edit_snapshot(image, dirty)
+            if layer is not None:
+                self.tile_history.capture_before(layer, dirty)
             if filter_brush_segment(
                 image, a.x(), a.y(), start_pressure, b.x(), b.y(), end_pressure,
                 settings.get("size", 10.0), settings.get("spacing", 0.15),
@@ -850,14 +1035,14 @@ class Canvas(QOpenGLWidget):
             ) is None:
                 native_filter = False
                 break
+            image = self._restore_selection_after_edit(image, selection_before, dirty)
+            image = self._restore_locked_alpha(image, dirty) or image
         if not native_filter:
             # La référence Python reste disponible pour les benchmarks et la
             # comparaison de parité, mais elle ne doit plus être appelée par
             # l'édition réelle : les outils de filtre appartiennent au moteur
             # CreativeCore comme les autres outils de peinture.
             return image
-        image = self._restore_selection_after_edit(image, selection_before, dirty)
-        image = self._restore_locked_alpha(image, dirty) or image
         if layer is not None:
             # `layer.image = image` (the compatibility setter) writes through
             # to EVERY tile of the document, not just the ones this segment
@@ -867,12 +1052,16 @@ class Canvas(QOpenGLWidget):
             # second time via its own `layer.image = ...`/`active_layer.image
             # = ...` assignment. Commit only the dirty rect, like every other
             # brush tool does, and let callers stop re-assigning.
-            layer.tile_store.write_image(image, dirty)
+            for dirty in dirty_regions:
+                layer.tile_store.write_image(image, dirty)
             layer.discard_image_cache()
-            self.tile_history.mark_dirty(layer, dirty)
+            for dirty in dirty_regions:
+                self.tile_history.mark_dirty(layer, dirty)
         if getattr(self, "gpu_ready", False) and layer is not None:
-            self.gpu_renderer.mark_layer_dirty(layer, dirty)
-        self._repaint_brush_dirty_rect(dirty)
+            for dirty in dirty_regions:
+                self.gpu_renderer.mark_layer_dirty(layer, dirty)
+        for dirty in dirty_regions:
+            self._repaint_brush_dirty_rect(dirty)
         return image
 
     def _cpp_draw_segment(
@@ -908,52 +1097,18 @@ class Canvas(QOpenGLWidget):
             previous = getattr(self, "_cpp_smoothed_point", None)
             if previous is None:
                 previous = QPointF(start)
-            out_x = ctypes.c_float()
-            out_y = ctypes.c_float()
-            if self.cpp_brush_library.cs_brush_smooth_point(
-                self.cpp_brush, float(end.x()), float(end.y()),
-                ctypes.byref(out_x), ctypes.byref(out_y),
-            ):
-                start = QPoint(round(previous.x()), round(previous.y()))
-                end = QPoint(round(out_x.value), round(out_y.value))
-                self._cpp_smoothed_point = QPointF(out_x.value, out_y.value)
+            start = QPointF(previous)
+            end = self._cpp_smooth_native_point(end)
 
         layer = self.get_active_layer()
-        if layer is not None:
-            dirty = self._brush_dirty_rect(start, end)
-            if self._editing_alpha_mask_layer_id == layer.id:
-                self.tile_history.capture_mask_before(layer, dirty)
-            else:
-                self.tile_history.capture_before(layer, dirty)
-
+        # History is captured below for every physical symmetry segment. Doing
+        # it once here with their union can cover most of an 8K canvas.
         image = self._prepare_cpp_image(image)
-        cx = self.document.width - 1
-        cy = self.document.height - 1
-        segments = [(start, end, start_tilt, end_tilt)]
-        if self.symmetry_horizontal:
-            segments.append((
-                QPoint(cx - start.x(), start.y()),
-                QPoint(cx - end.x(), end.y()),
-                (-start_tilt[0], start_tilt[1]),
-                (-end_tilt[0], end_tilt[1]),
-            ))
-        if self.symmetry_vertical:
-            segments.append((
-                QPoint(start.x(), cy - start.y()),
-                QPoint(end.x(), cy - end.y()),
-                (start_tilt[0], -start_tilt[1]),
-                (end_tilt[0], -end_tilt[1]),
-            ))
-        if self.symmetry_horizontal and self.symmetry_vertical:
-            segments.append((
-                QPoint(cx - start.x(), cy - start.y()),
-                QPoint(cx - end.x(), cy - end.y()),
-                (-start_tilt[0], -start_tilt[1]),
-                (-end_tilt[0], -end_tilt[1]),
-            ))
+        start, end = QPointF(start), QPointF(end)
+        segments = self._symmetry_segments(start, end, start_tilt, end_tilt)
 
-        for segment_start, segment_end, tilt_start, tilt_end in segments:
-            segment_dirty = self._brush_dirty_rect(segment_start, segment_end)
+        for segment_start, segment_end, tilt_start, tilt_end, transform in segments:
+            segment_dirty = self._brush_dirty_rect_single(segment_start, segment_end)
             # A selection is an edit constraint, not merely an overlay. Keep
             # a bounded pre-dab snapshot so the native brush can remain the
             # fast rasterizer while its result is composited back through the
@@ -961,14 +1116,13 @@ class Canvas(QOpenGLWidget):
             selection_before = self._selection_edit_snapshot(image, segment_dirty)
             if layer is not None:
                 if self._editing_alpha_mask_layer_id == layer.id:
-                    self.tile_history.capture_mask_before(layer, segment_dirty)
+                    self.tile_history.capture_mask_before(self._mask_owner(layer), segment_dirty)
                 else:
                     self.tile_history.capture_before(layer, segment_dirty)
-            offset = QPoint(clone_offset) if clone_offset is not None else QPoint()
-            if segment_start.x() != start.x():
-                offset.setX(-offset.x())
-            if segment_start.y() != start.y():
-                offset.setY(-offset.y())
+            source_offset = QPoint(clone_offset) if clone_offset is not None else QPoint()
+            xx, xy, yx, yy = transform
+            offset = QPoint(round(xx * source_offset.x() + xy * source_offset.y()),
+                            round(yx * source_offset.x() + yy * source_offset.y()))
             started_ns = time.perf_counter_ns()
             image = self._cpp_draw_segment_once(
                 image, segment_start, segment_end,
@@ -984,6 +1138,23 @@ class Canvas(QOpenGLWidget):
         return image
 
     def _cpp_smooth_native_point(self, position: QPoint) -> QPointF:
+        """Return the active stabilizer's point for one raw tablet sample.
+
+        CreativeCore provides the fast inertial path.  Weighted and delayed
+        modes live in the input layer because they need a short sample history;
+        previously their UI existed but every path silently used the native
+        inertial smoother instead.
+        """
+        brush = self.tools.brush
+        mode = str(getattr(brush, "smoothing_mode", "basic"))
+        raw = QPointF(position)
+        if mode == "none" or float(getattr(brush, "smoothing", 0.0)) <= 0.0:
+            self._cpp_smoothed_point = raw
+            return raw
+        if mode in ("weighted", "stabilize"):
+            point = brush.smoother.add_point(raw)
+            self._cpp_smoothed_point = QPointF(point)
+            return QPointF(point)
         out_x = ctypes.c_float()
         out_y = ctypes.c_float()
         if self.cpp_brush_library.cs_brush_smooth_point(
@@ -1102,79 +1273,142 @@ class Canvas(QOpenGLWidget):
         )
         self._cpp_smoothed_point = None
 
+    # ---------------------------------------------------------
+    # Stabilizer tail
+    # ---------------------------------------------------------
+    # A stabilizer trails the pen by design.  Without a tail, lifting the pen
+    # cut the stroke short wherever the smoothed point happened to be, so the
+    # end of every stabilized line fell visibly short of where it was drawn.
+
+    def _stabilizer_tail_points(self) -> list:
+        if float(getattr(self.tools.brush, "smoothing", 0.0)) <= 0.0:
+            return []
+        target = getattr(self, "_stroke_raw_point", None)
+        current = getattr(self, "_cpp_smoothed_point", None)
+        if target is None or current is None:
+            return []
+        target = QPointF(target)
+        brush = self.tools.brush
+        mode = str(getattr(brush, "smoothing_mode", "basic"))
+        if mode in ("weighted", "stabilize"):
+            points = []
+            # Stabilize releases points held in its small input window.  The
+            # rope mode converges toward the lifted pen position instead.
+            if mode == "stabilize":
+                points.extend(brush.smoother.flush_tail())
+            for _ in range(48):
+                point = brush.smoother.add_point(target)
+                if not points or math.hypot(point.x() - points[-1].x(), point.y() - points[-1].y()) >= 0.05:
+                    points.append(point)
+                if math.hypot(point.x() - target.x(), point.y() - target.y()) < 0.25:
+                    break
+            if not points or math.hypot(points[-1].x() - target.x(), points[-1].y() - target.y()) >= 0.01:
+                points.append(target)
+            self._cpp_smoothed_point = QPointF(target)
+            return points
+        points = []
+        for _ in range(48):
+            point = self._cpp_smooth_native_point(target)
+            points.append(point)
+            if math.hypot(point.x() - target.x(), point.y() - target.y()) < 0.25:
+                break
+        if not points or points[-1] != target:
+            points.append(target)
+            self._cpp_smoothed_point = QPointF(target)
+        return points
+
+    def _finish_stabilizer_tail_sync(self, pressure: float) -> None:
+        start = getattr(self, "_cpp_smoothed_point", None)
+        points = self._stabilizer_tail_points()
+        if not points or start is None:
+            return
+        layer = self.get_active_layer()
+        image = self.get_active_image()
+        if layer is None or image is None:
+            return
+        previous = QPointF(start)
+        for point in points:
+            dirty = self._brush_dirty_rect(previous, point)
+            result = self._cpp_draw_segment(image, previous, point, pressure, pressure)
+            if result is None:
+                break
+            image = result
+            if getattr(layer, "lock_alpha", False):
+                self._restore_locked_alpha(image, dirty)
+            self._sync_brush_regions(previous, point)
+            previous = point
+
+    def _finish_stabilizer_tail_async(self) -> None:
+        start = getattr(self, "_cpp_smoothed_point", None)
+        points = self._stabilizer_tail_points()
+        if not points or start is None:
+            return
+        pressure = float(self.tools.brush.pressure)
+        tilt = getattr(self, "_last_tablet_tilt", (0.0, 0.0))
+        previous = QPointF(start)
+        for point in points:
+            self._queue_async_brush(previous, point, pressure, pressure, tilt, tilt)
+            previous = point
+
     def _can_use_async_brush(self, layer) -> bool:
         return (self._cpp_active() and layer is not None and self.use_gpu
+                and not self.wrap_around
+                # Independent mirrored snapshots overwrite one another where
+                # their patches overlap. The synchronous engine composites
+                # those dabs in order, including at the symmetry centre.
+                and not self.symmetry_horizontal and not self.symmetry_vertical
+                and self.radial_symmetry_count == 1
                 and self.tools.current_tool in ("brush", "eraser", "smudge")
                 and not getattr(layer, "lock_alpha", False)
                 and self._editing_alpha_mask_layer_id != layer.id
                 and self.document.selection.is_empty())
 
     def _begin_async_brush(self, layer, position: QPoint, pressure: float) -> bool:
-        # A stylus stroke's TabletRelease only *requests* the worker to wrap
-        # up (cs_brush_async_finish is non-blocking) - the worker actually
-        # finishes, and gets destroyed/joined, later when its final patch
-        # reaches _apply_async_brush_patch on the UI thread. A fast
-        # press-lift-press (or a click that lands before that queued signal
-        # is processed) used to reach this point with the previous stroke's
-        # handle still live: it got silently overwritten below, orphaning
-        # that worker. It kept running on its own thread, and its late
-        # patches - still matched by _apply_async_brush_patch on layer id
-        # alone - landed on top of the new stroke's pixels as a hard-edged
-        # block, and its eventual completion decremented the *new* stroke's
-        # _async_stroke_pending counter, sometimes cancelling it outright.
-        #
-        # The generation MUST be bumped before we touch the stale handle at
-        # all, not after cancelling it. cs_brush_async_destroy() deletes the
-        # native worker synchronously, which joins its thread - and that
-        # worker can still be mid-way through a batch it already popped off
-        # its queue when cancel() is requested (cancel only stops *future*
-        # batches). That in-flight batch finishes and calls back into
-        # `receive` from the worker's own thread while our join blocks this
-        # one. Bumping the generation first means that straggler always sees
-        # a mismatch the instant it fires, no matter how the join is
-        # scheduled relative to it; bumping it after (as this used to) left
-        # a real window where that exact callback still read the old,
-        # matching generation and slipped through.
+        # tabletEvent queues the next stroke while the previous tail drains.
+        # Never replace/cancel a live worker merely to begin another stroke.
+        if self._async_brush_handle is not None:
+            return False
         self._async_stroke_generation += 1
         generation = self._async_stroke_generation
 
-        if self._async_brush_handle is not None:
-            self._cancel_async_brush()
-
-        image = layer.image.convertToFormat(QImage.Format.Format_RGBA8888)
+        layer.commit_image_cache()
+        store = layer.tile_store
+        native_store = getattr(store, "_native_handle", None)
+        # Resident tiles can be assembled by the worker. Swapped tiles must
+        # still pass through the existing scratch loader before snapshotting.
+        from_store = bool(native_store and not store._swapped
+                          and not self.symmetry_horizontal and not self.symmetry_vertical)
+        snapshot = None
+        if from_store:
+            # Copy tile references, not pixel buffers. A private native map
+            # freezes the source even if the UI edits/evicts original tiles
+            # before the worker starts; Qt detaches only modified pixels.
+            snapshot = TileStore(store.width, store.height, store.tile_size, store.image_format)
+            if not snapshot._native_handle.copy_resident_from(native_store):
+                snapshot.close()
+                snapshot = None
+                from_store = False
+        image = raw = None
+        if not from_store:
+            image = layer.image.convertToFormat(QImage.Format.Format_RGBA8888)
+            raw = (ctypes.c_uint8 * image.sizeInBytes()).from_buffer(image.bits())
         self._sync_cpp_brush()
         lib = self.cpp_brush_library
         lib.cs_brush_begin_stroke(
             self.cpp_brush, float(position.x()), float(position.y()), float(pressure))
-        raw = (ctypes.c_uint8 * image.sizeInBytes()).from_buffer(image.bits())
-        # `raw` is a zero-copy view over `image`'s own pixel buffer, and the
-        # QImage handed to cs_brush_async_start() (and to every symmetry
-        # clone below) is itself constructed the same way on the C++ side -
-        # a non-owning wrapper around this exact memory (BrushAsyncWorker
-        # keeps only a lambda that returns this QImage by value, which for a
-        # QImage built over external memory is still the SAME buffer, not a
-        # deep copy). Both `image` and `raw` were local variables with
-        # nothing else referencing them, so the instant this method returned
-        # they became eligible for garbage collection - while the worker
-        # thread(s) kept reading and writing that exact memory for the rest
-        # of the stroke. Whenever the allocator actually reclaimed it before
-        # the stroke finished, the worker was compositing into freed memory:
-        # a real, silent use-after-free, and a much better fit for what was
-        # actually observed (clean, well-formed strokes in a color that was
-        # never selected, changing shape between runs) than a torn/raced
-        # patch would be. Pin both for the async brush's own lifetime -
-        # cleared in _cancel_async_brush() once every worker that could still
-        # be touching this memory has been joined.
+        # The UI-side engine never paints during an async stroke, but it owns
+        # the stabilizer: seed it so moves are smoothed exactly like the
+        # synchronous path (the async path used to ignore stabilization).
+        self._cpp_smooth_native_point(position)
+        self._stroke_raw_point = QPointF(position)
+        # The native worker snapshots lazily; pin its source until join.
         self._async_brush_source_image = image
         self._async_brush_source_raw = raw
+        self._async_brush_source_store = snapshot
         callback_type = lib._cs_brush_async_callback_type
 
         def receive(_id, x, y, width, height, pixels, stride, complete, error, _user):
-            # Belt-and-suspenders on top of the cancel-before-begin guard
-            # above: a callback already queued by the C++ side before that
-            # cancel took effect can still arrive here for an abandoned
-            # stroke. Drop it rather than let it touch the current stroke's
-            # pixels or its pending-worker count.
+            # Reject a worker cancelled during a document switch or close.
             if generation != self._async_stroke_generation:
                 return
             message = error.decode("utf-8", "replace") if error else ""
@@ -1185,15 +1419,24 @@ class Canvas(QOpenGLWidget):
                         ctypes.addressof(pixels.contents)),
                     width, height, stride, QImage.Format.Format_RGBA8888).copy()
             self.async_brush_patch.emit(
-                int(x), int(y), int(width), int(height), patch, bool(complete), message)
+                generation, int(x), int(y), int(width), int(height), patch, bool(complete), message)
 
         self._async_brush_callback = callback_type(receive)
         stroke_id = int(time.time_ns())
-        handle = lib.cs_brush_async_start(
-            self.cpp_brush, raw,
-            image.width(), image.height(), image.bytesPerLine(),
-            stroke_id, self._async_brush_callback, None)
+        if from_store:
+            handle = lib.cs_brush_async_start_store(
+                self.cpp_brush, snapshot._native_handle._handle, store.width, store.height,
+                stroke_id, self._async_brush_callback, None)
+        else:
+            handle = lib.cs_brush_async_start(
+                self.cpp_brush, raw,
+                image.width(), image.height(), image.bytesPerLine(),
+                stroke_id, self._async_brush_callback, None)
         if not handle:
+            self._async_brush_source_image = None
+            self._async_brush_source_raw = None
+            self._async_brush_source_store = None
+            self._async_brush_callback = None
             return False
         self._async_brush_handle = handle
         self._async_brush_layer_id = layer.id
@@ -1255,7 +1498,7 @@ class Canvas(QOpenGLWidget):
                 ex, ey, float(p1), float(tilt1[0]) * tsx, float(tilt1[1]) * tsy)
         return ok
 
-    def _cancel_async_brush(self) -> None:
+    def _cancel_async_brush(self, *, discard_input=True) -> None:
         """Stop a pending native stroke before its document can disappear.
 
         The worker owns a snapshot and may still call back after a document
@@ -1263,6 +1506,14 @@ class Canvas(QOpenGLWidget):
         being applied to the next document.  All symmetric workers are stopped
         and destroyed alongside the primary worker.
         """
+        # Invalidate before joining: a final callback can arrive during join,
+        # or already be waiting in Qt's event queue after native completion.
+        self._async_stroke_generation += 1
+        if discard_input:
+            self._async_tablet_events.clear()
+            self._async_tablet_context = None
+            self._async_tablet_capture_active = False
+            self._async_tablet_timer.stop()
         lib = self.cpp_brush_library
         handle = getattr(self, "_async_brush_handle", None)
         if handle:
@@ -1287,10 +1538,18 @@ class Canvas(QOpenGLWidget):
         # been destroyed above, which joins its thread first.
         self._async_brush_source_image = None
         self._async_brush_source_raw = None
+        self._async_brush_source_store = None
+        self._async_finish_requested = False
+
+    def _dispatch_async_brush_patch(self, generation, *args) -> None:
+        if generation == self._async_stroke_generation:
+            self._apply_async_brush_patch(*args)
 
     def _apply_async_brush_patch(self, x, y, width, height, patch, complete, error) -> None:
-        layer = self.get_active_layer()
-        if layer is None or layer.id != self._async_brush_layer_id:
+        layer = next((layer for layer in self.document.layers
+                      if layer.id == self._async_brush_layer_id), None)
+        if layer is None:
+            self._cancel_async_brush()
             return
         if error:
             self._cancel_async_brush()
@@ -1299,6 +1558,7 @@ class Canvas(QOpenGLWidget):
             return
         if width and height and not patch.isNull():
             rect = QRect(x, y, width, height)
+            self.tile_history.capture_before(layer, rect)
             layer.tile_store.write_image_at(patch, x, y)
             layer.discard_image_cache()
             self.gpu_renderer.mark_layer_dirty(layer, rect)
@@ -1309,9 +1569,84 @@ class Canvas(QOpenGLWidget):
             # do we commit history and end the stroke.
             self._async_stroke_pending = max(0, self._async_stroke_pending - 1)
             if self._async_stroke_pending == 0:
-                self._cancel_async_brush()
+                self._cancel_async_brush(discard_input=False)
                 self.commit_stroke_history()
                 self.canvas_brush_end_stroke()
+                self._drain_async_tablet_events()
+
+    _QUEUED_TABLET_ATTRIBUTES = (
+        "zoom", "offset", "view_rotation", "view_flip_x", "view_flip_y",
+        "symmetry_horizontal", "symmetry_vertical", "radial_symmetry_count", "wrap_around",
+        "_brush_bitmap_tip_png", "_brush_dual_tip_png", "_brush_texture_png",
+    )
+
+    def _queue_tablet_after_async_stroke(self, event) -> None:
+        """Keep every sample and its pen-down settings until prior paint lands."""
+        if event.type() == QTabletEvent.Type.TabletPress:
+            self._async_tablet_capture_active = True
+        if event.type() == QTabletEvent.Type.TabletPress or self._async_tablet_context is None:
+            layer = self.get_active_layer()
+            self._async_tablet_context = {
+                "layer_id": getattr(layer, "id", None),
+                "tool": self.tools.current_tool,
+                "settings": self.brush_settings.snapshot(),
+                "smoothing": self.tools.brush.smoothing,
+                "pressure": self.tools.brush.pressure,
+                "attributes": {name: getattr(self, name) for name in self._QUEUED_TABLET_ATTRIBUTES},
+            }
+            self._async_tablet_context["attributes"]["offset"] = QPointF(self.offset)
+        self._async_tablet_events.append((QTabletEvent(event), self._async_tablet_context))
+        if event.type() == QTabletEvent.Type.TabletRelease:
+            self._async_tablet_capture_active = False
+        if not self._async_finish_requested:
+            self._async_tablet_timer.start(0)
+        self._last_tablet_event_time = time.monotonic()
+        event.accept()
+
+    def _drain_async_tablet_events(self) -> None:
+        # No processEvents/sleep/join loop: yield to painting and other UI
+        # events after a small input batch, or as soon as a stroke is lifted.
+        if self._replaying_async_tablet or self._async_finish_requested:
+            return
+        deadline = time.monotonic() + 0.004
+        self._replaying_async_tablet = True
+        try:
+            while self._async_tablet_events and not self._async_finish_requested:
+                event, context = self._async_tablet_events.popleft()
+                index = next((i for i, layer in enumerate(self.document.layers)
+                              if layer.id == context["layer_id"]), None)
+                if index is None:
+                    continue
+                old_index, old_tool = self.document.active_layer_index, self.tools.current_tool
+                old_settings = self.brush_settings._values
+                old_attributes = {name: getattr(self, name) for name in self._QUEUED_TABLET_ATTRIBUTES}
+                brush = self.tools.brush
+                # Keep UI-facing brush properties current while a queued
+                # stroke uses the settings captured when its pen went down.
+                old_brush = {name: value for name, value in vars(brush).items()
+                             if isinstance(value, (int, float, bool, QColor))}
+                try:
+                    self.document.active_layer_index = index
+                    self.tools.current_tool = context["tool"]
+                    self.brush_settings._values = context["settings"]
+                    for name, value in context["attributes"].items():
+                        setattr(self, name, value)
+                    brush.smoothing, brush.pressure = context["smoothing"], context["pressure"]
+                    self.tabletEvent(event)
+                    context["pressure"] = brush.pressure
+                finally:
+                    self.document.active_layer_index, self.tools.current_tool = old_index, old_tool
+                    self.brush_settings._values = old_settings
+                    for name, value in old_attributes.items():
+                        setattr(self, name, value)
+                    for name, value in old_brush.items():
+                        setattr(brush, name, value)
+                if time.monotonic() >= deadline:
+                    break
+        finally:
+            self._replaying_async_tablet = False
+        if self._async_tablet_events and not self._async_finish_requested:
+            self._async_tablet_timer.start(0)
 
     def _cpp_active(
         self
@@ -1344,7 +1679,8 @@ class Canvas(QOpenGLWidget):
                 or not self.gpu_ready or not self.use_gpu or self.transforming
                 or self.document.layer_groups or has_non_normal(self.document)
                 or not self.document.selection.is_empty()
-                or getattr(layer, "lock_alpha", False)
+                or getattr(layer, "lock_alpha", False) or self.wrap_around
+                or self.radial_symmetry_count > 1
                 or self._editing_alpha_mask_layer_id == getattr(layer, "id", None)):
             return False
         settings = self.brush_settings.snapshot()
@@ -1394,9 +1730,9 @@ class Canvas(QOpenGLWidget):
 
         # Raccourcis directs pour les 4 presets principaux.
         preset_keys = [
-            ("Ctrl+Alt+1", "Pencil"),
-            ("Ctrl+Alt+2", "Ink"),
-            ("Ctrl+Alt+3", "Paint"),
+            ("Ctrl+Alt+1", "Pencil HB"),
+            ("Ctrl+Alt+2", "Ink Pen"),
+            ("Ctrl+Alt+3", "Oil Round"),
             ("Ctrl+Alt+4", "Charcoal"),
         ]
 
@@ -1416,6 +1752,7 @@ class Canvas(QOpenGLWidget):
             )
 
     def load_cpp_brush_preset(self, name):
+        name = self.brush_preset_manager.canonical(name)
         try:
             settings = self.brush_preset_manager.load(name)
 
@@ -1428,6 +1765,31 @@ class Canvas(QOpenGLWidget):
                 self._brush_bitmap_tip_png = (
                     tip if tip and len(tip) <= 32 * 1024 * 1024 else None
                 )
+                encoded_dual = settings.get("_csbr_dual_tip_png")
+                try:
+                    dual = base64.b64decode(encoded_dual, validate=True) if encoded_dual else None
+                except (ValueError, TypeError):
+                    dual = None
+                self._brush_dual_tip_png = dual if dual and len(dual) <= 32 * 1024 * 1024 else None
+                encoded_texture = settings.get("_csbr_texture_png")
+                try:
+                    texture = base64.b64decode(encoded_texture, validate=True) if encoded_texture else None
+                    decoded = QImage.fromData(texture) if texture and len(texture) <= 32*1024*1024 else QImage()
+                    self._brush_texture_png = texture if not decoded.isNull() and max(decoded.width(),decoded.height())<=4096 else None
+                except (ValueError, TypeError):
+                    self._brush_texture_png = None
+                from copy import deepcopy
+                self._brush_procedural_source = (
+                    {"_procedural_texture": deepcopy(settings["_procedural_texture"]),
+                     "_procedural_texture_role": settings.get("_procedural_texture_role", "tip")}
+                    if isinstance(settings.get("_procedural_texture"), dict) else None
+                )
+                # A preset is a tool, not a colour: switching from a pencil to
+                # an ink pen must keep the colour the artist picked.
+                settings = {key: value for key, value in settings.items()
+                            if key not in ("color", "gradientColor")}
+                # Name first: listeners of the settings change read it.
+                self._current_cpp_brush_preset_name = name
                 self.brush_settings.update(settings)
                 print(
                     f"✓ Brush preset chargé dans le Canvas : {name}"
@@ -1464,10 +1826,17 @@ class Canvas(QOpenGLWidget):
         """
 
         settings = self.brush_settings.snapshot()
+        if self._brush_procedural_source:
+            from copy import deepcopy
+            settings.update(deepcopy(self._brush_procedural_source))
+        if self._brush_texture_png:
+            settings["_csbr_texture_png"] = base64.b64encode(self._brush_texture_png).decode("ascii")
         if self._brush_bitmap_tip_png:
             settings["_csbr_bitmap_tip_png"] = base64.b64encode(
                 self._brush_bitmap_tip_png
             ).decode("ascii")
+        if self._brush_dual_tip_png:
+            settings["_csbr_dual_tip_png"] = base64.b64encode(self._brush_dual_tip_png).decode("ascii")
         return settings
 
     def get_cpp_brush_preset_name(self):
@@ -1504,6 +1873,11 @@ class Canvas(QOpenGLWidget):
         document: Document
     ) -> None:
 
+        self._discard_visibility_preview()
+        if '_visibility_renderer' in self.__dict__:
+            self._visibility_renderer.clear()
+        if getattr(self, 'gradient_drawing', False):
+            self._cancel_gradient()
         self._cancel_async_brush()
         # Reject callbacks and cached pixels belonging to the previous document,
         # even when the new document has exactly the same dimensions.
@@ -1540,6 +1914,7 @@ class Canvas(QOpenGLWidget):
         self.transform_handle = ""
 
         self.last_point = QPoint()
+        self._last_paint_endpoint = None
 
         self._reset_history()
 
@@ -1742,13 +2117,21 @@ class Canvas(QOpenGLWidget):
         selection = self.document.selection
         if selection.is_empty():
             return image
-        changed = image.copy(area).convertToFormat(QImage.Format.Format_RGBA8888)
+        changed = image.copy(area).convertToFormat(QImage.Format.Format_ARGB32_Premultiplied)
         mask = selection.image.copy(area).convertToFormat(QImage.Format.Format_ARGB32)
-        if changed.isNull() or mask.isNull() or not apply_alpha_mask_native(changed, mask):
+        if changed.isNull() or mask.isNull():
             return image
-        restored = before.convertToFormat(QImage.Format.Format_RGBA8888)
+        # Interpolate premultiplied before/after pixels, including alpha.
+        # SourceOver would paint the old opaque pixels back under an eraser.
+        painter = QPainter(changed)
+        painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_DestinationIn)
+        painter.drawImage(0, 0, mask)
+        painter.end()
+        restored = before.convertToFormat(QImage.Format.Format_ARGB32_Premultiplied)
         painter = QPainter(restored)
-        painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceOver)
+        painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_DestinationOut)
+        painter.drawImage(0, 0, mask)
+        painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_Plus)
         painter.drawImage(0, 0, changed)
         painter.end()
         target = QPainter(image)
@@ -1756,6 +2139,95 @@ class Canvas(QOpenGLWidget):
         target.drawImage(area.topLeft(), restored)
         target.end()
         return image
+
+    def _begin_floating_selection(self, layer: Layer, position: QPoint) -> None:
+        """Detach the current selection once; later moves never inspect pixels.
+
+        This intentionally avoids ``TransformTool.apply`` during a drag.  That
+        path is appropriate for an edit transform, but re-evaluating it for
+        every pointer event allowed content below a moving marquee to leak into
+        the floating result on some native backends.
+        """
+        mask = self._clone_raster_native(self.document.selection.image)
+        original = self._clone_raster_native(layer.image)
+        bounds = self.document.selection.bounds().intersected(original.rect())
+        if bounds.isEmpty():
+            return
+        remainder = self._clone_raster_native(original)
+        painter = QPainter(remainder)
+        painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_DestinationOut)
+        painter.drawImage(0, 0, mask)
+        painter.end()
+        floating = original.copy(bounds)
+        painter = QPainter(floating)
+        painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_DestinationIn)
+        painter.drawImage(0, 0, mask.copy(bounds))
+        painter.end()
+        self.selection_moving = True
+        self.selection_floating_active = True
+        self.selection_move_start = position
+        self.selection_move_layer_id = str(layer.id)
+        self.selection_move_original = original
+        self.selection_move_original_mask = mask
+        self.selection_move_remainder = remainder
+        self.selection_move_floating = floating
+        self.selection_move_mask_piece = mask.copy(bounds)
+        self.selection_move_bounds = bounds
+
+    def _render_floating_selection(self, position: QPoint) -> None:
+        layer = next((candidate for candidate in self.document.layers
+                      if str(candidate.id) == self.selection_move_layer_id), None)
+        if (layer is None or self.selection_move_remainder is None
+                or self.selection_move_floating is None or self.selection_move_mask_piece is None):
+            return
+        delta = position - self.selection_move_start
+        target = self._clone_raster_native(self.selection_move_remainder)
+        point = self.selection_move_bounds.topLeft() + delta
+        painter = QPainter(target)
+        painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceOver)
+        painter.drawImage(point, self.selection_move_floating)
+        painter.end()
+        selection = QImage(self.document.width, self.document.height, QImage.Format.Format_ARGB32)
+        selection.fill(Qt.GlobalColor.transparent)
+        painter = QPainter(selection)
+        painter.drawImage(point, self.selection_move_mask_piece)
+        painter.end()
+        layer.image = target
+        self.document.selection.image = selection
+        self.document.selection.invalidate()
+        self.sync_gpu_layer()
+
+    def _finish_floating_selection(self, *, cancel: bool = False) -> None:
+        if cancel:
+            layer = next((candidate for candidate in self.document.layers
+                          if str(candidate.id) == self.selection_move_layer_id), None)
+            if layer is not None and self.selection_move_original is not None:
+                layer.image = self._clone_raster_native(self.selection_move_original)
+            if self.selection_move_original_mask is not None:
+                self.document.selection.image = self._clone_raster_native(self.selection_move_original_mask)
+                self.document.selection.invalidate()
+        self.selection_moving = False
+        if cancel:
+            self.selection_floating_active = False
+        self.selection_move_layer_id = None
+        self.selection_move_original = None
+        self.selection_move_original_mask = None
+        self.selection_move_remainder = None
+        self.selection_move_floating = None
+        self.selection_move_mask_piece = None
+        self.selection_move_bounds = QRect()
+
+    def _commit_floating_selection(self, *, clear_selection: bool = False) -> None:
+        """Commit the one history transaction opened when floating began."""
+        if not self.selection_floating_active:
+            return
+        self._finish_floating_selection()
+        self.selection_floating_active = False
+        self.commit_history_action()
+        if clear_selection:
+            self.apply_selection_edit(self.document.selection.clear)
+        self.sync_gpu_layer()
+        self.update()
 
 
     def fit_document(
@@ -1855,19 +2327,83 @@ class Canvas(QOpenGLWidget):
         self.canvas_only_changed.emit(self.canvas_only)
         self.update()
 
+    def _symmetry_transforms(self) -> list[tuple[float, float, float, float]]:
+        """Affine vector transforms for the active painting symmetry.
+
+        The first entry always leaves the primary stroke untouched. Rotational
+        symmetry is deliberately exclusive with mirror symmetry: this avoids
+        duplicate dabs on the axes and keeps an artist's copy count explicit.
+        """
+        if self.radial_symmetry_count > 1:
+            return [(math.cos(2.0 * math.pi * index / self.radial_symmetry_count),
+                     -math.sin(2.0 * math.pi * index / self.radial_symmetry_count),
+                     math.sin(2.0 * math.pi * index / self.radial_symmetry_count),
+                     math.cos(2.0 * math.pi * index / self.radial_symmetry_count))
+                    for index in range(self.radial_symmetry_count)]
+        transforms = [(1.0, 0.0, 0.0, 1.0)]
+        if self.symmetry_horizontal:
+            transforms.append((-1.0, 0.0, 0.0, 1.0))
+        if self.symmetry_vertical:
+            transforms.append((1.0, 0.0, 0.0, -1.0))
+        if self.symmetry_horizontal and self.symmetry_vertical:
+            transforms.append((-1.0, 0.0, 0.0, -1.0))
+        return transforms
+
+    def _symmetry_segments(self, start, end, start_tilt=(0.0, 0.0), end_tilt=(0.0, 0.0)):
+        """Return transformed stroke segments around the document centre."""
+        center_x = self.radial_symmetry_center.x() * (self.document.width - 1)
+        center_y = self.radial_symmetry_center.y() * (self.document.height - 1)
+        start, end = QPointF(start), QPointF(end)
+        def point(point, transform):
+            xx, xy, yx, yy = transform
+            return QPointF(center_x + xx * (point.x() - center_x) + xy * (point.y() - center_y),
+                           center_y + yx * (point.x() - center_x) + yy * (point.y() - center_y))
+        def tilt(value, transform):
+            xx, xy, yx, yy = transform
+            return (xx * value[0] + xy * value[1], yx * value[0] + yy * value[1])
+        return [(point(start, transform), point(end, transform),
+                 tilt(start_tilt, transform), tilt(end_tilt, transform), transform)
+                for transform in self._symmetry_transforms()]
+
     def toggle_horizontal_symmetry(self) -> None:
         self.symmetry_horizontal = not self.symmetry_horizontal
+        if self.symmetry_horizontal:
+            self.set_radial_symmetry(1)
         self.symmetry_changed.emit(self.symmetry_horizontal, self.symmetry_vertical)
         self.update()
 
     def toggle_vertical_symmetry(self) -> None:
         self.symmetry_vertical = not self.symmetry_vertical
+        if self.symmetry_vertical:
+            self.set_radial_symmetry(1)
         self.symmetry_changed.emit(self.symmetry_horizontal, self.symmetry_vertical)
         self.update()
 
-    def toggle_assistant(self, mode: str) -> None:
-        self.assistant_mode = "none" if self.assistant_mode == mode else mode
-        self._assistant_angle = None
+    def set_radial_symmetry_center(self, point: QPointF) -> None:
+        self.radial_symmetry_center = QPointF(
+            max(0.0, min(1.0, point.x() / max(1, self.document.width - 1))),
+            max(0.0, min(1.0, point.y() / max(1, self.document.height - 1))),
+        )
+        self._preferences.setValue("canvas/radial_symmetry_center_x", self.radial_symmetry_center.x())
+        self._preferences.setValue("canvas/radial_symmetry_center_y", self.radial_symmetry_center.y())
+        self.update()
+
+    def set_radial_center_placement_mode(self, enabled: bool) -> None:
+        self.radial_center_placing = bool(enabled)
+        self.radial_center_placement_changed.emit(self.radial_center_placing)
+        self.update()
+
+    def set_radial_symmetry(self, copies: int) -> None:
+        copies = max(1, min(12, int(copies)))
+        if copies > 1:
+            self.symmetry_horizontal = False
+            self.symmetry_vertical = False
+            self.symmetry_changed.emit(False, False)
+        if self.radial_symmetry_count == copies:
+            return
+        self.radial_symmetry_count = copies
+        self._preferences.setValue("canvas/radial_symmetry_copies", copies)
+        self.radial_symmetry_changed.emit(copies)
         self.update()
 
     def set_assistant_mode(self, mode: str) -> None:
@@ -1899,7 +2435,10 @@ class Canvas(QOpenGLWidget):
         return transform_point(position, self.width(), self.height(), self.view_rotation,
                                self.view_flip_x, self.view_flip_y, inverse)
 
-    def constrain_assistant_point(self, point: QPoint, begin: bool = False) -> QPoint:
+    def constrain_assistant_point(self, point, begin: bool = False) -> QPointF:
+        # Brush input stays in floating document coordinates end-to-end: the
+        # CreativeCore rasterizer positions every dab with sub-pixel accuracy,
+        # and rounding here used to staircase slow or zoomed-in strokes.
         cx = (self.document.width - 1) * 0.5
         cy = (self.document.height - 1) * 0.5
         x, y = float(point.x()), float(point.y())
@@ -1921,13 +2460,12 @@ class Canvas(QOpenGLWidget):
             direction_y = math.sin(self._assistant_angle)
             distance = (x - cx) * direction_x + (y - cy) * direction_y
             x, y = cx + direction_x * distance, cy + direction_y * distance
-        result = QPoint(round(x), round(y))
+        result = QPointF(x, y)
 
         # Also apply freeform AssistantManager snap (if any assistant is active)
         if self.assistants.snap_enabled and self.assistants.assistants():
-            from PySide6.QtCore import QPointF as _QPointF
-            snapped_f = self.assistants.snap_point(_QPointF(result))
-            result = QPoint(round(snapped_f.x()), round(snapped_f.y()))
+            snapped_f = self.assistants.snap_point(QPointF(result))
+            result = QPointF(snapped_f.x(), snapped_f.y())
 
         return result
 
@@ -1963,11 +2501,45 @@ class Canvas(QOpenGLWidget):
 
         if self._editing_alpha_mask_layer_id == layer.id:
             if self._editing_alpha_mask_image is None:
-                layer.ensure_alpha_mask()
-                self._editing_alpha_mask_image = layer.alpha_mask_grayscale()
+                owner = self._mask_owner(layer)
+                owner.ensure_alpha_mask(self.document.width, self.document.height) \
+                    if owner is not layer else layer.ensure_alpha_mask()
+                self._editing_alpha_mask_image = owner.alpha_mask_grayscale()
             return self._editing_alpha_mask_image
 
         return layer.image
+
+    def _mask_owner(self, layer):
+        """Owner of the mask being painted: the layer, or its group."""
+        group_id = self._editing_mask_group_id
+        if group_id is not None:
+            group = next((g for g in self.document.layer_groups if g.id == group_id), None)
+            if group is not None and getattr(group, "alpha_mask_store", None) is not None:
+                return group
+        return layer
+
+    @property
+    def editing_mask_group_id(self) -> str | None:
+        return self._editing_mask_group_id
+
+    def edit_group_alpha_mask(self, group_id: str) -> bool:
+        """Paint on a folder's mask (black hides the whole folder content)."""
+        document = self.document
+        group = next((g for g in document.layer_groups if g.id == group_id), None)
+        if group is None or getattr(group, "alpha_mask_store", None) is None:
+            return False
+        positions = {layer.id: index for index, layer in enumerate(document.layers)}
+        members = [positions[i] for i in group.layer_ids if i in positions]
+        if not members:
+            return False
+        active = document.active_layer_index
+        index = active if active in members else max(members)
+        document.set_active_layer(index)
+        self._editing_alpha_mask_layer_id = document.layers[index].id
+        self._editing_mask_group_id = group.id
+        self._editing_alpha_mask_image = group.alpha_mask_grayscale()
+        self.update()
+        return True
 
     def edit_layer_alpha_mask(self, index: int) -> bool:
         """Select a layer mask as the direct paint target."""
@@ -1978,6 +2550,7 @@ class Canvas(QOpenGLWidget):
             return False
         self.document.set_active_layer(int(index))
         self._editing_alpha_mask_layer_id = layer.id
+        self._editing_mask_group_id = None
         # The edit buffer is an OPAQUE greyscale image, exactly like a
         # Photoshop mask: black hides, white reveals, grey attenuates. The
         # store keeps coverage in alpha; sync_gpu_layer() converts only the
@@ -1994,14 +2567,18 @@ class Canvas(QOpenGLWidget):
         if layer_id is None:
             return
         layer = next((l for l in self.document.layers if l.id == layer_id), None)
-        if layer is None or layer.alpha_mask_store is None:
+        owner = self._mask_owner(layer) if layer is not None else None
+        if (owner is None or owner.alpha_mask_store is None
+                or (self._editing_mask_group_id is not None and owner is layer)):
             self._editing_alpha_mask_layer_id = None
+            self._editing_mask_group_id = None
             self._editing_alpha_mask_image = None
             return
-        self._editing_alpha_mask_image = layer.alpha_mask_grayscale()
+        self._editing_alpha_mask_image = owner.alpha_mask_grayscale()
 
     def edit_layer_pixels(self) -> None:
         self._editing_alpha_mask_layer_id = None
+        self._editing_mask_group_id = None
         self._editing_alpha_mask_image = None
         self.update()
 
@@ -2014,21 +2591,38 @@ class Canvas(QOpenGLWidget):
         self.history = self.tile_history.steps
         self.history_index = 0
         self._stroke_image_format = None
+        self.history_changed.emit()
 
     def begin_history_action(self, dirty_only: bool = False,
-                             structure_only: bool = False) -> None:
+                             structure_only: bool = False, label: str = "") -> None:
         """Start an undo transaction for pixels, selection, or layer structure.
 
         Keeping ``structure_only`` explicit prevents metadata edits from being
         recorded as dirty-pixel edits.  That distinction is required to restore
         layer names, masks, groups, blend settings and visibility correctly.
         """
+        detail = ""
+        if dirty_only:
+            from CANVAS.history_labels import TOOL_HISTORY_LABELS
+            label = label or TOOL_HISTORY_LABELS.get(self.tools.current_tool, "Modification des pixels")
+            layer = self.get_active_layer()
+            detail = layer.name if layer is not None else ""
+            if layer is not None and self._editing_alpha_mask_layer_id == layer.id:
+                owner = self._mask_owner(layer)
+                detail = "Masque · " + (owner.name if owner is not layer else detail)
         self.tile_history.begin(self.document, dirty_only=dirty_only,
-                                structure_only=structure_only)
+                                structure_only=structure_only, label=label, detail=detail)
+        self.history_changed.emit()
 
     def _begin_fill_history_action(self, layer: Layer, position: QPoint) -> QRect | None:
         """Start a tile-delta transaction when CreativeCore can plan the fill."""
-        bounds = self.tools.fill_tool.preview_bounds(layer.image, position)
+        fill_tool = self.tools.fill_tool
+        if fill_tool.options.sample_all_layers:
+            from DOCUMENTS.blend_modes import composite_document
+            fill_tool.set_reference(composite_document(self.document))
+        else:
+            fill_tool.set_reference(None)
+        bounds = fill_tool.preview_bounds(layer.image, position)
         if bounds is None:
             self.begin_history_action()
             return None
@@ -2047,6 +2641,7 @@ class Canvas(QOpenGLWidget):
 
     def begin_selection_history_action(self) -> None:
         self.tile_history.begin(self.document, selection_only=True)
+        self.history_changed.emit()
 
     def _set_selection_operation(self, modifiers) -> None:
         shift = bool(modifiers & Qt.KeyboardModifier.ShiftModifier)
@@ -2061,7 +2656,17 @@ class Canvas(QOpenGLWidget):
             self.selection_operation = getattr(
                 self, "selection_base_operation", SelectionOperation.REPLACE)
 
+    def _gesture_tools(self):
+        """Tools driven by a drag gesture: the marquees, the lasso and the lasso fill."""
+        return self.tools.selection_tools.SHAPE_TOOLS | {"lasso_fill"}
+
     def _begin_selection_gesture(self, position: QPointF, modifiers) -> None:
+        if self.tools.current_tool == "lasso_fill":
+            self.selection_drawing = True
+            anchor = self.screen_to_image_f(position)
+            self._selection_anchor = anchor
+            self.selection_points = [anchor]
+            return
         self._set_selection_operation(modifiers)
         self._selection_gesture_modifiers = modifiers
         self.begin_selection_history_action()
@@ -2072,7 +2677,7 @@ class Canvas(QOpenGLWidget):
 
     def _update_selection_gesture(self, position: QPointF) -> None:
         point = self.screen_to_image_f(position)
-        if self.tools.current_tool == "lasso":
+        if self.tools.current_tool in ("lasso", "lasso_fill"):
             if not self.selection_points or (point - self.selection_points[-1]).manhattanLength() >= 0.5:
                 self.selection_points.append(point)
             return
@@ -2099,6 +2704,24 @@ class Canvas(QOpenGLWidget):
             return
         options = self.tools.selection_tools.options
         self._set_selection_operation(modifiers)
+        image_point = self.screen_to_image(position)
+        # Sparse raster layers have an exact transparent value outside their
+        # resident tiles.  A contiguous wand click there selects the whole
+        # transparent canvas; invoking the general flood fill used to scan all
+        # 48 million pixels of an 8K document to discover that fact.
+        if (not options.sample_all_layers and options.contiguous
+                and not layer.tile_store.has_tile(image_point.x() // TILE_SIZE,
+                                                   image_point.y() // TILE_SIZE)):
+            self.begin_selection_history_action()
+            if self.selection_operation in (SelectionOperation.REPLACE, SelectionOperation.ADD):
+                self.document.selection.select_all()
+            elif self.selection_operation == SelectionOperation.SUBTRACT:
+                self.document.selection.clear()
+            # Intersecting with the whole canvas deliberately keeps the
+            # existing selection unchanged.
+            self.commit_history_action()
+            self.update()
+            return
         if options.sample_all_layers:
             from DOCUMENTS.blend_modes import composite_document
             source = composite_document(self.document)
@@ -2107,17 +2730,54 @@ class Canvas(QOpenGLWidget):
         self.begin_selection_history_action()
         try:
             candidate = self.tools.selection_tools.magic_wand(
-                source, self.screen_to_image(position),
+                source, image_point,
                 tolerance=options.tolerance, cpp_library=self.cpp_brush_library,
                 contiguous=options.contiguous, anti_alias=options.anti_alias,
                 feather=options.feather,
             )
+
             self.document.selection.combine(candidate, self.selection_operation)
         except Exception:
             self.cancel_history_action()
             raise
         self.commit_history_action()
         self.update()
+
+    def _paint_straight_paint_segment(self, layer, start: QPointF, end: QPointF,
+                                      pressure: float = 1.0) -> bool:
+        """Commit one straight brush/eraser segment for the Shift-click gesture."""
+        if not self._cpp_active():
+            return False
+        start, end = QPointF(start), QPointF(end)
+        self.begin_stroke_history()
+        self.canvas_brush_begin_stroke()
+        self._stroke_raw_point = QPointF(end)
+        image = self._cpp_begin_stroke(self.get_active_image() or layer.image, start, pressure)
+        if image is None:
+            self._cpp_end_stroke()
+            self.cancel_history_action()
+            self.canvas_brush_end_stroke()
+            return False
+        result = self._cpp_draw_segment(image, start, end, pressure, pressure, stabilize=False)
+        if result is None:
+            self._cpp_end_stroke()
+            self.cancel_history_action()
+            self.canvas_brush_end_stroke()
+            return False
+        dirty = self._brush_dirty_rect(start, end)
+        if getattr(layer, "lock_alpha", False):
+            self._restore_locked_alpha(result, dirty)
+        if self._editing_alpha_mask_layer_id != layer.id:
+            layer.adopt_image_cache(result)
+        else:
+            self._editing_alpha_mask_image = result
+        self._sync_brush_regions(start, end)
+        self._cpp_end_stroke()
+        self.commit_stroke_history()
+        self.canvas_brush_end_stroke()
+        self._last_paint_endpoint = QPointF(end)
+        self._stroke_raw_point = None
+        return True
 
     # ---------------------------------------------------------------
     # FREE TRANSFORM SESSION
@@ -2191,19 +2851,310 @@ class Canvas(QOpenGLWidget):
         tool = self.tools.current_tool
         points = list(self.selection_points)
         self.selection_drawing = False
+        if tool == "lasso_fill":
+            self.selection_points = []
+            self.apply_lasso_fill(points)
+            return
         try:
             options = self.tools.selection_tools.options
-            candidate = self.tools.selection_tools.shape_mask(
-                tool, self.document.selection.image.size(), points,
+            from PySide6.QtCore import QSize
+            candidate, origin = self.tools.selection_tools.shape_region(
+                tool, QSize(self.document.width, self.document.height), points,
                 anti_alias=options.anti_alias, feather=options.feather,
             )
-            self.document.selection.combine(candidate, self.selection_operation)
+            self.document.selection.combine_region(candidate, origin, self.selection_operation)
         except Exception:
             self.cancel_history_action()
             self.selection_points = []
             raise
         self.selection_points = []
         self.commit_history_action()
+
+    # ── Snapshots ─────────────────────────────────────────────────────────
+    # A snapshot is a copy of every layer's pixels.  Restoring it is a normal
+    # undoable step, so nothing is ever lost by jumping back.
+    MAX_SNAPSHOTS = 12
+
+    @staticmethod
+    def _snapshot_store(store, previous: dict | None) -> dict:
+        """Occupied tiles of a store, zlib-compressed, keyed by tile.
+
+        A tile whose revision did not change since the previous snapshot reuses
+        that snapshot's bytes, so a series of snapshots costs roughly the size
+        of what changed between them (flat painting compresses very well).
+        """
+        import zlib
+        revisions = store.resident_revisions() or {}
+        tiles = {}
+        for key in store.occupied_keys:
+            revision = revisions.get(key)
+            old = (previous or {}).get(key)
+            if old is not None and revision is not None and old[0] == revision:
+                tiles[key] = old
+                continue
+            tile = store.tile(*key).convertToFormat(QImage.Format.Format_ARGB32)
+            payload = zlib.compress(bytes(tile.constBits())[:tile.sizeInBytes()], 1)
+            tiles[key] = (revision, tile.width(), tile.height(), tile.bytesPerLine(), payload)
+        return tiles
+
+    def create_snapshot(self, name: str = "") -> dict | None:
+        document = getattr(self, "document", None)
+        if document is None:
+            return None
+        snapshots = self.__dict__.setdefault("snapshots", [])
+        if len(snapshots) >= self.MAX_SNAPSHOTS:
+            snapshots.pop(0)
+        mine = [item for item in snapshots if item["document"] == id(document)]
+        last = mine[-1]["stores"] if mine else {}
+        stores = {}
+        for layer in document.layers:
+            layer.commit_image_cache()
+            stores[("layer", layer.id)] = self._snapshot_store(
+                layer.tile_store, last.get(("layer", layer.id)))
+            if layer.alpha_mask_store is not None:
+                stores[("mask", layer.id)] = self._snapshot_store(
+                    layer.alpha_mask_store, last.get(("mask", layer.id)))
+        for group in document.layer_groups:
+            if getattr(group, "alpha_mask_store", None) is not None:
+                stores[("mask", group.id)] = self._snapshot_store(
+                    group.alpha_mask_store, last.get(("mask", group.id)))
+        snapshot = {"name": name or f"Instantané {len(snapshots) + 1}",
+                    "time": time.strftime("%H:%M"), "document": id(document),
+                    "stores": stores,
+                    "layers": {owner: True for kind, owner in stores if kind == "layer"}}
+        snapshots.append(snapshot)
+        self.history_changed.emit()
+        return snapshot
+
+    def restore_snapshot(self, snapshot: dict) -> int:
+        """Bring back the pixels of every layer that still exists; return how many."""
+        import zlib
+        document = getattr(self, "document", None)
+        if document is None or snapshot.get("document") != id(document):
+            return 0
+        stores = snapshot["stores"]
+        targets = [layer for layer in document.layers if ("layer", layer.id) in stores]
+        if not targets:
+            return 0
+        groups = {group.id: group for group in document.layer_groups}
+
+        def plan(store, saved: dict, empty_fill: QColor) -> list:
+            """Tiles to write: only those that differ from the snapshot."""
+            writes = []
+            current = store.resident_revisions() or {}
+            for key, (revision, width, height, stride, payload) in saved.items():
+                if revision is not None and current.get(key) == revision:
+                    continue                  # untouched since the snapshot
+                raw = zlib.decompress(payload)
+                writes.append((*key, QImage(raw, width, height, stride,
+                                            QImage.Format.Format_ARGB32).copy()))
+            for key in store.occupied_keys - set(saved):
+                rect = store.tile_rect(*key)
+                blank = QImage(rect.size(), store.image_format)
+                blank.fill(empty_fill)
+                writes.append((*key, blank))
+            return writes
+
+        transparent, white = QColor(0, 0, 0, 0), QColor(255, 255, 255, 255)
+        work = []   # (store, writes, capture)
+        for layer in targets:
+            writes = plan(layer.tile_store, stores[("layer", layer.id)], transparent)
+            if writes:
+                keys = {(tx, ty) for tx, ty, _image in writes}
+                work.append((layer.tile_store, writes,
+                             lambda layer=layer, keys=keys:
+                             self.tile_history.capture_layer_before(layer, keys)))
+            mask_saved = stores.get(("mask", layer.id))
+            if mask_saved is not None and layer.alpha_mask_store is not None:
+                mask_store = layer.alpha_mask_store
+                writes = plan(mask_store, mask_saved, white)
+                if writes:
+                    work.append((mask_store, writes, lambda layer=layer, writes=writes, store=mask_store: [
+                        self.tile_history.capture_mask_before(layer, store.tile_rect(tx, ty))
+                        for tx, ty, _image in writes]))
+        for (kind, owner), saved in stores.items():
+            group = groups.get(owner) if kind == "mask" else None
+            if group is not None and group.alpha_mask_store is not None:
+                writes = plan(group.alpha_mask_store, saved, white)
+                if writes:
+                    work.append((group.alpha_mask_store, writes,
+                                 lambda group=group: self.tile_history.capture_group_mask_before(
+                                     group, whole_grid=True)))
+        if not work:
+            return len(targets)               # already identical
+        self.begin_history_action(structure_only=True, label=f"Instantané : {snapshot['name']}")
+        try:
+            for _store, _writes, capture in work:
+                capture()
+            for store, writes, _capture in work:
+                if not store.set_tiles_batch(writes):
+                    raise OSError("Could not restore the snapshot tiles")
+            for layer in targets:
+                layer.discard_image_cache()
+            for group in groups.values():
+                group.invalidate()
+        except Exception:
+            self.cancel_history_action()
+            raise
+        self.commit_history_action()
+        self.reload_alpha_mask_edit_buffer()
+        for layer in targets:
+            self.gpu_renderer.mark_layer_dirty(layer, None)
+        self._projection_tile_signatures.clear()
+        self.update()
+        return len(targets)
+
+    def delete_snapshot(self, snapshot: dict) -> None:
+        snapshots = self.__dict__.get("snapshots", [])
+        if snapshot in snapshots:
+            snapshots.remove(snapshot)
+            self.history_changed.emit()
+
+    def document_snapshots(self) -> list[dict]:
+        document = getattr(self, "document", None)
+        return [s for s in self.__dict__.get("snapshots", []) if s["document"] == id(document)]
+
+    def apply_lasso_fill(self, points) -> QRect:
+        """Fill the drawn shape with the current colour on the active layer.
+
+        Anti-aliased, clipped to the active selection, honours alpha lock,
+        and recorded as a normal undoable paint step.
+        """
+        layer = self.get_active_layer()
+        if layer is None or layer.locked or len(points) < 3:
+            return QRect()
+        path = QPainterPath(QPointF(points[0]))
+        for point in points[1:]:
+            path.lineTo(QPointF(point))
+        path.closeSubpath()
+        bounds = path.boundingRect().toAlignedRect().adjusted(-1, -1, 1, 1).intersected(
+            QRect(0, 0, self.document.width, self.document.height))
+        if bounds.isEmpty():
+            return QRect()
+        color = QColor(*[int(v) for v in self.brush_settings.snapshot()["color"]])
+        editing_mask = self._editing_alpha_mask_layer_id == layer.id
+        if editing_mask:
+            # On a mask the colour is a grey level: black hides, white reveals.
+            grey = round(0.299 * color.red() + 0.587 * color.green() + 0.114 * color.blue())
+            color = QColor(grey, grey, grey, color.alpha())
+        patch = QImage(bounds.size(), QImage.Format.Format_ARGB32_Premultiplied)
+        patch.fill(Qt.GlobalColor.transparent)
+        painter = QPainter(patch)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.translate(-bounds.x(), -bounds.y())
+        painter.fillPath(path, color)
+        if not self.document.selection.is_empty():
+            painter.resetTransform()
+            painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_DestinationIn)
+            painter.drawImage(0, 0, self.document.selection.image, bounds.x(), bounds.y(),
+                              bounds.width(), bounds.height())
+        painter.end()
+        if editing_mask:
+            self.begin_history_action(dirty_only=True, label="Remplissage au lasso")
+            self.tile_history.capture_mask_before(self._mask_owner(layer), bounds)
+            target = self.get_active_image()
+            painter = QPainter(target)
+            painter.drawImage(bounds.topLeft(), patch)
+            painter.end()
+            self.sync_gpu_layer(bounds)       # writes the mask store
+            self.commit_history_action()
+            self.update()
+            return bounds
+        layer.commit_image_cache()
+        self.begin_history_action(dirty_only=True, label="Remplissage au lasso")
+        self.tile_history.capture_before(layer, bounds)
+        # Work on the filled area only: materialising the whole layer cost
+        # ~200 MB and most of a second per fill on an 8K canvas.
+        store = layer.tile_store
+        region = QImage(bounds.size(), QImage.Format.Format_ARGB32_Premultiplied)
+        region.fill(Qt.GlobalColor.transparent)
+        painter = QPainter(region)
+        painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_Source)
+        occupied = store.occupied_keys
+        for key in store.keys_for_rect(bounds):
+            if key in occupied:
+                rect = store.tile_rect(*key)
+                painter.drawImage(rect.topLeft() - bounds.topLeft(), store.tile(*key))
+        painter.setCompositionMode(
+            QPainter.CompositionMode.CompositionMode_SourceAtop
+            if getattr(layer, "lock_alpha", False) else QPainter.CompositionMode.CompositionMode_SourceOver)
+        painter.drawImage(0, 0, patch)
+        painter.end()
+        store.write_image_at(region.convertToFormat(store.image_format), bounds.x(), bounds.y())
+        layer.discard_image_cache()
+        self.tile_history.mark_dirty(layer, bounds)
+        self.commit_history_action()
+        self.sync_gpu_layer(bounds)
+        self.update()
+        return bounds
+
+    def _begin_gradient(self, position):
+        layer = self.get_active_layer()
+        if layer is None:
+            return
+        self.begin_history_action(dirty_only=True, label="Dégradé " + {
+            "linear":"linéaire", "radial":"radial", "conical":"angulaire"
+        }[self.tools.gradient_tool.geometry])
+        self.gradient_drawing = True
+        self.gradient_start = position
+        self.gradient_original = QImage(layer.image)
+        self._gradient_layer_id = layer.id
+        self._gradient_region = (self.document.selection.bounds() if not self.document.selection.is_empty()
+                                 else QRect(0,0,self.document.width,self.document.height))
+        self.tile_history.capture_before(layer, self._gradient_region)
+        self._gradient_pending_end = None
+        self._gradient_last_render = 0.0
+        if not hasattr(self, '_gradient_timer'):
+            self._gradient_timer = QTimer(self)
+            self._gradient_timer.setSingleShot(True)
+            self._gradient_timer.timeout.connect(self._flush_gradient)
+
+    def _queue_gradient(self, position):
+        self._gradient_pending_end = position
+        if time.monotonic() - self._gradient_last_render >= .033:
+            self._flush_gradient()
+        elif not self._gradient_timer.isActive():
+            self._gradient_timer.start(33)
+
+    def _flush_gradient(self):
+        self._gradient_timer.stop()
+        end = self._gradient_pending_end
+        self._gradient_pending_end = None
+        layer = self.get_active_layer()
+        if (end is None or not self.gradient_drawing or self.gradient_original is None
+                or layer is None or layer.id != self._gradient_layer_id):
+            return
+        result = QImage(self.gradient_original)
+        self.tools.gradient(result, self.gradient_start, end,
+            QColor(*[int(v) for v in self.brush_settings.peek('color', [0,0,0,255])]),
+            selection_mask=None if self.document.selection.is_empty() else self.document.selection.image)
+        if getattr(layer, 'lock_alpha', False):
+            result = self._restore_alpha_from(result, self.gradient_original)
+        layer.adopt_image_cache(result)
+        self.sync_gpu_layer(self._gradient_region)
+        self._gradient_last_render = time.monotonic()
+        self.update()
+
+    def _finish_gradient(self, position):
+        self._gradient_pending_end = position
+        self._flush_gradient()  # Release always renders the final pointer endpoint.
+        self.gradient_drawing = False
+        self.gradient_original = None
+        self._alpha_lock_snapshot = None
+        self.commit_history_action()
+
+    def _cancel_gradient(self):
+        self._gradient_timer.stop()
+        self._gradient_pending_end = None
+        layer = next((l for l in self.document.layers if l.id == self._gradient_layer_id), None)
+        if layer is not None and self.gradient_original is not None:
+            layer.adopt_image_cache(QImage(self.gradient_original))
+            layer.commit_image_cache(self._gradient_region)
+            self.gpu_renderer.mark_layer_dirty(layer, self._gradient_region)
+        self.gradient_drawing = False
+        self.gradient_original = None
+        self._alpha_lock_snapshot = None
+        self.cancel_history_action()
 
     def apply_selection_edit(self, operation) -> bool:
         """Record a one-shot selection edit without snapshotting paint layers."""
@@ -2222,11 +3173,13 @@ class Canvas(QOpenGLWidget):
         changed = self.tile_history.commit(self.document)
         self.history = self.tile_history.steps
         self.history_index = self.tile_history.index
+        self.history_changed.emit()
         self._schedule_deferred_undo()
         return changed
 
     def cancel_history_action(self) -> None:
         self.tile_history.cancel()
+        self.history_changed.emit()
         self._schedule_deferred_undo()
 
     def _schedule_deferred_undo(self) -> None:
@@ -2246,7 +3199,7 @@ class Canvas(QOpenGLWidget):
         # boundary here, a stroke begun while a layer action is still pending
         # gets attached to that layer action and Ctrl+Z can remove the layer.
         pending = self.tile_history._pending
-        if pending is not None and pending.get("mode") != "dirty":
+        if pending is not None:
             self.commit_history_action()
         layer = self.get_active_layer()
         self._stroke_image_format = (
@@ -2365,6 +3318,7 @@ class Canvas(QOpenGLWidget):
                 self.tile_history.cancel()
                 self.canvas_brush_end_stroke()
                 return
+
             image = rendered
         self._cpp_end_stroke()
         layer.image = self._restore_locked_alpha(image, dirty) or image
@@ -2397,8 +3351,13 @@ class Canvas(QOpenGLWidget):
             self._invalidate_gpu_after_history()
             self.history_index = self.tile_history.index
             self.history_restored.emit()
+            self.history_changed.emit()
             self.update()
-            self._schedule_deferred_undo()
+        # A burst of Ctrl+Z may contain more requests than available history.
+        # Keep draining the deferred queue even when this particular undo is a
+        # no-op; otherwise one stale request can be replayed after a later
+        # unrelated edit.
+        self._schedule_deferred_undo()
 
     def redo(
         self
@@ -2410,6 +3369,7 @@ class Canvas(QOpenGLWidget):
             self._invalidate_gpu_after_history()
             self.history_index = self.tile_history.index
             self.history_restored.emit()
+            self.history_changed.emit()
             self.update()
 
     def _invalidate_gpu_after_history(self) -> None:
@@ -2442,6 +3402,8 @@ class Canvas(QOpenGLWidget):
     def _invalidate_projection_cache(self) -> None:
         """Reject in-flight native frames that were captured before undo/redo."""
         self._projection_idle_key = None
+        self._visibility_occluded_keys.clear()
+        self._visibility_occlusion_key = None
         self.__dict__.pop('_projection_result_cache', None)
         self.__dict__.pop('_projection_checked_state', None)
         stale_keys = (set(self.projection_store.occupied_keys)
@@ -2452,6 +3414,157 @@ class Canvas(QOpenGLWidget):
             self._projection_tile_signatures.pop(key, None)
             self._projection_ready_tiles.discard(key)
             self._projection_pending_images.pop(key, None)
+
+    def invalidate_projection_for_layers(self, layers) -> int:
+        """Invalidate visible/retained projection tiles after a visibility change.
+
+        Off-screen tiles deliberately retain their old projection metadata. The
+        next viewport scan sees the changed layer signature and refreshes them
+        lazily, instead of walking a full-resolution layer on an eye click.
+        """
+        affected = set()
+        for layer in layers:
+            store = getattr(layer, "tile_store", None)
+            if store is not None:
+                affected.update(store.occupied_keys)
+        retained = {key for key in self._projection_tile_signatures
+                    if self.tile_cache_manager.should_retain(key)}
+        candidates = affected & (self.visible_document_tile_keys() | retained)
+        # A lower layer may change without changing any final pixel when a
+        # resident, opaque Normal layer above it already covers that tile.
+        # Keep the proof conservative around groups: isolated/pass-through
+        # folders alter the semantics of ordinary child layers.
+        occluded = self._visibility_occluded_projection_keys(layers, candidates)
+        reusable = {key for key in occluded
+                    if key in self._projection_ready_tiles
+                    and key in self._projection_tile_signatures}
+        self._visibility_occluded_keys.update(reusable)
+        keys = candidates - reusable
+        # Do not spend hundreds of milliseconds composing a temporary preview
+        # when the exact pixels are already known to be unchanged.
+        # A small exact refresh is cheaper and more trustworthy than creating
+        # a second composited preview. Large changes still receive instant
+        # preview feedback while their exact tiles are prepared.
+        if keys and (len(keys) > 256 or len(keys) * 5 > len(candidates)):
+            self._request_visibility_preview()
+        else:
+            self._discard_visibility_preview()
+        for key in keys:
+            self._projection_tile_generation[key] = -1
+            self._projection_tile_signatures.pop(key, None)
+            self._projection_ready_tiles.discard(key)
+            self._projection_pending_images.pop(key, None)
+        self._projection_cache_stats["visibility_invalidated_tiles"] = (
+            self._projection_cache_stats.get("visibility_invalidated_tiles", 0) + len(keys))
+        self._projection_cache_stats["visibility_deferred_tiles"] = (
+            self._projection_cache_stats.get("visibility_deferred_tiles", 0)
+            + len(affected - candidates))
+        self._projection_cache_stats["visibility_occlusion_skips"] = (
+            self._projection_cache_stats.get("visibility_occlusion_skips", 0)
+            + len(reusable))
+        return len(keys)
+
+    def _visibility_occluded_projection_keys(self, layers, candidates):
+        """Return candidate tiles hidden by unchanged opaque layers above.
+
+        An exact projection normally receives a new signature after a
+        visibility toggle. If a fully opaque normal layer covers the tile
+        above every edited layer, recomposition cannot change a single pixel.
+        """
+        if not candidates or not layers:
+            return set()
+        if any(getattr(layer, "layer_kind", "raster") != "raster" for layer in self.document.layers):
+            return set()
+        groups = tuple(getattr(self.document, "layer_groups", ()) or ())
+        # A group can be flattened for this limited proof only when it behaves
+        # as a normal, fully opaque container. Hidden groups are represented by
+        # hidden children, rather than letting invisible children claim opaque
+        # coverage over layers below them.
+        if any(str(getattr(group, "blend_mode", "normal")).lower() != "normal"
+               or float(getattr(group, "opacity", 1.0)) < 1.0
+               or getattr(group, "blend_parameters", {})
+               or (getattr(group, "alpha_mask_store", None) is not None
+                   and not getattr(group, "mask_disabled", False))
+               for group in groups):
+            return set()
+        effective_visible = {layer.id: bool(getattr(layer, "visible", True))
+                             for layer in self.document.layers}
+        for group in groups:
+            if getattr(group, "visible", True):
+                continue
+            for layer_id in getattr(group, "layer_ids", ()):
+                if layer_id in effective_visible:
+                    effective_visible[layer_id] = False
+        occlusion_layers = [SimpleNamespace(
+            id=layer.id,
+            tile_store=layer.tile_store,
+            visible=effective_visible.get(layer.id, False),
+            blend_mode=getattr(layer, "blend_mode", "normal"),
+            blend_parameters=getattr(layer, "blend_parameters", {}),
+            opacity=getattr(layer, "opacity", 1.0),
+            clipping=getattr(layer, "clipping", False),
+            alpha_mask_store=getattr(layer, "alpha_mask_store", None),
+            mask_disabled=getattr(layer, "mask_disabled", False),
+        ) for layer in self.document.layers]
+        try:
+            occlusion = self.gpu_renderer.compute_occlusion(
+                occlusion_layers, self.document.width, self.document.height,
+                visible_tiles=candidates,
+            )
+        except (AttributeError, RuntimeError, TypeError):
+            return set()
+        coverage = None
+        for layer in layers:
+            hidden = set(occlusion.get(str(layer.id), ()))
+            coverage = hidden if coverage is None else coverage.intersection(hidden)
+        return set() if coverage is None else coverage
+
+    def _visibility_preview_state(self):
+        return (id(self.document), self.document.width, self.document.height,
+                self.tile_history.index, bool(self.document.text_objects),
+                bool(self.document.reference_images),
+                tuple((self._layer_static_signature(layer), id(layer.tile_store),
+                       layer.tile_store._mutation_count, getattr(layer, 'mask_disabled', False),
+                       id(getattr(layer, 'alpha_mask_store', None)),
+                       repr(getattr(layer, 'vector_mask', None)),
+                       repr(getattr(layer, 'layer_effects', None)),
+                       repr(getattr(layer, 'psd_effects', None)),
+                       repr(getattr(layer, 'transform_state', None)))
+                      for layer in self.document.layers), self._groups_static_signature(),
+                tuple((group.parent_id, id(getattr(group, 'alpha_mask_store', None)))
+                      for group in self.document.layer_groups))
+
+    def _validate_visibility_preview(self):
+        key = getattr(self, '_visibility_preview_key', None)
+        if key is not None and (self.zoom >= .5 or self.drawing
+                or getattr(self, 'gradient_drawing', False)
+                or key != self._visibility_preview_state()):
+            self._discard_visibility_preview()
+
+    def _request_visibility_preview(self):
+        # A zoomed-out large canvas is the expensive case: show a temporary
+        # screen-scale result while the existing exact projection catches up.
+        if (self.document.width * self.document.height < 8_000_000 or self.zoom >= .5
+                or self.drawing or getattr(self, 'gradient_drawing', False)):
+            self._discard_visibility_preview()
+            return
+        from CANVAS.visibility_preview import VisibilityPreview
+        renderer = self.__dict__.get('_visibility_renderer')
+        if renderer is None:
+            renderer = self._visibility_renderer = VisibilityPreview()
+        for layer in self.document.layers:
+            layer.commit_image_cache(release=True)
+        image = renderer.render(self.document)
+        if image is not None:
+            self.document._display_preview = image
+            self._visibility_preview_key = self._visibility_preview_state()
+            self._projection_display_ready = False
+        else:
+            self._discard_visibility_preview()
+
+    def _discard_visibility_preview(self):
+        if self.__dict__.pop('_visibility_preview_key', None) is not None:
+            self.document.__dict__.pop('_display_preview', None)
 
     # =========================================================
     # TRANSFORMER
@@ -2473,125 +3586,6 @@ class Canvas(QOpenGLWidget):
             width,
             height
         )
-
-    def get_transform_handle(
-        self,
-        position: QPointF
-    ) -> str:
-
-        rect = self.get_transform_rect()
-
-        threshold = (
-            10.0
-            / max(
-                self.zoom,
-                0.01
-            )
-        )
-
-        left = rect.left()
-        right = rect.right()
-        top = rect.top()
-        bottom = rect.bottom()
-
-        center_x = (
-            left + right
-        ) / 2.0
-
-        center_y = (
-            top + bottom
-        ) / 2.0
-
-        if abs(position.x() - center_x) <= threshold and abs(position.y() - (top - threshold * 3)) <= threshold:
-            return "rotate"
-
-        if (
-            abs(
-                position.x() - left
-            ) <= threshold
-            and abs(
-                position.y() - top
-            ) <= threshold
-        ):
-            return "top_left"
-
-        if (
-            abs(
-                position.x() - center_x
-            ) <= threshold
-            and abs(
-                position.y() - top
-            ) <= threshold
-        ):
-            return "top"
-
-        if (
-            abs(
-                position.x() - right
-            ) <= threshold
-            and abs(
-                position.y() - top
-            ) <= threshold
-        ):
-            return "top_right"
-
-        if (
-            abs(
-                position.x() - right
-            ) <= threshold
-            and abs(
-                position.y() - center_y
-            ) <= threshold
-        ):
-            return "right"
-
-        if (
-            abs(
-                position.x() - right
-            ) <= threshold
-            and abs(
-                position.y() - bottom
-            ) <= threshold
-        ):
-            return "bottom_right"
-
-        if (
-            abs(
-                position.x() - center_x
-            ) <= threshold
-            and abs(
-                position.y() - bottom
-            ) <= threshold
-        ):
-            return "bottom"
-
-        if (
-            abs(
-                position.x() - left
-            ) <= threshold
-            and abs(
-                position.y() - bottom
-            ) <= threshold
-        ):
-            return "bottom_left"
-
-        if (
-            abs(
-                position.x() - left
-            ) <= threshold
-            and abs(
-                position.y() - center_y
-            ) <= threshold
-        ):
-            return "left"
-
-        if rect.contains(
-            position
-        ):
-
-            return "move"
-
-        return ""
 
     def update_transform(
         self,
@@ -2717,22 +3711,6 @@ class Canvas(QOpenGLWidget):
             selection.invalidate()
         self.sync_gpu_layer()
 
-    def apply_perspective_to_layer(self, layer: Layer, corners) -> None:
-        """Commit a four-corner projective transform as one undoable edit."""
-        result = self.tools.transform_tool.perspective(layer.image, PerspectiveSpec(tuple(corners)))
-        layer.image = result
-        self.sync_gpu_layer()
-
-    def apply_liquify_to_layer(self, layer: Layer, strokes: list[LiquifyStroke]) -> None:
-        result = self.tools.transform_tool.liquify(layer.image, strokes)
-        layer.image = result
-        self.sync_gpu_layer()
-
-    def apply_warp_to_layer(self, layer: Layer, controls: list[WarpControl]) -> None:
-        result = self.tools.transform_tool.warp(layer.image, controls)
-        layer.image = result
-        self.sync_gpu_layer()
-
     def rotate_active(self, degrees: float) -> None:
         layer = self.get_active_layer()
         if layer is None:
@@ -2774,6 +3752,21 @@ class Canvas(QOpenGLWidget):
     # PAINT
     # =========================================================
 
+    def _draw_document_shadow(self, painter: QPainter, rect) -> None:
+        """Soft drop shadow and hairline edge that lift the page off the desk."""
+        painter.save()
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        painter.setPen(Qt.PenStyle.NoPen)
+        base = QRectF(rect)
+        for step in range(1, 9):
+            painter.setBrush(QColor(0, 0, 0, 14))
+            grow = step * 1.6
+            painter.drawRoundedRect(base.adjusted(-grow, -grow + 3, grow, grow + 3), grow, grow)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.setPen(QPen(QColor(0, 0, 0, 90), 1))
+        painter.drawRect(base.adjusted(-0.5, -0.5, 0.5, 0.5))
+        painter.restore()
+
     def draw_transparency_grid(
         self,
         painter: QPainter
@@ -2787,6 +3780,8 @@ class Canvas(QOpenGLWidget):
         if rect.height() <= 0:
             return
 
+        self._draw_document_shadow(painter, rect)
+
         background = self.canvas_background
         if background == "Dark":
             painter.fillRect(rect, QColor(COLORS["window"]))
@@ -2795,74 +3790,20 @@ class Canvas(QOpenGLWidget):
             painter.fillRect(rect, QColor(COLORS["panel_raised"]))
             return
 
-        # -----------------------------------------------------
-        # Checkerboard cache
-        #
-        # Au lieu de dessiner chaque case individuellement,
-        # on crée une seule petite texture 24x24 puis Qt la
-        # répète dans le rectangle.
-        # -----------------------------------------------------
-
-        if not hasattr(
-            self,
-            "_transparency_brush"
-        ):
-
-            from PySide6.QtGui import (
-                QBrush,
-                QImage,
-                QPainter as GridPainter,
-            )
-
-            tile = 12
-
-            image = QImage(
-                tile * 2,
-                tile * 2,
-                QImage.Format.Format_ARGB32,
-            )
-
-            image.fill(
-                QColor(
-                    38,
-                    38,
-                    38
-                )
-            )
-
-            grid_painter = GridPainter(
-                image
-            )
-
-            grid_painter.fillRect(
-                0,
-                0,
-                tile,
-                tile,
-                QColor(
-                    54,
-                    54,
-                    54
-                )
-            )
-
-            grid_painter.fillRect(
-                tile,
-                tile,
-                tile,
-                tile,
-                QColor(
-                    54,
-                    54,
-                    54
-                )
-            )
-
+        # Light checkerboard from the theme tokens (as in Photoshop / Krita):
+        # transparent areas must read as "empty paper", not as a dark fill
+        # that hides dark strokes.  One 2×2-tile brush, repeated by Qt.
+        if not hasattr(self, "_transparency_brush"):
+            from PySide6.QtGui import QBrush, QImage, QPainter as GridPainter
+            tile = 8
+            image = QImage(tile * 2, tile * 2, QImage.Format.Format_ARGB32)
+            image.fill(QColor(COLORS["checker_light"]))
+            grid_painter = GridPainter(image)
+            dark = QColor(COLORS["checker_dark"])
+            grid_painter.fillRect(0, 0, tile, tile, dark)
+            grid_painter.fillRect(tile, tile, tile, tile, dark)
             grid_painter.end()
-
-            self._transparency_brush = QBrush(
-                image
-            )
+            self._transparency_brush = QBrush(image)
 
         painter.save()
 
@@ -3074,6 +4015,14 @@ class Canvas(QOpenGLWidget):
                 painter.drawRect(QRectF(screen_points[0], screen_points[-1]).normalized())
             elif self.tools.current_tool == "select_ellipse":
                 painter.drawEllipse(QRectF(screen_points[0], screen_points[-1]).normalized())
+            elif self.tools.current_tool == "lasso_fill":
+                fill = QColor(*[int(v) for v in self.brush_settings.snapshot()["color"]][:3])
+                fill.setAlpha(150)
+                painter.save()
+                painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+                painter.setBrush(fill)
+                painter.drawPolygon(QPolygonF(screen_points))
+                painter.restore()
             else:
                 for start, end in zip(screen_points, screen_points[1:]):
                     painter.drawLine(start, end)
@@ -3086,16 +4035,25 @@ class Canvas(QOpenGLWidget):
         painter.restore()
 
     def draw_symmetry_guides(self, painter: QPainter) -> None:
-        if not (self.symmetry_horizontal or self.symmetry_vertical):
+        if not (self.symmetry_horizontal or self.symmetry_vertical or self.radial_symmetry_count > 1):
             return
         painter.save()
         painter.setPen(QPen(QColor(90, 170, 220, 150), 1, Qt.PenStyle.DashLine))
-        if self.symmetry_horizontal:
-            x = self.offset.x() + (self.document.width - 1) * self.zoom * 0.5
-            painter.drawLine(QPointF(x, 0), QPointF(x, self.height()))
-        if self.symmetry_vertical:
-            y = self.offset.y() + (self.document.height - 1) * self.zoom * 0.5
-            painter.drawLine(QPointF(0, y), QPointF(self.width(), y))
+        center = QPointF(self.offset.x() + self.radial_symmetry_center.x() * (self.document.width - 1) * self.zoom,
+                         self.offset.y() + self.radial_symmetry_center.y() * (self.document.height - 1) * self.zoom)
+        if self.radial_symmetry_count > 1:
+            radius = math.hypot(self.width(), self.height())
+            for index in range(self.radial_symmetry_count):
+                angle = math.pi * index / self.radial_symmetry_count
+                delta = QPointF(math.cos(angle) * radius, math.sin(angle) * radius)
+                painter.drawLine(center - delta, center + delta)
+            painter.setBrush(QColor(90, 170, 220, 210))
+            painter.drawEllipse(center, 3.5, 3.5)
+        else:
+            if self.symmetry_horizontal:
+                painter.drawLine(QPointF(center.x(), 0), QPointF(center.x(), self.height()))
+            if self.symmetry_vertical:
+                painter.drawLine(QPointF(0, center.y()), QPointF(self.width(), center.y()))
         painter.restore()
 
     def draw_assistant_guides(self, painter: QPainter) -> None:
@@ -3165,6 +4123,53 @@ class Canvas(QOpenGLWidget):
         self.draw_selection_overlay(painter)
         self.draw_symmetry_guides(painter)
         self.draw_assistant_guides(painter)
+        painter.restore()
+        self.draw_tool_feedback(painter)
+
+    def draw_tool_feedback(self, painter: QPainter) -> None:
+        """A short, canvas-local acknowledgement of the selected tool.
+
+        The top option bar carries the complete controls; this small overlay
+        only bridges the instant after a shortcut or rail click. It fades out
+        rather than becoming a permanent panel competing with the artwork.
+        """
+        name = self._tool_feedback_name
+        remaining = self._tool_feedback_until - time.monotonic()
+        if not name or remaining <= 0:
+            return
+        title, shortcut, hint = TOOL_FEEDBACK.get(
+            name, (name.replace("_", " ").capitalize(), "", "Outil actif"))
+        # Keep the acknowledgement fully opaque while the eye lands on it,
+        # then fade only during the last half-second.
+        alpha = min(1.0, max(0.0, remaining / 0.5))
+        painter.save()
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        painter.setOpacity(alpha)
+        title_font = QFont("Sans Serif", 11)
+        title_font.setBold(True)
+        hint_font = QFont("Sans Serif", 9)
+        title_width = QFontMetricsF(title_font).horizontalAdvance(title)
+        hint_width = QFontMetricsF(hint_font).horizontalAdvance(hint)
+        key_width = QFontMetricsF(hint_font).horizontalAdvance(shortcut) + (22 if shortcut else 0)
+        width = max(178.0, title_width + key_width + 42.0, hint_width + 28.0)
+        box = QRectF(16, 16, width, 54)
+        painter.setPen(QPen(QColor(126, 111, 204, 220), 1))
+        painter.setBrush(QColor(20, 23, 30, 232))
+        painter.drawRoundedRect(box, 7, 7)
+        painter.setFont(title_font)
+        painter.setPen(QColor(240, 241, 245))
+        painter.drawText(QPointF(box.left() + 12, box.top() + 21), title)
+        if shortcut:
+            key_box = QRectF(box.right() - key_width - 9, box.top() + 7, key_width, 18)
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(QColor(55, 49, 79))
+            painter.drawRoundedRect(key_box, 4, 4)
+            painter.setFont(hint_font)
+            painter.setPen(QColor(192, 178, 255))
+            painter.drawText(key_box, Qt.AlignmentFlag.AlignCenter, shortcut)
+        painter.setFont(hint_font)
+        painter.setPen(QColor(179, 185, 200))
+        painter.drawText(QPointF(box.left() + 12, box.top() + 43), hint)
         painter.restore()
 
     def draw_canvas_objects(self, painter: QPainter) -> None:
@@ -3240,10 +4245,11 @@ class Canvas(QOpenGLWidget):
         if not self.show_brush_cursor_preview:
             return
 
-        if self.tools.current_tool not in (
-            "brush",
-            "eraser"
-        ):
+        # Every tool that works through the active brush needs the same size
+        # feedback.  Showing it only for paint and eraser made clone, smudge
+        # and local retouch tools feel imprecise even though they use the
+        # exact same radius in CreativeCore.
+        if self.tools.current_tool not in self._CURVED_STROKE_TOOLS:
 
             return
 
@@ -3288,10 +4294,7 @@ class Canvas(QOpenGLWidget):
 
         center = self.cursor_position
 
-        if (
-            self.tools.current_tool
-            == "eraser"
-        ):
+        if self.tools.current_tool == "eraser":
 
             outer_color = QColor(
                 255,
@@ -3307,6 +4310,15 @@ class Canvas(QOpenGLWidget):
                 220
             )
 
+        elif self.tools.current_tool == "clone_stamp":
+            outer_color = QColor(105, 205, 255, 235)
+            inner_color = QColor(16, 34, 47, 220)
+        elif self.tools.current_tool in ("blur", "sharpen"):
+            outer_color = QColor(255, 188, 92, 235)
+            inner_color = QColor(51, 34, 13, 220)
+        elif self.tools.current_tool == "smudge":
+            outer_color = QColor(174, 130, 255, 235)
+            inner_color = QColor(38, 24, 58, 220)
         else:
 
             outer_color = QColor(
@@ -3361,6 +4373,16 @@ class Canvas(QOpenGLWidget):
                 )
             )
 
+        # The clone stamp has a precise sampling/deposit point.  A small
+        # crosshair makes that point unambiguous at large brush sizes, where a
+        # pair of circles alone leaves the artist guessing at the centre.
+        if self.tools.current_tool == "clone_stamp":
+            painter.setPen(QPen(outer_color, 1))
+            painter.drawLine(QPointF(center.x() - 4, center.y()),
+                             QPointF(center.x() + 4, center.y()))
+            painter.drawLine(QPointF(center.x(), center.y() - 4),
+                             QPointF(center.x(), center.y() + 4))
+
         painter.restore()
 
     # =========================================================
@@ -3406,12 +4428,14 @@ class Canvas(QOpenGLWidget):
         renderer = getattr(self, "gpu_renderer", None)
         if renderer is None:
             self._paint_gl_frame()
+            self._paint_wrap_tiles()
             return
         renderer.begin_frame()
         try:
             self._paint_gl_frame()
         finally:
             renderer.end_frame()
+        self._paint_wrap_tiles()
 
     def _paint_gl_frame(
         self
@@ -3554,10 +4578,12 @@ class Canvas(QOpenGLWidget):
         # opacity map is exact per document tile and cached by tile revision.
         for index, layer in enumerate(self.document.layers):
             self._commit_layer_cache_for_render(layer, index)
+        self._validate_visibility_preview()
         occlusion = {}
         if not self.transforming:
             occlusion = self.gpu_renderer.compute_occlusion(
-                self.document.layers, self.document.width, self.document.height
+                self.document.layers, self.document.width, self.document.height,
+                visible_tiles=self.visible_document_tile_keys(),
             )
         tile_columns = (self.document.width + TILE_SIZE - 1) // TILE_SIZE
         tile_rows = (self.document.height + TILE_SIZE - 1) // TILE_SIZE
@@ -3822,6 +4848,8 @@ class Canvas(QOpenGLWidget):
         self
     ) -> None:
 
+        self._validate_visibility_preview()
+
         painter = QPainter(
             self
         )
@@ -4037,26 +5065,104 @@ class Canvas(QOpenGLWidget):
             return
         self.sync_gpu_layer()
 
-    def _brush_dirty_rect(self, start: QPoint, end: QPoint) -> QRect:
-        points = [(start, end)]
-        cx, cy = self.document.width - 1, self.document.height - 1
-        if self.symmetry_horizontal:
-            points.append((QPoint(cx - start.x(), start.y()), QPoint(cx - end.x(), end.y())))
-        if self.symmetry_vertical:
-            points.append((QPoint(start.x(), cy - start.y()), QPoint(end.x(), cy - end.y())))
-        if self.symmetry_horizontal and self.symmetry_vertical:
-            points.append((QPoint(cx - start.x(), cy - start.y()), QPoint(cx - end.x(), cy - end.y())))
-        settings = self.brush_settings.snapshot()
-        size = float(settings.get("size", 10.0))
+    # ── Wrap-around (seamless tile) mode ─────────────────────────────────
+    wrap_around = False
+
+    def set_wrap_around(self, enabled: bool) -> None:
+        self.wrap_around = bool(enabled)
+        self._wrap_cache = None
+        self._wrap_cache_dirty = True
+        if not getattr(self, "_wrap_signal_connected", False):
+            self.history_changed.connect(lambda: setattr(self, "_wrap_cache_dirty", True))
+            self._wrap_signal_connected = True
+        if hasattr(self, "brush_settings"):
+            self._apply_brush_settings(self.brush_settings.snapshot())
+        self.update()
+
+    def frame_wrap_tiles(self) -> None:
+        """Zoom out so the 3 × 3 tiling around the image is visible."""
+        if not self.wrap_around or getattr(self, "document", None) is None:
+            return
+        self.zoom = min(self.zoom, max(0.05, min(self.width() / (3 * self.document.width),
+                                                 self.height() / (3 * self.document.height))))
+        centre = QPointF(self.width() / 2, self.height() / 2)
+        self.offset = centre - QPointF(self.document.width / 2, self.document.height / 2) * self.zoom
+        self.update()
+
+    def _paint_wrap_tiles(self) -> None:
+        """Draw the 8 neighbouring copies of the image around the document."""
+        document = getattr(self, "document", None)
+        if not self.wrap_around or document is None:
+            return
+        if getattr(self, "_wrap_cache", None) is None or getattr(self, "_wrap_cache_dirty", True):
+            from DOCUMENTS.blend_modes import composite_document
+            self._wrap_cache = composite_document(document)
+            self._wrap_cache_dirty = False
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, self.zoom < 1.0)
+        rect = self.get_document_rect()
+        transform = painter.transform()
+        for dy in (-1, 0, 1):
+            for dx in (-1, 0, 1):
+                if not dx and not dy:
+                    continue
+                target = rect.translated(dx * rect.width(), dy * rect.height())
+                corners = [self._view_transform_point(target.topLeft()),
+                           self._view_transform_point(target.bottomRight())]
+                if self.view_rotation or self.view_flip_x or self.view_flip_y:
+                    continue   # tiling preview only for an unrotated view
+                painter.drawImage(QRectF(corners[0], corners[1]).normalized(), self._wrap_cache)
+        painter.setTransform(transform)
+        painter.setPen(QPen(QColor(COLORS["accent"]), 1, Qt.PenStyle.DashLine))
+        painter.drawRect(rect)
+        painter.end()
+
+    def _brush_dirty_rect(self, start, end) -> QRect:
+        regions = self._brush_dirty_regions(start, end)
+        if not regions:
+            return QRect()
+        rect = QRect(regions[0])
+        for region in regions[1:]:
+            rect = rect.united(region)
+        return rect
+
+    def _brush_dirty_rect_single(self, start, end) -> QRect:
+        """Touched rectangle for one physical brush segment."""
+        points = [(QPointF(start), QPointF(end))]
+        peek = self.brush_settings.peek
+        size = float(peek("size", 10.0))
         # Bound the maximum jittered dab plus its scatter displacement so
         # alpha restoration covers every pixel the C++ brush may have touched.
-        radius = math.ceil(size * (1.0 + float(settings.get("sizeJitter", 0.0)) +
-                                   float(settings.get("scatter", 0.0))) * 0.5) + 2
-        left = min(min(a.x(), b.x()) for a, b in points) - radius
-        top = min(min(a.y(), b.y()) for a, b in points) - radius
-        right = max(max(a.x(), b.x()) for a, b in points) + radius
-        bottom = max(max(a.y(), b.y()) for a, b in points) + radius
-        return QRect(left, top, right - left + 1, bottom - top + 1)
+        radius = math.ceil(size * (1.0 + float(peek("sizeJitter", 0.0)) +
+                                  float(peek("scatter", 0.0))) * 0.5) + 2
+        left = math.floor(min(min(a.x(), b.x()) for a, b in points)) - radius
+        top = math.floor(min(min(a.y(), b.y()) for a, b in points)) - radius
+        right = math.ceil(max(max(a.x(), b.x()) for a, b in points)) + radius
+        bottom = math.ceil(max(max(a.y(), b.y()) for a, b in points)) + radius
+        rect = QRect(left, top, right - left + 1, bottom - top + 1)
+        if self.wrap_around:
+            bounds = QRect(0, 0, self.document.width, self.document.height)
+            if not bounds.contains(rect):
+                # Dabs crossing an edge also land on the opposite side.
+                return bounds
+        return rect
+
+    def _brush_dirty_regions(self, start, end) -> list[QRect]:
+        """Exact touched regions, retained separately for radial painting.
+
+        A bounding box around opposite radial copies can span most of an 8K
+        canvas. Committing that box after every dab defeats tile storage, so
+        callers that write pixels use these compact regions instead.
+        """
+        return [self._brush_dirty_rect_single(segment_start, segment_end)
+                for segment_start, segment_end, _tilt_start, _tilt_end, _transform
+                in self._symmetry_segments(start, end)]
+
+    def _sync_brush_regions(self, start, end) -> None:
+        regions = self._brush_dirty_regions(start, end)
+        for region in regions:
+            self.sync_gpu_layer(region)
+            self._repaint_brush_dirty_rect(region)
 
     def _screen_rect_for_document_rect(self, document_rect: QRect) -> QRect:
         """Map a dirty document region to the widget, including view transforms.
@@ -4101,7 +5207,9 @@ class Canvas(QOpenGLWidget):
                 # Snap to whole tiles: a missing mask tile reads back as
                 # transparent (= hidden), so a partial write into it would
                 # hide everything around the dab in that tile.
-                tile = layer.ensure_alpha_mask().tile_size
+                owner = self._mask_owner(layer)
+                tile = owner.alpha_mask_store.tile_size if owner is not layer \
+                    else layer.ensure_alpha_mask().tile_size
                 x0, y0 = (region.left() // tile) * tile, (region.top() // tile) * tile
                 x1 = min(buffer.width(), ((region.right() // tile) + 1) * tile)
                 y1 = min(buffer.height(), ((region.bottom() // tile) + 1) * tile)
@@ -4124,9 +5232,9 @@ class Canvas(QOpenGLWidget):
                 # tiles per dab, which is what made mask painting unusable. The
                 # raster-layer branch below never needed this clear for the same
                 # reason; masks don't either.
-                layer.ensure_alpha_mask().write_image_at(
-                    coverage.convertToFormat(layer.alpha_mask_store.image_format),
-                    region.x(), region.y())
+                store = owner.alpha_mask_store if owner is not layer else layer.ensure_alpha_mask()
+                store.write_image_at(coverage.convertToFormat(store.image_format),
+                                     region.x(), region.y())
                 if getattr(self, "gpu_ready", False):
                     self.gpu_renderer.mark_layer_dirty(layer, dirty_rect)
                     # mark_layer_dirty() alone only affects sync_layer()'s
@@ -4163,6 +5271,7 @@ class Canvas(QOpenGLWidget):
             print("Groupes de calques incohérents : réparés automatiquement.")
         for index, layer in enumerate(self.document.layers):
             self._commit_layer_cache_for_render(layer, index)
+        self._validate_visibility_preview()
         if (self.projection_store.width != self.document.width
                 or self.projection_store.height != self.document.height):
             self.projection_store.resize(self.document.width, self.document.height)
@@ -4184,6 +5293,12 @@ class Canvas(QOpenGLWidget):
                    store_version(getattr(layer, "alpha_mask_store", None)))
                   for layer in self.document.layers), self._groups_static_signature())
         self._projection_current_key = current_key
+        if self._visibility_occluded_keys:
+            # A second edit before the first one is processed has a distinct
+            # document/view key. Never reuse the old coverage proof for it.
+            if self._visibility_occlusion_key not in (None, current_key):
+                self._visibility_occluded_keys.clear()
+            self._visibility_occlusion_key = current_key
         if (getattr(self, "_projection_idle_key", None) == current_key
                 and self._projection_display_ready
                 and not self._projection_scan_pending
@@ -4210,7 +5325,14 @@ class Canvas(QOpenGLWidget):
         columns = (self.document.width + TILE_SIZE - 1) // TILE_SIZE
         rows = (self.document.height + TILE_SIZE - 1) // TILE_SIZE
         keys = {key for key in desired if 0 <= key[0] < columns and 0 <= key[1] < rows}
-        known_keys = (self.projection_store.resident_keys()
+        # Committed pixels stay unchanged while a replacement frame is built.
+        resident_version = (id(self.projection_store), self.projection_store._mutation_count,
+                            self.projection_store.width, self.projection_store.height)
+        resident_cache = getattr(self, '_projection_resident_cache', None)
+        if resident_cache is None or resident_cache[0] != resident_version:
+            resident_cache = (resident_version, self.projection_store.resident_keys())
+            self._projection_resident_cache = resident_cache
+        known_keys = (resident_cache[1]
                       | set(self._projection_tile_signatures)
                       | set(self._projection_tile_generation)
                       | self._projection_ready_tiles)
@@ -4301,14 +5423,15 @@ class Canvas(QOpenGLWidget):
         started = _time.perf_counter()
         budget = 0.018
         more_work = False
-        ordered = [key for key in keys if key in visible_keys]
-        ordered += [key for key in keys if key not in visible_keys]
         # Continue a budget-limited scan without rechecking its completed prefix.
         checked_state = (current_key, frozenset(keys))
         if getattr(self, '_projection_checked_state', None) != checked_state:
             self._projection_checked_state = checked_state
             self._projection_checked_keys = set()
         checked = self._projection_checked_keys
+        remaining = keys - (checked & known_signatures.keys())
+        ordered = [key for key in remaining if key in visible_keys]
+        ordered += [key for key in remaining if key not in visible_keys]
         from collections import OrderedDict
         result_cache = self.__dict__.setdefault('_projection_result_cache', OrderedDict())
         batch_context = None
@@ -4333,6 +5456,16 @@ class Canvas(QOpenGLWidget):
             signature = (tile_signature(tx, ty) if tile_signature is not None else
                          self._projection_signature_for(tx, ty, layer_static, groups_static,
                                                         revision_maps))
+            if (key in self._visibility_occluded_keys
+                    and key in known_signatures
+                    and key in self._projection_ready_tiles):
+                # Old pixels are exactly covered. Advance to the new visibility
+                # signature without re-running the full native stack.
+                self._projection_tile_signatures[key] = signature
+                checked.add(key)
+                self._projection_waiting_visible.discard(key)
+                self._projection_cache_stats["visible_hits" if key in visible_keys else "prefetch_hits"] += 1
+                continue
             if self._projection_tile_signatures.get(key) == signature:
                 checked.add(key)
                 stats_key = "visible_hits" if key in visible_keys else "prefetch_hits"
@@ -4420,6 +5553,8 @@ class Canvas(QOpenGLWidget):
             QTimer.singleShot(0, self.update)
         else:
             self._projection_scan_pending = False
+            self._visibility_occluded_keys.clear()
+            self._visibility_occlusion_key = None
         if not visible_inputs and not prefetch_inputs:
             self._publish_projection_frame()
             return
@@ -4455,8 +5590,15 @@ class Canvas(QOpenGLWidget):
         maps_ok = revision_maps is not None and len(revision_maps) == len(self.document.layers)
 
         def fetch(store, revisions):
-            if revisions is not None and key not in revisions:
-                return None, False
+            if revisions is not None:
+                if key not in revisions:
+                    return None, False
+                # Reuse the frame's occupancy index, but check current scratch
+                # residency: the UI thread must never load a swapped tile.
+                if key in store._swapped:
+                    store.request_tile_async(tx, ty, self._on_scratch_tile_ready)
+                    return None, True
+                return store.tile(tx, ty), False
             if not store.has_tile(tx, ty):
                 return None, False
             if not store.tile_is_resident(tx, ty):
@@ -4521,8 +5663,15 @@ class Canvas(QOpenGLWidget):
         maps_ok = revision_maps is not None and len(revision_maps) == len(self.document.layers)
 
         def fetch(store, revisions):
-            if revisions is not None and key not in revisions:
-                return None, False
+            if revisions is not None:
+                if key not in revisions:
+                    return None, False
+                # Reuse the frame's occupancy index, but check current scratch
+                # residency: the UI thread must never load a swapped tile.
+                if key in store._swapped:
+                    store.request_tile_async(tx, ty, self._on_scratch_tile_ready)
+                    return None, True
+                return store.tile(tx, ty), False
             if not store.has_tile(tx, ty):
                 return None, False
             if not store.tile_is_resident(tx, ty):
@@ -4807,6 +5956,8 @@ class Canvas(QOpenGLWidget):
                 pending.pop(key, None)
         first_frame = not self._projection_display_ready
         self._projection_display_ready = True
+        if getattr(self, '_visibility_preview_key', None) is not None:
+            self._discard_visibility_preview()
         self._projection_idle_key = getattr(self, "_projection_current_key", None)
         self._projection_idle_revision = self.projection_store._mutation_count
         if keys or first_frame:
@@ -5146,6 +6297,11 @@ class Canvas(QOpenGLWidget):
         event
     ) -> None:
 
+        self._discard_visibility_preview()
+        if '_visibility_renderer' in self.__dict__:
+            self._visibility_renderer.clear()
+        if getattr(self, "gradient_drawing", False):
+            self._cancel_gradient()
         self.cleanup_gl_resources()
         self.projection_worker.close()
         self._destroy_cpp_brush()
@@ -5250,6 +6406,11 @@ class Canvas(QOpenGLWidget):
                 event.accept()
                 return
 
+        if self.selection_floating_active and key in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
+            self._commit_floating_selection()
+            event.accept()
+            return
+
         if key in (Qt.Key.Key_Delete, Qt.Key.Key_Backspace):
             if self.tools.current_tool == "reference" and self.selected_reference_id is not None:
                 self.delete_selected_reference()
@@ -5286,6 +6447,10 @@ class Canvas(QOpenGLWidget):
                 event.accept()
                 return
             if key == Qt.Key.Key_D:
+                if self.selection_floating_active:
+                    self._commit_floating_selection(clear_selection=True)
+                    event.accept()
+                    return
                 self.apply_selection_edit(self.document.selection.clear)
                 self.update()
                 event.accept()
@@ -5295,6 +6460,29 @@ class Canvas(QOpenGLWidget):
                 self.update()
                 event.accept()
                 return
+
+        plain = not (event.modifiers() & (Qt.KeyboardModifier.ControlModifier
+                                          | Qt.KeyboardModifier.AltModifier
+                                          | Qt.KeyboardModifier.MetaModifier))
+        # Standard painting shortcuts: [ ] size, 1…0 opacity, X swap, D reset.
+        if plain and key in (Qt.Key.Key_BracketLeft, Qt.Key.Key_BracketRight):
+            size = float(self.brush_settings.get("size", 10.0))
+            factor = 1.15 if key == Qt.Key.Key_BracketRight else 1 / 1.15
+            self.set_brush_setting("size", max(1.0, min(1000.0, round(size * factor, 1))))
+            self.update()
+            event.accept()
+            return
+        digit_keys = (Qt.Key.Key_1, Qt.Key.Key_2, Qt.Key.Key_3, Qt.Key.Key_4, Qt.Key.Key_5,
+                      Qt.Key.Key_6, Qt.Key.Key_7, Qt.Key.Key_8, Qt.Key.Key_9, Qt.Key.Key_0)
+        if plain and key in digit_keys and not (event.modifiers() & Qt.KeyboardModifier.ShiftModifier):
+            self.set_brush_setting("opacity", (digit_keys.index(key) + 1) / 10.0)
+            event.accept()
+            return
+        if plain and key in (Qt.Key.Key_X, Qt.Key.Key_D) and not (
+                event.modifiers() & Qt.KeyboardModifier.ShiftModifier):
+            self.color_shortcut_requested.emit("swap" if key == Qt.Key.Key_X else "reset")
+            event.accept()
+            return
 
         if key == Qt.Key.Key_B:
 
@@ -5333,6 +6521,12 @@ class Canvas(QOpenGLWidget):
         if key == Qt.Key.Key_S:
 
             self.tools.set_smudge()
+            self.update()
+            event.accept()
+            return
+
+        if key == Qt.Key.Key_F and event.modifiers() & Qt.KeyboardModifier.ShiftModifier:
+            self.tools.set_lasso_fill()
             self.update()
             event.accept()
             return
@@ -5409,6 +6603,13 @@ class Canvas(QOpenGLWidget):
             return
 
         if key == Qt.Key.Key_Escape:
+            if self.selection_moving:
+                self._finish_floating_selection(cancel=True)
+                self.cancel_history_action()
+                self.sync_gpu_layer()
+                self.update()
+                event.accept()
+                return
             if self.selection_drawing:
                 self.selection_drawing = False
                 self.selection_points = []
@@ -5417,14 +6618,7 @@ class Canvas(QOpenGLWidget):
                 event.accept()
                 return
             if self.gradient_drawing:
-                layer = self.get_active_layer()
-                if layer is not None and self.gradient_original is not None:
-                    layer.image = self._clone_raster_native(self.gradient_original)
-                self.gradient_drawing = False
-                self.gradient_original = None
-                self._alpha_lock_snapshot = None
-                self.cancel_history_action()
-                self.sync_gpu_layer()
+                self._cancel_gradient()
                 self.update()
                 event.accept()
                 return
@@ -5544,7 +6738,58 @@ class Canvas(QOpenGLWidget):
     # MOUSE
     # =========================================================
 
-    def mousePressEvent(
+    # Mouse strokes get the same Catmull-Rom interpolation as pen strokes:
+    # mice report even fewer samples, so fast moves drew polylines too.
+    def mousePressEvent(self, event: QMouseEvent) -> None:
+        self._mousePressEvent_impl(event)
+        self._mouse_curve = ([(event.position().x(), event.position().y())]
+                             if (self.drawing and event.button() == Qt.MouseButton.LeftButton
+                                 and self.tools.current_tool in self._CURVED_STROKE_TOOLS
+                                 and event.source() == Qt.MouseEventSource.MouseEventNotSynthesized)
+                             else None)
+
+    def mouseMoveEvent(self, event: QMouseEvent) -> None:
+        curve = getattr(self, "_mouse_curve", None)
+        if curve is None or not self.drawing or not (event.buttons() & Qt.MouseButton.LeftButton):
+            self._mouse_curve = None
+            self._mouseMoveEvent_impl(event)
+            return
+        curve.append((event.position().x(), event.position().y()))
+        if len(curve) >= 3:
+            p0 = curve[-4] if len(curve) >= 4 else curve[-3]
+            self._replay_mouse_curve(event, p0, curve[-3], curve[-2], curve[-1])
+        del curve[:-4]
+        event.accept()
+
+    def mouseReleaseEvent(self, event: QMouseEvent) -> None:
+        curve = getattr(self, "_mouse_curve", None)
+        if curve is not None and self.drawing:
+            final = (event.position().x(), event.position().y())
+            if len(curve) >= 2:
+                p0 = curve[-3] if len(curve) >= 3 else curve[-2]
+                self._replay_mouse_curve(event, p0, curve[-2], curve[-1], final)
+                if (curve[-1][0] - final[0]) ** 2 + (curve[-1][1] - final[1]) ** 2 > 1e-6:
+                    self._replay_mouse_curve(event, curve[-2], curve[-1], final, final)
+        self._mouse_curve = None
+        self._mouseReleaseEvent_impl(event)
+
+    def _replay_mouse_curve(self, event: QMouseEvent, p0, p1, p2, p3) -> None:
+        length = math.hypot(p2[0] - p1[0], p2[1] - p1[1])
+        steps = max(1, min(32, int(math.ceil(length / 3.0))))
+        offset = event.globalPosition() - event.position()
+        for index in range(1, steps + 1):
+            t = index / steps
+            t2, t3 = t * t, t * t * t
+            def axis(i):
+                return 0.5 * ((2 * p1[i]) + (-p0[i] + p2[i]) * t
+                              + (2 * p0[i] - 5 * p1[i] + 4 * p2[i] - p3[i]) * t2
+                              + (-p0[i] + 3 * p1[i] - 3 * p2[i] + p3[i]) * t3)
+            point = QPointF(axis(0), axis(1))
+            self._mouseMoveEvent_impl(QMouseEvent(
+                QMouseEvent.Type.MouseMove, point, point + offset, Qt.MouseButton.NoButton,
+                Qt.MouseButton.LeftButton, event.modifiers()))
+
+    def _mousePressEvent_impl(
         self,
         event: QMouseEvent
     ) -> None:
@@ -5556,6 +6801,11 @@ class Canvas(QOpenGLWidget):
             return
 
         if event.button() == Qt.MouseButton.LeftButton:
+            if self.radial_center_placing:
+                self.set_radial_symmetry_center(self.screen_to_image_f(event.position()))
+                self.set_radial_center_placement_mode(False)
+                event.accept()
+                return
             self.live_stroke_preview.press(event.position(), 1.0)
 
         # ── Assistant build mode: left-click places handles ───────────────────
@@ -5576,8 +6826,23 @@ class Canvas(QOpenGLWidget):
         if (event.button() == Qt.MouseButton.RightButton
                 and self.right_click_color_picker
                 and self.tools.current_tool != "zoom_view"):
-            if self.popup_palette is not None:
-                self.popup_palette.show_at(event.globalPosition().toPoint())
+            if self.right_click_palette:
+                if self.popup_palette is None:
+                    from UI.widgets.popup_palette import PopupPalette
+                    self.popup_palette = PopupPalette(self)
+                palette = self.popup_palette
+                # The right-click that closes the palette (a click outside a
+                # Qt popup) also reaches the canvas: it must only close it.
+                # Re-opening there created a popup while the closing one still
+                # held the grab, which Wayland refuses ("Creating a popup with
+                # a parent ... which does not match the current topmost
+                # grabbing popup").  Opening is also deferred one event-loop
+                # turn so any other popup has released its grab first.
+                if palette.isVisible() or palette.closed_recently():
+                    palette.hide()
+                else:
+                    position = event.globalPosition().toPoint()
+                    QTimer.singleShot(0, lambda: palette.show_at(position))
             else:
                 self.sample_composite_color(self.screen_to_image(event.position()))
             event.accept()
@@ -5774,14 +7039,7 @@ class Canvas(QOpenGLWidget):
             layer = self.get_active_layer()
             if layer is None:
                 return
-            self.save_history()
-            self.gradient_drawing = True
-            self.gradient_start = self.screen_to_image(event.position())
-            self.gradient_original = self._clone_raster_native(layer.image)
-            if getattr(layer, "lock_alpha", False):
-                self._alpha_lock_snapshot = layer.image.convertToFormat(
-                    QImage.Format.Format_RGBA8888
-                )
+            self._begin_gradient(self.screen_to_image(event.position()))
             event.accept()
             return
 
@@ -5824,7 +7082,7 @@ class Canvas(QOpenGLWidget):
 
         if (
             event.button() == Qt.MouseButton.LeftButton
-            and self.tools.current_tool in self.tools.selection_tools.SHAPE_TOOLS
+            and self.tools.current_tool in self._gesture_tools()
         ):
             self._begin_selection_gesture(event.position(), modifiers)
             self.update()
@@ -5855,13 +7113,11 @@ class Canvas(QOpenGLWidget):
                 )
             )
 
-            self.save_history()
+            if not self.selection_floating_active:
+                self.save_history()
 
             if not self.document.selection.is_empty():
-                self.selection_moving = True
-                self.selection_move_start = position
-                self.selection_move_original = self._clone_raster_native(layer.image)
-                self.selection_move_original_mask = self._clone_raster_native(self.document.selection.image)
+                self._begin_floating_selection(layer, position)
                 event.accept()
                 return
 
@@ -5918,8 +7174,18 @@ class Canvas(QOpenGLWidget):
             if layer is None:
                 return
 
+            if (self.tools.current_tool in ("brush", "eraser")
+                    and modifiers & Qt.KeyboardModifier.ShiftModifier
+                    and self._last_paint_endpoint is not None):
+                target = self.constrain_assistant_point(self.screen_to_image_f(event.position()), begin=True)
+                self.live_stroke_preview.release()
+                if self._paint_straight_paint_segment(layer, self._last_paint_endpoint, target):
+                    self.update()
+                    event.accept()
+                    return
+
             self.last_point = self.constrain_assistant_point(
-                self.screen_to_image(event.position()), begin=True
+                self.screen_to_image_f(event.position()), begin=True
             )
 
             if self.tools.current_tool == "clone_stamp" and not self._begin_clone_sampling(layer, self.last_point):
@@ -5958,7 +7224,7 @@ class Canvas(QOpenGLWidget):
                         layer.adopt_image_cache(cpp_image)
                     else:
                         self._editing_alpha_mask_image = cpp_image
-                    self.sync_gpu_layer(dirty_rect)
+                    self._sync_brush_regions(self.last_point, self.last_point)
                 else:
                     # CreativeCore is the only raster engine. Do not silently
                     # replace a failed dab with a different Python renderer.
@@ -5971,7 +7237,7 @@ class Canvas(QOpenGLWidget):
 
             event.accept()
 
-    def mouseMoveEvent(
+    def _mouseMoveEvent_impl(
         self,
         event: QMouseEvent
     ) -> None:
@@ -6095,25 +7361,8 @@ class Canvas(QOpenGLWidget):
             return
 
         if self.selection_moving:
-            layer = self.get_active_layer()
-            if layer is None or self.selection_move_original is None:
-                return
             position = self.screen_to_image(event.position())
-            delta = position - self.selection_move_start
-            layer.image = self._clone_raster_native(self.selection_move_original)
-            if self.selection_move_original_mask is not None:
-                self.document.selection.image = self._clone_raster_native(self.selection_move_original_mask)
-                self.document.selection.invalidate()
-            result = self.tools.transform_tool.apply(
-                layer.image,
-                TransformSpec(translate_x=delta.x(), translate_y=delta.y()),
-                self.document.selection,
-            )
-            layer.image = result.image
-            if result.selection_image is not None:
-                self.document.selection.image = result.selection_image
-                self.document.selection.invalidate()
-            self.sync_gpu_layer()
+            self._render_floating_selection(position)
             event.accept()
             return
 
@@ -6149,22 +7398,7 @@ class Canvas(QOpenGLWidget):
             return
 
         if self.gradient_drawing:
-            layer = self.get_active_layer()
-            if layer is None or self.gradient_original is None:
-                return
-            layer.image = self._clone_raster_native(self.gradient_original)
-            color_values = self.brush_settings.snapshot()["color"]
-            self.tools.gradient(
-                layer.image,
-                self.gradient_start,
-                self.screen_to_image(event.position()),
-                QColor(*[int(value) for value in color_values]),
-            )
-            if getattr(layer, "lock_alpha", False):
-                restored = self._restore_alpha_from(layer.image, self.gradient_original)
-                if restored is not None:
-                    layer.image = restored
-            self.sync_gpu_layer()
+            self._queue_gradient(self.screen_to_image(event.position()))
             event.accept()
             return
 
@@ -6194,7 +7428,7 @@ class Canvas(QOpenGLWidget):
 
             if self.gpu_instanced_stroke.active:
                 current_point = self.constrain_assistant_point(
-                    self.screen_to_image(event.position())
+                    self.screen_to_image_f(event.position())
                 )
                 self._queue_instanced_stroke_segment(
                     self.last_point, current_point, 1.0, 1.0
@@ -6212,7 +7446,7 @@ class Canvas(QOpenGLWidget):
                 return
 
             current_point = self.constrain_assistant_point(
-                self.screen_to_image(event.position())
+                self.screen_to_image_f(event.position())
             )
 
             # Compute the dirty rect once — used by both the lock-alpha restore and
@@ -6228,6 +7462,7 @@ class Canvas(QOpenGLWidget):
                     )
             elif self._cpp_active():
                 clone_mode = self.tools.current_tool == "clone_stamp"
+                self._stroke_raw_point = QPointF(current_point)
                 cpp_image = self._cpp_draw_segment(
                     image, self.last_point, current_point, 1.0, 1.0,
                     clone_source=self.clone_source if clone_mode else None,
@@ -6239,7 +7474,7 @@ class Canvas(QOpenGLWidget):
                     active_layer = self.get_active_layer()
                     if active_layer is not None and getattr(active_layer, "lock_alpha", False):
                         self._restore_locked_alpha(cpp_image, dirty_rect)
-                    self.sync_gpu_layer(dirty_rect)
+                    self._sync_brush_regions(self.last_point, current_point)
                 else:
                     # Keep the current image untouched when the native dab
                     # fails; the release path will close the native stroke.
@@ -6262,7 +7497,7 @@ class Canvas(QOpenGLWidget):
 
         event.accept()
 
-    def mouseReleaseEvent(
+    def _mouseReleaseEvent_impl(
         self,
         event: QMouseEvent
     ) -> None:
@@ -6345,10 +7580,7 @@ class Canvas(QOpenGLWidget):
         ):
 
             if self.gradient_drawing:
-                self.gradient_drawing = False
-                self.gradient_original = None
-                self.save_history()
-                self.sync_gpu_layer()
+                self._finish_gradient(self.screen_to_image(event.position()))
                 event.accept()
                 return
 
@@ -6394,11 +7626,9 @@ class Canvas(QOpenGLWidget):
                 return
 
             if self.selection_moving:
-                self.selection_moving = False
-                self.selection_move_original = None
-                self.selection_move_original_mask = None
-                self.save_history()
-                self.sync_gpu_layer()
+                self._finish_floating_selection()
+                # Releasing the pointer only parks the floating selection.
+                # Its history transaction stays open until Enter or Ctrl+D.
                 event.accept()
                 return
 
@@ -6467,11 +7697,15 @@ class Canvas(QOpenGLWidget):
                     self.gpu_instanced_stroke.request_finish()
                 else:
                     if self._cpp_active():
+                        self._finish_stabilizer_tail_sync(float(self.tools.brush.pressure))
                         self._cpp_end_stroke()
                     self.commit_stroke_history()
                     self.canvas_brush_end_stroke()
 
+                self._last_paint_endpoint = QPointF(self.last_point)
+
             self.drawing = False
+            self._stroke_raw_point = None
             self._assistant_angle = None
 
             self.update()
@@ -6517,7 +7751,85 @@ class Canvas(QOpenGLWidget):
     # TABLET XP-PEN
     # =========================================================
 
-    def tabletEvent(
+    # Tools whose strokes follow the pen path and benefit from curve
+    # interpolation between tablet samples.
+    _CURVED_STROKE_TOOLS = frozenset({"brush", "eraser", "smudge", "clone_stamp", "blur", "sharpen"})
+
+    def tabletEvent(self, event: QTabletEvent) -> None:
+        """Feed pen input through a Catmull-Rom interpolator while painting.
+
+        Tablets report a few hundred samples per second; a fast flick can put
+        tens of pixels between two samples, and joining them with straight
+        segments drew visible corners.  Every move is held back by one sample
+        so the curve through the real points can be computed, then replayed
+        to the stroke pipeline as short sub-segments.  Straight input stays
+        exactly straight, and the release always lands on the real end point.
+        """
+        if (not self._replaying_async_tablet
+                and (self._async_finish_requested or self._async_tablet_events
+                     or self._async_tablet_capture_active)):
+            self._queue_tablet_after_async_stroke(event)
+            return
+        kind = event.type()
+        curve = getattr(self, "_pen_curve", None)
+        if kind == QTabletEvent.Type.TabletPress:
+            self._tablet_event_impl(event)
+            self._pen_curve = ([self._pen_sample(event)]
+                               if self.drawing and self.tools.current_tool in self._CURVED_STROKE_TOOLS
+                               else None)
+            return
+        if curve is None or not self.drawing:
+            self._pen_curve = None
+            self._tablet_event_impl(event)
+            return
+        if kind == QTabletEvent.Type.TabletMove:
+            curve.append(self._pen_sample(event))
+            if len(curve) >= 3:
+                p0 = curve[-4] if len(curve) >= 4 else curve[-3]
+                self._replay_pen_curve(event, p0, curve[-3], curve[-2], curve[-1])
+            del curve[:-4]
+            event.accept()
+            return
+        if kind == QTabletEvent.Type.TabletRelease:
+            final = self._pen_sample(event)
+            if len(curve) >= 2:
+                p0 = curve[-3] if len(curve) >= 3 else curve[-2]
+                self._replay_pen_curve(event, p0, curve[-2], curve[-1], final)
+                if (curve[-1][0] - final[0]) ** 2 + (curve[-1][1] - final[1]) ** 2 > 1e-6:
+                    self._replay_pen_curve(event, curve[-2], curve[-1], final, final)
+            self._pen_curve = None
+            self._tablet_event_impl(event)
+            return
+        self._tablet_event_impl(event)
+
+    @staticmethod
+    def _pen_sample(event: QTabletEvent) -> tuple:
+        p = event.position()
+        return (p.x(), p.y(), float(event.pressure()), float(event.xTilt()), float(event.yTilt()))
+
+    def _replay_pen_curve(self, event: QTabletEvent, p0, p1, p2, p3) -> None:
+        """Send the Catmull-Rom span p1→p2 as synthetic move events."""
+        length = math.hypot(p2[0] - p1[0], p2[1] - p1[1])
+        steps = max(1, min(32, int(math.ceil(length / 3.0))))
+        offset = event.globalPosition() - event.position()
+        device = event.pointingDevice()
+        buttons = Qt.MouseButton.LeftButton
+        for index in range(1, steps + 1):
+            t = index / steps
+            t2, t3 = t * t, t * t * t
+            def axis(i):
+                return 0.5 * ((2 * p1[i]) + (-p0[i] + p2[i]) * t
+                              + (2 * p0[i] - 5 * p1[i] + 4 * p2[i] - p3[i]) * t2
+                              + (-p0[i] + 3 * p1[i] - 3 * p2[i] + p3[i]) * t3)
+            point = QPointF(axis(0), axis(1))
+            pressure = p1[2] + (p2[2] - p1[2]) * t
+            synthetic = QTabletEvent(
+                QTabletEvent.Type.TabletMove, device, point, point + offset,
+                pressure, p1[3] + (p2[3] - p1[3]) * t, p1[4] + (p2[4] - p1[4]) * t,
+                0.0, 0.0, 0.0, event.modifiers(), Qt.MouseButton.NoButton, buttons)
+            self._tablet_event_impl(synthetic)
+
+    def _tablet_event_impl(
         self,
         event: QTabletEvent
     ) -> None:
@@ -6528,7 +7840,8 @@ class Canvas(QOpenGLWidget):
 
         self.setFocus()
 
-        pressure_value = event.pressure() if self.tablet_pressure_enabled else 1.0
+        pressure_value = (self.pressure_curve.map(event.pressure())
+                          if self.tablet_pressure_enabled else 1.0)
         current_tilt = (float(event.xTilt()), float(event.yTilt()))
 
         self.cursor_position = (
@@ -6561,7 +7874,7 @@ class Canvas(QOpenGLWidget):
 
         self.cursor_visible = True
 
-        if self.tools.current_tool in self.tools.selection_tools.SHAPE_TOOLS:
+        if self.tools.current_tool in self._gesture_tools():
             event_type = event.type()
             if event_type == QTabletEvent.Type.TabletPress:
                 self._begin_selection_gesture(event.position(), event.modifiers())
@@ -6640,36 +7953,11 @@ class Canvas(QOpenGLWidget):
 
         if self.tools.current_tool == "gradient":
             if event_type == QTabletEvent.Type.TabletPress:
-                layer = self.get_active_layer()
-                if layer is None:
-                    return
-                self.save_history()
-                self.gradient_drawing = True
-                self.gradient_start = position
-                self.gradient_original = self._clone_raster_native(layer.image)
-                if getattr(layer, "lock_alpha", False):
-                    self._alpha_lock_snapshot = layer.image.convertToFormat(
-                        QImage.Format.Format_RGBA8888
-                    )
+                self._begin_gradient(position)
             elif event_type == QTabletEvent.Type.TabletMove and self.gradient_drawing:
-                layer = self.get_active_layer()
-                if layer is not None and self.gradient_original is not None:
-                    layer.image = self._clone_raster_native(self.gradient_original)
-                    color_values = self.brush_settings.snapshot()["color"]
-                    self.tools.gradient(
-                        layer.image, self.gradient_start, position,
-                        QColor(*[int(value) for value in color_values]),
-                    )
-                    if getattr(layer, "lock_alpha", False):
-                        restored = self._restore_alpha_from(layer.image, self.gradient_original)
-                        if restored is not None:
-                            layer.image = restored
-                    self.sync_gpu_layer()
+                self._queue_gradient(position)
             elif event_type == QTabletEvent.Type.TabletRelease and self.gradient_drawing:
-                self.gradient_drawing = False
-                self.gradient_original = None
-                self.save_history()
-                self.sync_gpu_layer()
+                self._finish_gradient(position)
             self.update()
             event.accept()
             return
@@ -6903,7 +8191,18 @@ class Canvas(QOpenGLWidget):
                 if layer is None:
                     return
 
-                self.save_history()
+                if not self.selection_floating_active:
+                    self.save_history()
+
+                if not self.document.selection.is_empty():
+                    # Tablet input must take exactly the same immutable
+                    # floating-selection path as mouse input.  Previously it
+                    # used MoveTool directly, which sampled new pixels as the
+                    # stylus crossed other artwork.
+                    self._begin_floating_selection(layer, position)
+                    self.update()
+                    event.accept()
+                    return
 
                 self.tools.begin_move(
                     position
@@ -6913,6 +8212,12 @@ class Canvas(QOpenGLWidget):
                 event.type()
                 == QTabletEvent.Type.TabletMove
             ):
+
+                if self.selection_moving:
+                    self._render_floating_selection(position)
+                    self.update()
+                    event.accept()
+                    return
 
                 layer = (
                     self.get_active_layer()
@@ -6931,6 +8236,13 @@ class Canvas(QOpenGLWidget):
                 == QTabletEvent.Type.TabletRelease
             ):
 
+                if self.selection_moving:
+                    self._finish_floating_selection()
+                    # Same contract as mouse release: still floating.
+                    self.update()
+                    event.accept()
+                    return
+
                 self.tools.end_move()
 
                 self.save_history()
@@ -6948,7 +8260,8 @@ class Canvas(QOpenGLWidget):
         position = self.screen_to_image(event.position())
         if self.tools.current_tool in ("brush", "eraser", "smudge", "clone_stamp", "blur", "sharpen"):
             position = self.constrain_assistant_point(
-                position, begin=event.type() == QTabletEvent.Type.TabletPress
+                self.screen_to_image_f(event.position()),
+                begin=event.type() == QTabletEvent.Type.TabletPress,
             )
 
         if self.tools.current_tool == "picker":
@@ -6972,6 +8285,16 @@ class Canvas(QOpenGLWidget):
 
             if layer is None:
                 return
+
+            if (self.tools.current_tool in ("brush", "eraser")
+                    and event.modifiers() & Qt.KeyboardModifier.ShiftModifier
+                    and self._last_paint_endpoint is not None):
+                self.live_stroke_preview.release()
+                if self._paint_straight_paint_segment(
+                        layer, self._last_paint_endpoint, position, float(pressure_value)):
+                    self.update()
+                    event.accept()
+                    return
 
             self.last_point = position
             if self.tools.current_tool == "clone_stamp" and not self._begin_clone_sampling(layer, position):
@@ -7022,7 +8345,8 @@ class Canvas(QOpenGLWidget):
                     and float(preview_settings.get("wetness", 0.0) or 0.0) > 0.0
                 )
                 smudge_active = self.tools.current_tool == "smudge"
-                if self.gpu_ready and not wet_mix_active and not smudge_active:
+                if (GPU_SHADER_STROKES_ENABLED and self.gpu_ready
+                        and not wet_mix_active and not smudge_active):
                     self.gpu_instanced_stroke.begin_preview(
                         layer, layer.image, preview_settings, position, pressure,
                         eraser=self.tools.current_tool == "eraser")
@@ -7054,7 +8378,7 @@ class Canvas(QOpenGLWidget):
                         layer.adopt_image_cache(cpp_image)
                     else:
                         self._editing_alpha_mask_image = cpp_image
-                    self.sync_gpu_layer(dirty_rect)
+                    self._sync_brush_regions(position, position)
                 else:
                     self._cpp_end_stroke()
             else:
@@ -7068,13 +8392,6 @@ class Canvas(QOpenGLWidget):
         ):
 
             if not self.drawing:
-                return
-
-            image = (
-                self.get_active_image()
-            )
-
-            if image is None:
                 return
 
             start_pressure, pressure = self._tablet_pressure_pair(pressure_value)
@@ -7094,7 +8411,11 @@ class Canvas(QOpenGLWidget):
                 return
 
             if self._async_brush_handle is not None:
-                self._queue_async_brush(self.last_point, position, start_pressure, pressure,
+                smoothed = getattr(self, "_cpp_smoothed_point", None)
+                previous_draw_point = QPointF(smoothed if smoothed is not None else self.last_point)
+                draw_point = self._cpp_smooth_native_point(position)
+                self._stroke_raw_point = QPointF(position)
+                self._queue_async_brush(previous_draw_point, draw_point, start_pressure, pressure,
                                         self._last_tablet_tilt, current_tilt)
                 if self.gpu_instanced_stroke.active:
                     self._queue_instanced_stroke_segment(self.last_point, position, start_pressure, pressure)
@@ -7103,6 +8424,10 @@ class Canvas(QOpenGLWidget):
                 self.last_point = position
                 self._last_tablet_tilt = current_tilt
                 event.accept()
+                return
+
+            image = self.get_active_image()
+            if image is None:
                 return
 
             # Compute the dirty rect once — reused by lock-alpha restore,
@@ -7118,6 +8443,7 @@ class Canvas(QOpenGLWidget):
                         self.tools.current_tool == "sharpen",
                     )
             elif self._cpp_active():
+                self._stroke_raw_point = QPointF(position)
                 cpp_image = self._cpp_draw_segment(
                     image,
                     self.last_point,
@@ -7135,7 +8461,7 @@ class Canvas(QOpenGLWidget):
                     active_layer = self.get_active_layer()
                     if active_layer is not None and getattr(active_layer, "lock_alpha", False):
                         self._restore_locked_alpha(cpp_image, dirty_rect)
-                    self.sync_gpu_layer(dirty_rect)
+                    self._sync_brush_regions(self.last_point, position)
                 else:
                     self._cpp_end_stroke()
             else:
@@ -7156,7 +8482,9 @@ class Canvas(QOpenGLWidget):
 
             if self.drawing:
                 if self._async_brush_handle is not None:
+                    self._finish_stabilizer_tail_async()
                     self.cpp_brush_library.cs_brush_async_finish(self._async_brush_handle)
+                    self._async_finish_requested = True
                     for _sh, _tsx, _tsy in self._async_symmetry_handles:
                         self.cpp_brush_library.cs_brush_async_finish(_sh)
                     if self.gpu_instanced_stroke.active:
@@ -7165,11 +8493,15 @@ class Canvas(QOpenGLWidget):
                     self.gpu_instanced_stroke.request_finish()
                 else:
                     if self._cpp_active():
+                        self._finish_stabilizer_tail_sync(float(self.tools.brush.pressure))
                         self._cpp_end_stroke()
                     self.commit_stroke_history()
                     self.canvas_brush_end_stroke()
 
+                self._last_paint_endpoint = QPointF(self.last_point)
+
             self.drawing = False
+            self._stroke_raw_point = None
             self._assistant_angle = None
 
             self.update()

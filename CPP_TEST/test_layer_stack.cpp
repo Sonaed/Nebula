@@ -11,20 +11,22 @@ int main()
     std::vector<int> order;
     int active = -1;
 
-    assert(moveLayerStack({-1, 3, 3, -1}, 0, 1, order, active) == false);
-    assert(moveLayerStack({-1, 3, 3, -1}, 3, -1, order, active) == false);
+    assert(moveLayerStack({-1, 3, 3, -1}, 0, 1, order, active));
+    assert((order == std::vector<int>{1, 2, 0, 3}) && active == 2);
+    assert(moveLayerStack({-1, 3, 3, -1}, 3, -1, order, active));
+    assert((order == std::vector<int>{0, 3, 1, 2}) && active == 1);
 
     assert(moveLayerStack({-1, 3, 3, -1}, 1, 1, order, active));
     assert((order == std::vector<int>{0, 2, 1, 3}));
     assert(active == 2);
 
     assert(moveLayerStack({-1, 3, 3, -1}, 2, 1, order, active));
-    assert((order == std::vector<int>{1, 2, 0, 3}));
-    assert(active == 1);
+    assert((order == std::vector<int>{0, 3, 1, 2}));
+    assert(active == 3);
 
     assert(moveLayerStack({-1, 3, 3, -1}, 1, -1, order, active));
-    assert((order == std::vector<int>{0, 3, 1, 2}));
-    assert(active == 2);
+    assert((order == std::vector<int>{1, 2, 0, 3}));
+    assert(active == 0);
 
     assert(!moveLayerStack({4, -1, 4}, 0, 1, order, active));
     assert(!moveLayerStack({1, 2, 1}, 0, 1, order, active));

@@ -43,7 +43,7 @@ typedef struct CsStackOp {
     const uint8_t* mask;     /* optionnel : couverture dans l'octet alpha (index 3) */
     int mask_stride;
     float opacity;
-    int mode;                /* 0..15, comme cs_composite_layers_advanced */
+    int mode;                /* 0..25; IDs match DOCUMENTS/blend_mode_catalog.py */
     int visible;
     int clipping;
     float parameters[11];

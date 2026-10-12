@@ -1,25 +1,19 @@
-"""Color Dock — Krita-grade colour selector.
+"""Color Dock.
 
-Tabs:
-  • Wheel    — HSV colour wheel (existing ColorWheel widget)
-  • HSV      — Hue / Saturation / Value sliders
-  • HSL      — Hue / Saturation / Lightness sliders
-  • RGB      — Red / Green / Blue sliders (8-bit)
-
-Below the tabs:
-  • Foreground / Background swatches (click to swap, X to reset)
-  • Hex input
-  • Recent colours strip (16 swatches)
-  • Named palette strip (custom saved colours)
+Layout, top to bottom:
+  • Foreground / background swatches + hex field
+  • HSV wheel, scaled to the dock width
+  • Channel sliders (TSV / TSL / RVB, chosen with a compact selector)
+  • Recent colours and palette as wrapping swatch grids; both persist
 """
 from __future__ import annotations
 
-from PySide6.QtCore import Qt, QSize, Signal
+from PySide6.QtCore import QSettings, Qt, QSize, Signal
 from PySide6.QtGui import QColor, QFont
 from PySide6.QtWidgets import (
     QColorDialog, QDockWidget, QFrame, QGridLayout, QHBoxLayout,
     QLabel, QLineEdit, QPushButton, QScrollArea, QSizePolicy, QSlider,
-    QTabWidget, QToolButton, QVBoxLayout, QWidget,
+    QComboBox, QStackedWidget, QToolButton, QVBoxLayout, QWidget,
 )
 
 from UI.widgets.color_wheel import ColorWheel
@@ -79,17 +73,21 @@ class _ChannelSlider(QWidget):
 # ─────────────────────────────────────────────────────────────────────────────
 
 class _ColorStrip(QWidget):
-    """Horizontal strip of coloured squares, clickable."""
+    """Wrapping grid of clickable colour swatches (right-click removes)."""
 
     colorPicked = Signal(QColor)
+    colorRemoved = Signal(QColor)
 
-    _SZ = 18
+    _SZ = 20
+    _GAP = 4
 
     def __init__(self, max_colors: int = 20, parent=None) -> None:
         super().__init__(parent)
         self._colors: list[QColor] = []
         self._max = max_colors
-        self.setFixedHeight(self._SZ + 6)
+        policy = QSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
+        policy.setHeightForWidth(True)
+        self.setSizePolicy(policy)
 
     def push(self, color: QColor) -> None:
         c = QColor(color); c.setAlpha(255)
@@ -98,41 +96,71 @@ class _ColorStrip(QWidget):
         self._colors.insert(0, c)
         if len(self._colors) > self._max:
             self._colors = self._colors[:self._max]
-        self.update()
+        self._relayout()
 
     def setColors(self, colors: list[QColor]) -> None:
-        self._colors = list(colors)
-        self.update()
+        self._colors = list(colors)[:self._max]
+        self._relayout()
 
     def colors(self) -> list[QColor]:
         return list(self._colors)
 
+    def _columns(self, width: int) -> int:
+        return max(1, (width + self._GAP) // (self._SZ + self._GAP))
+
+    def hasHeightForWidth(self) -> bool:
+        return True
+
+    def heightForWidth(self, width: int) -> int:
+        rows = max(1, -(-len(self._colors) // self._columns(width)))
+        return rows * (self._SZ + self._GAP)
+
     def sizeHint(self) -> QSize:
-        n = max(1, len(self._colors))
-        return QSize(n * (self._SZ + 2) + 4, self._SZ + 6)
+        return QSize(8 * (self._SZ + self._GAP), self.heightForWidth(max(1, self.width())))
+
+    def _relayout(self) -> None:
+        self.setFixedHeight(self.heightForWidth(max(1, self.width())))
+        self.updateGeometry()
+        self.update()
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        height = self.heightForWidth(self.width())
+        if height != self.height():
+            self.setFixedHeight(height)
+
+    def _rect(self, index: int):
+        from PySide6.QtCore import QRect
+        columns = self._columns(self.width())
+        row, column = divmod(index, columns)
+        return QRect(column * (self._SZ + self._GAP), row * (self._SZ + self._GAP), self._SZ, self._SZ)
+
+    def _index_at(self, point) -> int:
+        for index in range(len(self._colors)):
+            if self._rect(index).contains(point):
+                return index
+        return -1
 
     def paintEvent(self, _ev) -> None:
         from PySide6.QtGui import QPainter, QPen
         p = QPainter(self)
-        x = 3
-        for c in self._colors:
-            p.fillRect(x, 3, self._SZ, self._SZ, c)
-            p.setPen(QPen(QColor(90, 90, 90), 1))
-            p.drawRect(x, 3, self._SZ, self._SZ)
-            x += self._SZ + 2
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        p.setPen(QPen(QColor(COLORS["border"]), 1))
+        for index, c in enumerate(self._colors):
+            p.setBrush(c)
+            p.drawRoundedRect(self._rect(index).adjusted(0, 0, -1, -1), 4, 4)
 
     def mousePressEvent(self, ev) -> None:
-        x = 3
-        pt = ev.position().toPoint()
-        for c in self._colors:
-            if x <= pt.x() <= x + self._SZ and 3 <= pt.y() <= 3 + self._SZ:
-                self.colorPicked.emit(c)
-                return
-            x += self._SZ + 2
-
-    def mouseDoubleClickEvent(self, ev) -> None:
-        # Double-click on empty area adds current FG color (handled by dock)
-        pass
+        index = self._index_at(ev.position().toPoint())
+        if index < 0:
+            return
+        color = self._colors[index]
+        if ev.button() == Qt.MouseButton.RightButton:
+            del self._colors[index]
+            self._relayout()
+            self.colorRemoved.emit(color)
+        else:
+            self.colorPicked.emit(color)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -147,13 +175,19 @@ class _FgBgSwatch(QWidget):
     swapClicked = Signal()
     resetClicked = Signal()
 
-    _SZ = 36
+    # Photoshop-style layout: foreground top-left, background bottom-right,
+    # swap arrows top-right, mini default (black/white) swatches bottom-left.
+    # The old version printed "⇄" and "D/W" as text right where the
+    # background swatch is drawn, so the two overlapped.
+    _SZ = 30
+    _OFFSET = 16
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         self._fg = QColor(0, 0, 0)
         self._bg = QColor(255, 255, 255)
-        self.setFixedSize(self._SZ * 2 + 20, self._SZ + 20)
+        self.setFixedSize(self._SZ + self._OFFSET + 4, self._SZ + self._OFFSET + 4)
+        self.setToolTip("Clic : choisir · flèches : permuter (X) · mini-carrés : noir / blanc (D)")
 
     def setForeground(self, c: QColor) -> None:
         self._fg = QColor(c)
@@ -163,38 +197,61 @@ class _FgBgSwatch(QWidget):
         self._bg = QColor(c)
         self.update()
 
+    def _fg_rect(self):
+        from PySide6.QtCore import QRect
+        return QRect(1, 1, self._SZ, self._SZ)
+
+    def _bg_rect(self):
+        from PySide6.QtCore import QRect
+        return QRect(1 + self._OFFSET, 1 + self._OFFSET, self._SZ, self._SZ)
+
+    def _swap_rect(self):
+        from PySide6.QtCore import QRect
+        return QRect(self._SZ + 3, 1, self._OFFSET - 2, self._OFFSET - 2)
+
+    def _reset_rect(self):
+        from PySide6.QtCore import QRect
+        return QRect(1, self._SZ + 3, self._OFFSET - 2, self._OFFSET - 2)
+
     def paintEvent(self, _ev) -> None:
-        from PySide6.QtGui import QPainter, QPen
+        from PySide6.QtCore import QPointF
+        from PySide6.QtGui import QPainter, QPainterPath, QPen
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
-        # BG swatch (behind)
-        p.setPen(QPen(QColor(120, 120, 120), 1))
-        p.fillRect(self._SZ // 2 + 6, self._SZ // 2 + 6, self._SZ, self._SZ, self._bg)
-        p.drawRect(self._SZ // 2 + 6, self._SZ // 2 + 6, self._SZ, self._SZ)
-        # FG swatch (front)
-        p.fillRect(2, 2, self._SZ, self._SZ, self._fg)
-        p.drawRect(2, 2, self._SZ, self._SZ)
-        # swap arrow hint (small ↔ in corner)
-        p.setPen(QColor(200, 200, 200))
-        p.setFont(QFont("Arial", 9))
-        p.drawText(self._SZ + 8, self._SZ // 2, "⇄")
-        # reset dot (tiny D&W)
-        p.setFont(QFont("Arial", 7))
-        p.drawText(self._SZ + 8, self._SZ // 2 + 12, "D/W")
+        frame = QPen(QColor(COLORS["border"]), 1)
+        for rect, color in ((self._bg_rect(), self._bg), (self._fg_rect(), self._fg)):
+            p.setPen(frame)
+            p.setBrush(color)
+            p.drawRoundedRect(rect.adjusted(0, 0, -1, -1), 4, 4)
+        # Swap: two small curved arrows.
+        p.setPen(QPen(QColor(COLORS["text_muted"]), 1.3))
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        r = self._swap_rect().adjusted(2, 2, -2, -2)
+        path = QPainterPath(QPointF(r.left(), r.bottom() - 3))
+        path.quadTo(QPointF(r.left(), r.top()), QPointF(r.right() - 3, r.top()))
+        p.drawPath(path)
+        p.drawLine(QPointF(r.right() - 5, r.top() - 2), QPointF(r.right() - 3, r.top()))
+        p.drawLine(QPointF(r.right() - 5, r.top() + 2), QPointF(r.right() - 3, r.top()))
+        p.drawLine(QPointF(r.left() - 2, r.bottom() - 5), QPointF(r.left(), r.bottom() - 3))
+        p.drawLine(QPointF(r.left() + 2, r.bottom() - 5), QPointF(r.left(), r.bottom() - 3))
+        # Reset: mini black/white swatches.
+        q = self._reset_rect()
+        size = q.width() * 0.62
+        p.setPen(QPen(QColor(COLORS["border"]), 1))
+        p.setBrush(QColor(255, 255, 255))
+        p.drawRect(int(q.right() - size), int(q.bottom() - size), int(size), int(size))
+        p.setBrush(QColor(0, 0, 0))
+        p.drawRect(q.left(), q.top(), int(size), int(size))
 
     def mousePressEvent(self, ev) -> None:
         pt = ev.position().toPoint()
-        # FG zone
-        if 2 <= pt.x() <= 2 + self._SZ and 2 <= pt.y() <= 2 + self._SZ:
-            self.foregroundClicked.emit()
-        # swap zone
-        elif self._SZ + 6 <= pt.x() <= self._SZ + 22 and 2 <= pt.y() <= 18:
+        if self._swap_rect().contains(pt):
             self.swapClicked.emit()
-        # reset zone
-        elif self._SZ + 6 <= pt.x() <= self._SZ + 22 and 20 <= pt.y() <= 36:
+        elif self._reset_rect().contains(pt):
             self.resetClicked.emit()
-        # BG zone
-        elif self._SZ // 2 + 6 <= pt.x() <= self._SZ * 3 // 2 + 6:
+        elif self._fg_rect().contains(pt):
+            self.foregroundClicked.emit()
+        elif self._bg_rect().contains(pt):
             self.backgroundClicked.emit()
 
 
@@ -208,11 +265,11 @@ class ColorDock(QDockWidget):
     _MAX_RECENT = 16
 
     def __init__(self, canvas, parent=None) -> None:
-        super().__init__("Color", parent)
+        super().__init__("Couleur", parent)
         self.canvas = canvas
         self.setObjectName("ColorDock")
         self.setMinimumWidth(240)
-        install_dock_title(self, "Color")
+        install_dock_title(self, "Couleur")
 
         self._bg_color: QColor = QColor(255, 255, 255)   # background colour
         self._updating = False   # re-entry guard
@@ -229,136 +286,166 @@ class ColorDock(QDockWidget):
         self._fgbg.backgroundClicked.connect(self._choose_bg)
         self._fgbg.swapClicked.connect(self._swap_fg_bg)
         self._fgbg.resetClicked.connect(self._reset_fg_bg)
-        root.addWidget(self._fgbg, alignment=Qt.AlignmentFlag.AlignLeft)
 
-        # ── Tab widget: Wheel / HSV / HSL / RGB ───────────────────────────
-        self._tabs = QTabWidget()
-        self._tabs.setDocumentMode(True)
-        root.addWidget(self._tabs)
 
-        # Tab 1 — Wheel
-        wheel_page = QWidget()
-        wl = QVBoxLayout(wheel_page)
-        wl.setContentsMargins(0, 4, 0, 0)
-        self.wheel = ColorWheel()
-        self.wheel.colorChanged.connect(self._wheel_changed)
-        wl.addWidget(self.wheel, alignment=Qt.AlignmentFlag.AlignHCenter)
-        self._tabs.addTab(wheel_page, "Wheel")
-
-        # Tab 2 — HSV
-        hsv_page = QWidget()
-        hsvl = QVBoxLayout(hsv_page)
-        hsvl.setContentsMargins(2, 6, 2, 0)
-        self._h_slider = _ChannelSlider("H", 359)
-        self._s_slider = _ChannelSlider("S", 255)
-        self._v_slider = _ChannelSlider("V", 255)
-        for s in (self._h_slider, self._s_slider, self._v_slider):
-            s.valueChanged.connect(self._hsv_changed)
-            hsvl.addWidget(s)
-        hsvl.addStretch()
-        self._tabs.addTab(hsv_page, "HSV")
-
-        # Tab 3 — HSL
-        hsl_page = QWidget()
-        hsll = QVBoxLayout(hsl_page)
-        hsll.setContentsMargins(2, 6, 2, 0)
-        self._hl_slider = _ChannelSlider("H", 359)
-        self._sl_slider = _ChannelSlider("S", 255)
-        self._l_slider  = _ChannelSlider("L", 255)
-        for s in (self._hl_slider, self._sl_slider, self._l_slider):
-            s.valueChanged.connect(self._hsl_changed)
-            hsll.addWidget(s)
-        hsll.addStretch()
-        self._tabs.addTab(hsl_page, "HSL")
-
-        # Tab 4 — RGB
-        rgb_page = QWidget()
-        rgbl = QVBoxLayout(rgb_page)
-        rgbl.setContentsMargins(2, 6, 2, 0)
-        self._r_slider = _ChannelSlider("R")
-        self._g_slider = _ChannelSlider("G")
-        self._b_slider = _ChannelSlider("B")
-        for s in (self._r_slider, self._g_slider, self._b_slider):
-            s.valueChanged.connect(self._rgb_changed)
-            rgbl.addWidget(s)
-        rgbl.addStretch()
-        self._tabs.addTab(rgb_page, "RGB")
-
-        # ── Hex input ─────────────────────────────────────────────────────
-        hex_row = QHBoxLayout()
+        # ── Swatches + hex on one row ─────────────────────────────────────
+        top_row = QHBoxLayout()
+        top_row.setContentsMargins(0, 0, 0, 0)
+        top_row.addWidget(self._fgbg)
+        top_row.addStretch()
         hex_lbl = QLabel("#")
-        hex_lbl.setStyleSheet(f"color:{COLORS['text_muted']}; font-size:11px;")
+        hex_lbl.setObjectName("fieldCaption")
         self._hex_edit = QLineEdit()
         self._hex_edit.setMaxLength(6)
-        self._hex_edit.setFixedWidth(72)
-        self._hex_edit.setStyleSheet(
-            f"background:{COLORS['input_bg']}; color:{COLORS['text']}; border:1px solid {COLORS['border']}; "
-            "font-size:11px; padding:1px 3px;")
+        self._hex_edit.setFixedWidth(78)
+        self._hex_edit.setToolTip("Couleur hexadécimale")
         self._hex_edit.editingFinished.connect(self._hex_edited)
-        # preview square
-        self._swatch_btn = QPushButton()
-        self._swatch_btn.setFixedSize(28, 22)
-        self._swatch_btn.clicked.connect(self._choose_fg)
-        hex_row.addWidget(hex_lbl)
-        hex_row.addWidget(self._hex_edit)
-        hex_row.addStretch()
-        hex_row.addWidget(self._swatch_btn)
-        root.addLayout(hex_row)
+        top_row.addWidget(hex_lbl)
+        top_row.addWidget(self._hex_edit)
+        root.addLayout(top_row)
+
+        # ── Wheel: always visible, grows with the dock ────────────────────
+        self.wheel = ColorWheel()
+        self.wheel.setMaximumHeight(320)
+        self.wheel.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        self.wheel.colorChanged.connect(self._wheel_changed)
+        root.addWidget(self.wheel, 3)
+
+        # ── Channel sliders under the wheel ───────────────────────────────
+        mode_row = QHBoxLayout()
+        mode_row.setContentsMargins(0, 2, 0, 0)
+        channels = QLabel("Curseurs")
+        channels.setObjectName("fieldCaption")
+        mode_row.addWidget(channels)
+        mode_row.addStretch()
+        self.mode_selector = QComboBox()
+        self.mode_selector.addItems(("TSV", "TSL", "RVB"))
+        self.mode_selector.setToolTip("Modèle des curseurs : teinte/saturation/valeur, "
+                                      "teinte/saturation/luminosité ou rouge/vert/bleu")
+        mode_row.addWidget(self.mode_selector)
+        root.addLayout(mode_row)
+        self._tabs = QStackedWidget()
+        self.mode_selector.currentIndexChanged.connect(self._tabs.setCurrentIndex)
+        root.addWidget(self._tabs)
+
+        def channel_page(sliders, slot):
+            page = QWidget()
+            layout = QVBoxLayout(page)
+            layout.setContentsMargins(0, 2, 0, 0)
+            layout.setSpacing(2)
+            for slider in sliders:
+                slider.valueChanged.connect(slot)
+                layout.addWidget(slider)
+            self._tabs.addWidget(page)
+
+        self._h_slider = _ChannelSlider("T", 359)
+        self._s_slider = _ChannelSlider("S", 255)
+        self._v_slider = _ChannelSlider("V", 255)
+        channel_page((self._h_slider, self._s_slider, self._v_slider), self._hsv_changed)
+        self._hl_slider = _ChannelSlider("T", 359)
+        self._sl_slider = _ChannelSlider("S", 255)
+        self._l_slider = _ChannelSlider("L", 255)
+        channel_page((self._hl_slider, self._sl_slider, self._l_slider), self._hsl_changed)
+        self._r_slider = _ChannelSlider("R")
+        self._g_slider = _ChannelSlider("V")
+        self._b_slider = _ChannelSlider("B")
+        channel_page((self._r_slider, self._g_slider, self._b_slider), self._rgb_changed)
+
+        # ── Harmony and gamut mask ────────────────────────────────────────
+        settings = QSettings("CreativeSystem", "CreativeSystem")
+        harmony_row = QHBoxLayout()
+        harmony_row.setContentsMargins(0, 6, 0, 0)
+        harmony_label = QLabel("Harmonie")
+        harmony_label.setObjectName("fieldCaption")
+        self.harmony_selector = QComboBox()
+        self.harmony_selector.addItems(list(self.HARMONIES))
+        self.harmony_selector.setToolTip("Couleurs accordées à la couleur actuelle (clic pour l'utiliser)")
+        self.harmony_selector.setCurrentText(str(settings.value("color/harmony", "Aucune")))
+        harmony_row.addWidget(harmony_label)
+        harmony_row.addStretch()
+        harmony_row.addWidget(self.harmony_selector)
+        root.addLayout(harmony_row)
+        self._harmony_strip = _ColorStrip(max_colors=16)
+        self._harmony_strip.colorPicked.connect(self._apply_color)
+        root.addWidget(self._harmony_strip)
+
+        gamut_row = QHBoxLayout()
+        gamut_row.setContentsMargins(0, 2, 0, 0)
+        gamut_label = QLabel("Masque de gamme")
+        gamut_label.setObjectName("fieldCaption")
+        self.gamut_selector = QComboBox()
+        self.gamut_selector.addItems(list(self.GAMUTS))
+        self.gamut_selector.setToolTip("Limite la roue à une famille de teintes, centrée sur la teinte actuelle")
+        self.gamut_recentre = QToolButton()
+        self.gamut_recentre.setText("↻")
+        self.gamut_recentre.setAutoRaise(True)
+        self.gamut_recentre.setToolTip("Recentrer le masque sur la teinte actuelle")
+        gamut_row.addWidget(gamut_label)
+        gamut_row.addStretch()
+        gamut_row.addWidget(self.gamut_selector)
+        gamut_row.addWidget(self.gamut_recentre)
+        root.addLayout(gamut_row)
+        for combo in (self.harmony_selector, self.gamut_selector):
+            combo.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
+            combo.setMinimumContentsLength(9)
+        self._gamut_centre = float(settings.value("color/gamut_centre", 0.0))
+        self.gamut_selector.setCurrentText(str(settings.value("color/gamut", "Aucun")))
+        self.harmony_selector.currentTextChanged.connect(self._harmony_changed)
+        self.gamut_selector.currentTextChanged.connect(lambda _t: self._gamut_changed(recentre=True))
+        self.gamut_recentre.clicked.connect(lambda: self._gamut_changed(recentre=True))
 
         # ── Recent colours ────────────────────────────────────────────────
-        recent_hdr = QHBoxLayout()
-        rl = QLabel("Recent")
-        rl.setStyleSheet("color:#777; font-size:10px;")
-        clear_btn = QToolButton()
-        clear_btn.setText("✕")
-        clear_btn.setFixedSize(16, 16)
-        clear_btn.setStyleSheet("color:#666; border:none; font-size:9px;")
-        clear_btn.clicked.connect(self._clear_recent)
-        recent_hdr.addWidget(rl)
-        recent_hdr.addStretch()
-        recent_hdr.addWidget(clear_btn)
-        root.addLayout(recent_hdr)
+        def caption_row(text: str, button_text: str, tooltip: str, slot) -> QWidget:
+            row = QHBoxLayout()
+            row.setContentsMargins(0, 6, 0, 0)
+            label = QLabel(text)
+            label.setObjectName("fieldCaption")
+            button = QToolButton()
+            button.setText(button_text)
+            button.setToolTip(tooltip)
+            button.setAutoRaise(True)
+            button.setFixedSize(20, 20)
+            button.clicked.connect(slot)
+            row.addWidget(label)
+            row.addStretch()
+            row.addWidget(button)
+            holder = QWidget()
+            holder.setLayout(row)
+            return holder
 
-        scroll_r = QScrollArea()
-        scroll_r.setFixedHeight(28)
-        scroll_r.setWidgetResizable(True)
-        scroll_r.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        scroll_r.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
-        scroll_r.setFrameShape(QFrame.Shape.NoFrame)
+        self._recent_header = caption_row("Récentes", "✕", "Effacer les couleurs récentes", self._clear_recent)
+        root.addWidget(self._recent_header)
         self._recent_strip = _ColorStrip(max_colors=self._MAX_RECENT)
         self._recent_strip.colorPicked.connect(self._apply_color)
-        scroll_r.setWidget(self._recent_strip)
-        root.addWidget(scroll_r)
+        self._recent_strip.colorRemoved.connect(lambda _c: self._save_swatches())
+        root.addWidget(self._recent_strip)
+        self._recent_scroll = self._recent_strip
 
-        # ── Custom palette swatches ───────────────────────────────────────
-        palette_hdr = QHBoxLayout()
-        pl = QLabel("Palette")
-        pl.setStyleSheet("color:#777; font-size:10px;")
-        add_btn = QToolButton()
-        add_btn.setText("+")
-        add_btn.setFixedSize(16, 16)
-        add_btn.setStyleSheet("color:#aaa; border:none; font-size:11px; font-weight:bold;")
-        add_btn.setToolTip("Add current colour to palette")
-        add_btn.clicked.connect(self._add_to_palette)
-        palette_hdr.addWidget(pl)
-        palette_hdr.addStretch()
-        palette_hdr.addWidget(add_btn)
-        root.addLayout(palette_hdr)
-
-        scroll_p = QScrollArea()
-        scroll_p.setFixedHeight(28)
-        scroll_p.setWidgetResizable(True)
-        scroll_p.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        scroll_p.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
-        scroll_p.setFrameShape(QFrame.Shape.NoFrame)
+        # ── Palette (starts with a useful set, persists) ──────────────────
+        root.addWidget(caption_row("Palette", "+", "Ajouter la couleur actuelle (clic droit sur une "
+                                   "pastille pour la retirer)", self._add_to_palette))
         self._palette_strip = _ColorStrip(max_colors=64)
         self._palette_strip.colorPicked.connect(self._apply_color)
-        scroll_p.setWidget(self._palette_strip)
-        root.addWidget(scroll_p)
+        self._palette_strip.colorRemoved.connect(lambda _c: self._save_swatches())
+        root.addWidget(self._palette_strip)
+        self._palette_scroll = self._palette_strip
+        self._load_swatches()
+        self._refresh_swatch_sections()
+        self._gamut_changed(recentre=False)
 
-        self.setWidget(content)
+        root.addStretch(0)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        scroll.setMinimumHeight(240)
+        scroll.setWidget(content)
+        self.setWidget(scroll)
 
         canvas.brush_settings_changed.connect(self.sync_from_canvas)
+        if hasattr(canvas, "color_shortcut_requested"):
+            canvas.color_shortcut_requested.connect(
+                lambda action: self._swap_fg_bg() if action == "swap" else self._reset_fg_bg())
         self.sync_from_canvas(canvas.get_cpp_brush_settings())
 
     # ── sync ──────────────────────────────────────────────────────────────────
@@ -400,8 +487,8 @@ class ColorDock(QDockWidget):
 
         # Hex + swatch
         self._hex_edit.setText(c.name()[1:].upper())
-        self._swatch_btn.setStyleSheet(
-            f"background:{c.name()}; border:1px solid #555;")
+        if hasattr(self, "_harmony_strip"):
+            self._refresh_harmony(c)
         self._fgbg.setForeground(c)
 
     # ── internal signal handlers ──────────────────────────────────────────────
@@ -495,19 +582,112 @@ class ColorDock(QDockWidget):
 
     # ── palette management ────────────────────────────────────────────────────
 
+    # Starter palette (artwork content, not UI chrome): neutrals then hues.
+    # Hue offsets in degrees.
+    HARMONIES = {
+        "Aucune": (),
+        "Complémentaire": (0, 180),
+        "Analogue": (-30, 0, 30),
+        "Triade": (0, 120, 240),
+        "Complémentaires divisées": (0, 150, 210),
+        "Tétrade": (0, 90, 180, 270),
+    }
+    # Allowed hue sectors as (offset°, width°) around the mask centre.
+    GAMUTS = {
+        "Aucun": (),
+        "Complémentaire": ((0, 60), (180, 60)),
+        "Analogue": ((0, 100),),
+        "Triade": ((0, 50), (120, 50), (240, 50)),
+        "Complémentaires divisées": ((0, 50), (150, 40), (210, 40)),
+        "Carré": ((0, 40), (90, 40), (180, 40), (270, 40)),
+    }
+
+    def _current_color(self) -> QColor:
+        rgba = self.canvas.get_cpp_brush_settings().get("color", [0, 0, 0, 255])
+        return QColor(*rgba[:3])
+
+    def _refresh_harmony(self, color: QColor | None = None) -> None:
+        offsets = self.HARMONIES.get(self.harmony_selector.currentText(), ())
+        visible = bool(offsets)
+        self._harmony_strip.setVisible(visible)
+        if not visible:
+            return
+        color = color or self._current_color()
+        hue = color.hsvHue() if color.hsvHue() >= 0 else 0
+        sat, val = color.hsvSaturationF(), color.valueF()
+        sat = max(sat, 0.35)          # a grey has no hue: give the harmony something to show
+        val = max(val, 0.35)
+        swatches = []
+        for offset in offsets:
+            h = (hue + offset) % 360
+            swatches.append(QColor.fromHsvF(h / 360.0, sat, val))
+        for offset in offsets:          # lighter / darker companions
+            h = (hue + offset) % 360
+            swatches.append(QColor.fromHsvF(h / 360.0, max(0.0, sat - 0.25), min(1.0, val + 0.25)))
+            swatches.append(QColor.fromHsvF(h / 360.0, min(1.0, sat + 0.1), max(0.0, val - 0.3)))
+        self._harmony_strip.setColors(swatches)
+
+    def _harmony_changed(self, name: str) -> None:
+        QSettings("CreativeSystem", "CreativeSystem").setValue("color/harmony", name)
+        self._refresh_harmony()
+
+    def _gamut_changed(self, recentre: bool) -> None:
+        name = self.gamut_selector.currentText()
+        if recentre:
+            color = self._current_color()
+            self._gamut_centre = float(max(0, color.hsvHue()))
+        settings = QSettings("CreativeSystem", "CreativeSystem")
+        settings.setValue("color/gamut", name)
+        settings.setValue("color/gamut_centre", self._gamut_centre)
+        sectors = [(self._gamut_centre + offset, width) for offset, width in self.GAMUTS.get(name, ())]
+        self.wheel.set_gamut(sectors)
+        self.gamut_recentre.setEnabled(bool(sectors))
+
+    DEFAULT_PALETTE = (
+        (0, 0, 0), (58, 58, 63), (122, 122, 128), (189, 189, 194), (255, 255, 255), (242, 230, 216), (200, 53, 46), (232, 116, 59), (242, 193, 78), (109, 170, 69), (47, 143, 131), (60, 111, 200), (91, 75, 183), (176, 74, 154), (138, 90, 60), (231, 185, 161),
+    )
+
+    def _load_swatches(self) -> None:
+        settings = QSettings("CreativeSystem", "CreativeSystem")
+        palette = settings.value("color/palette", None)
+        recent = settings.value("color/recent", []) or []
+        if isinstance(palette, str):
+            palette = [palette]
+        if isinstance(recent, str):
+            recent = [recent]
+        colors = ([QColor(*rgb) for rgb in self.DEFAULT_PALETTE] if palette is None
+                  else [QColor(n) for n in palette if QColor(n).isValid()])
+        self._palette_strip.setColors(colors)
+        self._recent_strip.setColors([QColor(n) for n in recent if QColor(n).isValid()])
+
+    def _save_swatches(self) -> None:
+        settings = QSettings("CreativeSystem", "CreativeSystem")
+        settings.setValue("color/palette", [c.name() for c in self._palette_strip.colors()])
+        settings.setValue("color/recent", [c.name() for c in self._recent_strip.colors()])
+
+    def _refresh_swatch_sections(self) -> None:
+        """An empty recent list takes no room."""
+        has_recent = bool(self._recent_strip.colors())
+        self._recent_header.setVisible(has_recent)
+        self._recent_strip.setVisible(has_recent)
+
     def push_recent(self, color: QColor) -> None:
         """Call after each brush stroke ends to record the used colour."""
         self._recent_strip.push(color)
+        self._refresh_swatch_sections()
+        self._save_swatches()
 
     def _clear_recent(self) -> None:
         self._recent_strip.setColors([])
+        self._refresh_swatch_sections()
+        self._save_swatches()
 
     def _add_to_palette(self) -> None:
-        try:
-            rgba = self.canvas.get_cpp_brush_settings()["color"]
-            self._palette_strip.push(QColor(*rgba))
-        except Exception:
-            pass
+        rgba = self.canvas.get_cpp_brush_settings().get("color")
+        if rgba is None or len(rgba) < 3:
+            return
+        self._palette_strip.push(QColor(*rgba[:3]))
+        self._save_swatches()
 
     def choose_color(self) -> None:
         """Legacy compatibility method."""

@@ -24,15 +24,20 @@ class MenuManager:
 
         # FICHIER
         file_menu = menu_bar.addMenu("Fichier")
+        self.menus["file"] = file_menu
 
-        self.actions["new"] = file_menu.addAction("Nouveau")
-        self.actions["open"] = file_menu.addAction("Ouvrir...")
-        self.actions["import_reference"] = file_menu.addAction("Importer une image de référence...")
+        self.actions["new"] = file_menu.addAction("Nouveau…")
+        self.actions["open"] = file_menu.addAction("Ouvrir…")
+        self.actions["import_reference"] = file_menu.addAction("Importer une image de référence…")
 
         file_menu.addSeparator()
 
         self.actions["save"] = file_menu.addAction("Enregistrer")
-        self.actions["save_as"] = file_menu.addAction("Enregistrer sous...")
+        self.actions["save_as"] = file_menu.addAction("Enregistrer sous…")
+        # Exporting is a file operation: it used to be the only real entry of
+        # a near-empty Image menu.
+        self.actions["export"] = file_menu.addAction("Exporter l'image…")
+        self.actions["singularize"] = file_menu.addAction("Singulariser…")
 
         file_menu.addSeparator()
 
@@ -49,121 +54,111 @@ class MenuManager:
         self.actions["undo"] = edit_menu.addAction("Annuler")
         self.actions["redo"] = edit_menu.addAction("Rétablir")
         edit_menu.addSeparator()
+        self.actions["pressure_curve"] = edit_menu.addAction("Courbe de pression du stylet…")
         self.actions["preferences"] = edit_menu.addAction("Préférences…")
-
-        # IMAGE
-        image_menu = menu_bar.addMenu("Image")
-
-        self.actions["export"] = image_menu.addAction(
-            "Exporter l'image..."
-        )
-        self.actions["singularize"] = image_menu.addAction(
-            "Singulariser..."
-        )
 
         # CALQUE
         layer_menu = menu_bar.addMenu("Calque")
+        self.menus["layer"] = layer_menu
 
-        self.actions["add_layer"] = layer_menu.addAction(
-            "Nouveau calque"
-        )
-
-        self.actions["duplicate_layer"] = layer_menu.addAction(
-            "Dupliquer"
-        )
-
-        self.actions["rename_layer"] = layer_menu.addAction(
-            "Renommer"
-        )
-
-        self.actions["toggle_visibility"] = layer_menu.addAction(
-            "Afficher / Masquer"
-        )
-
+        self.actions["add_layer"] = layer_menu.addAction("Nouveau calque")
+        self.actions["duplicate_layer"] = layer_menu.addAction("Dupliquer le calque")
+        self.actions["rename_layer"] = layer_menu.addAction("Renommer…")
+        self.actions["remove_layer"] = layer_menu.addAction("Supprimer le calque")
         layer_menu.addSeparator()
-
-        self.actions["move_layer_up"] = layer_menu.addAction(
-            "Monter"
-        )
-
-        self.actions["move_layer_down"] = layer_menu.addAction(
-            "Descendre"
-        )
-
-        self.actions["remove_layer"] = layer_menu.addAction(
-            "Supprimer"
-        )
-        layer_menu.addSeparator()
-        self.actions["rotate_90"] = layer_menu.addAction("Rotation 90°")
-        self.actions["flip_horizontal"] = layer_menu.addAction("Miroir horizontal")
-        self.actions["flip_vertical"] = layer_menu.addAction("Miroir vertical")
-        self.actions["merge_down"] = layer_menu.addAction("Fusionner vers le bas")
-        self.actions["merge_visible"] = layer_menu.addAction("Fusionner les visibles")
-        self.actions["flatten"] = layer_menu.addAction("Aplatir l'image")
+        self.actions["toggle_visibility"] = layer_menu.addAction("Afficher / masquer")
         self.actions["lock_layer"] = layer_menu.addAction("Verrouiller le calque")
         self.actions["lock_alpha"] = layer_menu.addAction("Verrouiller l'alpha")
+        layer_menu.addSeparator()
+        self.actions["move_layer_up"] = layer_menu.addAction("Monter")
+        self.actions["move_layer_down"] = layer_menu.addAction("Descendre")
+        layer_menu.addSeparator()
+        transform_menu = layer_menu.addMenu("Transformer le calque")
+        self.actions["rotate_90"] = transform_menu.addAction("Rotation 90°")
+        self.actions["flip_horizontal"] = transform_menu.addAction("Miroir horizontal")
+        self.actions["flip_vertical"] = transform_menu.addAction("Miroir vertical")
+        layer_menu.addSeparator()
+        self.actions["merge_down"] = layer_menu.addAction("Fusionner vers le bas")
+        self.actions["merge_visible"] = layer_menu.addAction("Fusionner les calques visibles")
+        self.actions["flatten"] = layer_menu.addAction("Aplatir l'image")
 
-        # OUTILS
-        tools_menu = menu_bar.addMenu("Outils")
-
-        self.actions["brush"] = tools_menu.addAction("Pinceau")
-        self.actions["eraser"] = tools_menu.addAction("Gomme")
-        self.actions["picker"] = tools_menu.addAction("Pipette")
-        self.actions["smudge"] = tools_menu.addAction("Estompe")
-        self.actions["clone_stamp"] = tools_menu.addAction("Tampon de duplication (Maj+clic : source)")
-        self.actions["reference"] = tools_menu.addAction("Images de référence")
-        self.actions["text"] = tools_menu.addAction("Texte")
-        self.actions["blur"] = tools_menu.addAction("Flou")
-        self.actions["sharpen"] = tools_menu.addAction("Netteté")
-        self.actions["bezier"] = tools_menu.addAction("Courbe de Bézier")
-        self.actions["fill"] = tools_menu.addAction("Pot de peinture")
-        self.actions["gradient"] = tools_menu.addAction("Dégradé")
-        self.actions["line"] = tools_menu.addAction("Ligne")
-        self.actions["rectangle"] = tools_menu.addAction("Rectangle")
-        self.actions["ellipse"] = tools_menu.addAction("Ellipse")
-        self.actions["crop"] = tools_menu.addAction("Recadrer")
-        tools_menu.addSeparator()
-        # Outils jusque-là accessibles uniquement par le rail.
-        self.actions["move_tool"] = tools_menu.addAction("Déplacer le calque")
-        self.actions["transform_tool"] = tools_menu.addAction("Transformer")
-        self.actions["select_rectangle_tool"] = tools_menu.addAction("Sélection rectangulaire")
-        self.actions["select_ellipse_tool"] = tools_menu.addAction("Sélection elliptique")
-        self.actions["lasso_tool"] = tools_menu.addAction("Lasso")
-        self.actions["magic_wand_tool"] = tools_menu.addAction("Baguette magique")
-        tools_menu.addSeparator()
-        self.actions["hand"] = tools_menu.addAction("Main")
-        self.actions["zoom_view"] = tools_menu.addAction("Zoom")
-        self.actions["rotate_view"] = tools_menu.addAction("Rotation de vue")
-
+        # SÉLECTION
         select_menu = menu_bar.addMenu("Sélection")
         self.menus["select"] = select_menu
         self.actions["select_all"] = select_menu.addAction("Tout sélectionner")
         self.actions["deselect"] = select_menu.addAction("Désélectionner")
         self.actions["invert_selection"] = select_menu.addAction("Inverser la sélection")
+        select_menu.addSeparator()
         self.actions["feather_selection"] = select_menu.addAction("Contour progressif…")
-        self.actions["expand_selection"] = select_menu.addAction("Développer…")
+        self.actions["expand_selection"] = select_menu.addAction("Dilater…")
         self.actions["contract_selection"] = select_menu.addAction("Contracter…")
+        select_menu.addSeparator()
         self.actions["select_color_range"] = select_menu.addAction("Plage de couleurs…")
-        self.actions["select_alpha"] = select_menu.addAction("Transparence du calque")
+        self.actions["select_alpha"] = select_menu.addAction("Depuis la transparence du calque")
+        select_menu.addSeparator()
+        self.actions["quick_mask"] = select_menu.addAction("Masque rapide (peindre la sélection)")
+        self.actions["quick_mask"].setCheckable(True)
+
+        # OUTILS — same groups and order as the tool rail.
+        tools_menu = menu_bar.addMenu("Outils")
+        self.menus["tools"] = tools_menu
+        self.actions["brush"] = tools_menu.addAction("Pinceau")
+        self.actions["smudge"] = tools_menu.addAction("Estompe")
+        self.actions["blur"] = tools_menu.addAction("Flou")
+        self.actions["sharpen"] = tools_menu.addAction("Netteté")
+        self.actions["clone_stamp"] = tools_menu.addAction("Tampon de duplication")
+        self.actions["clone_stamp"].setStatusTip("Maj+clic : définir la source")
+        self.actions["eraser"] = tools_menu.addAction("Gomme")
+        tools_menu.addSeparator()
+        self.actions["fill"] = tools_menu.addAction("Pot de peinture")
+        self.actions["gradient"] = tools_menu.addAction("Dégradé")
+        self.actions["line"] = tools_menu.addAction("Ligne")
+        self.actions["rectangle"] = tools_menu.addAction("Rectangle")
+        self.actions["ellipse"] = tools_menu.addAction("Ellipse")
+        self.actions["bezier"] = tools_menu.addAction("Courbe de Bézier")
+        self.actions["text"] = tools_menu.addAction("Texte")
+        tools_menu.addSeparator()
+        self.actions["select_rectangle_tool"] = tools_menu.addAction("Sélection rectangulaire")
+        self.actions["select_ellipse_tool"] = tools_menu.addAction("Sélection elliptique")
+        self.actions["lasso_tool"] = tools_menu.addAction("Lasso")
+        self.actions["magic_wand_tool"] = tools_menu.addAction("Baguette magique")
+        tools_menu.addSeparator()
+        self.actions["move_tool"] = tools_menu.addAction("Déplacer le calque")
+        self.actions["transform_tool"] = tools_menu.addAction("Transformer")
+        self.actions["crop"] = tools_menu.addAction("Recadrer")
+        self.actions["reference"] = tools_menu.addAction("Images de référence")
+        self.actions["picker"] = tools_menu.addAction("Pipette")
+        tools_menu.addSeparator()
+        self.actions["hand"] = tools_menu.addAction("Main")
+        self.actions["zoom_view"] = tools_menu.addAction("Zoom")
+        self.actions["rotate_view"] = tools_menu.addAction("Rotation de la vue")
 
         # AFFICHAGE
         view_menu = menu_bar.addMenu("Affichage")
+        self.menus["view"] = view_menu
 
-        self.actions["reset_view"] = view_menu.addAction(
-            "Réinitialiser la vue"
-        )
         self.actions["zoom_100"] = view_menu.addAction("Zoom 100 %")
-        self.actions["fit_canvas"] = view_menu.addAction("Adapter au canvas")
-        self.actions["rotate_canvas"] = view_menu.addAction("Tourner le canvas (+15°)")
+        self.actions["fit_canvas"] = view_menu.addAction("Adapter à la fenêtre")
+        self.actions["reset_view"] = view_menu.addAction("Réinitialiser la vue")
+        view_menu.addSeparator()
+        self.actions["rotate_canvas"] = view_menu.addAction("Tourner la vue de 15°")
         self.actions["reset_canvas_rotation"] = view_menu.addAction("Réinitialiser la rotation")
-        self.actions["flip_canvas_horizontal"] = view_menu.addAction("Miroir de vue horizontal")
-        self.actions["flip_canvas_vertical"] = view_menu.addAction("Miroir de vue vertical")
-        self.actions["canvas_only"] = view_menu.addAction("Mode focus (canvas seul) — Tab")
+        self.actions["flip_canvas_horizontal"] = view_menu.addAction("Miroir de la vue (horizontal)")
+        self.actions["flip_canvas_vertical"] = view_menu.addAction("Miroir de la vue (vertical)")
+        view_menu.addSeparator()
         self.actions["symmetry_horizontal"] = view_menu.addAction("Symétrie horizontale")
         self.actions["symmetry_vertical"] = view_menu.addAction("Symétrie verticale")
-        for key in ("canvas_only", "flip_canvas_horizontal", "flip_canvas_vertical"):
-            self.actions[key].setCheckable(True)
-        view_menu.addSeparator()
+        radial_menu = view_menu.addMenu("Symétrie radiale")
+        for copies in (1, 2, 4, 6, 8, 12):
+            label = "Désactivée" if copies == 1 else f"{copies} copies"
+            action = radial_menu.addAction(label)
+            action.setCheckable(True)
+            self.actions[f"symmetry_radial_{copies}"] = action
+        self.actions["place_radial_center"] = radial_menu.addAction("Placer le centre sur la toile")
+        self.actions["place_radial_center"].setCheckable(True)
+        self.actions["place_radial_center"].setStatusTip("Le prochain clic sur la toile place le centre de symétrie")
+        self.actions["wrap_around"] = view_menu.addAction("Mode tuile (motif sans raccord)")
+        self.actions["wrap_around"].setCheckable(True)
         assistant_menu = view_menu.addMenu("Assistants de dessin")
         self.actions["assistant_ruler"] = assistant_menu.addAction("Règle")
         self.actions["assistant_ellipse"] = assistant_menu.addAction("Ellipse")
@@ -171,53 +166,35 @@ class MenuManager:
         self.actions["assistant_perspective"].setStatusTip(
             "Maj+clic pour placer le point de fuite"
         )
+        view_menu.addSeparator()
+        # "\t" puts the key in the menu's shortcut column instead of the label
+        # (Tab itself is handled by the canvas).
+        self.actions["canvas_only"] = view_menu.addAction("Mode focus\tTab")
+        for key in ("canvas_only", "flip_canvas_horizontal", "flip_canvas_vertical"):
+            self.actions[key].setCheckable(True)
         for key in ("assistant_ruler", "assistant_ellipse", "assistant_perspective",
                     "symmetry_horizontal", "symmetry_vertical"):
             self.actions[key].setCheckable(True)
-
-        view_menu.addSeparator()
-
-        self.actions["show_tools"] = view_menu.addAction(
-            "Afficher le panneau Outils"
-        )
-
-        self.actions["show_layers"] = view_menu.addAction(
-            "Afficher le panneau Calques"
-        )
-
-        self.actions["show_brush"] = view_menu.addAction(
-            "Afficher le panneau Brush Engine"
-        )
-
-        self.actions["show_tools"].setCheckable(True)
-        self.actions["show_layers"].setCheckable(True)
-        self.actions["show_brush"].setCheckable(True)
-
-        self.actions["show_tools"].setChecked(True)
-        self.actions["show_layers"].setChecked(True)
-        self.actions["show_brush"].setChecked(True)
 
         # FENÊTRE
         window_menu = menu_bar.addMenu("Fenêtre")
         self.menus["window"] = window_menu
 
-        self.actions["show_tools_window"] = window_menu.addAction(
-            "Panneau Outils"
-        )
-
-        self.actions["show_layers_window"] = window_menu.addAction(
-            "Panneau Calques"
-        )
-
-        self.actions["show_tools_window"].setCheckable(True)
-        self.actions["show_layers_window"].setCheckable(True)
-
-        self.actions["show_tools_window"].setChecked(True)
-        self.actions["show_layers_window"].setChecked(True)
-        # Ces entrées historiques doublonnent Fenêtre › Panneaux : on les garde
-        # (compatibilité) mais on ne les affiche plus.
-        for key in ("show_tools", "show_layers", "show_brush", "show_tools_window", "show_layers_window"):
-            self.actions[key].setVisible(False)
+        # Historical entries duplicated Fenêtre ▸ Panneaux.  They stay
+        # available as actions (compatibility) but live in no menu, so they
+        # can no longer leave a dangling separator behind.
+        for key, text in (
+            ("show_tools", "Afficher le panneau Outils"),
+            ("show_layers", "Afficher le panneau Calques"),
+            ("show_brush", "Afficher le panneau Pinceau"),
+            ("show_tools_window", "Panneau Outils"),
+            ("show_layers_window", "Panneau Calques"),
+        ):
+            action = QAction(text, self.window)
+            action.setCheckable(True)
+            action.setChecked(True)
+            action.setVisible(False)
+            self.actions[key] = action
 
         # AIDE
         help_menu = menu_bar.addMenu("Aide")

@@ -19,11 +19,7 @@ from DOCUMENTS.adjustments import (AdjustmentLayerSpec, CurvesAdjustment,
                                    apply_adjustment, apply_layer_effects, spec_from_dict)
 
 
-BLEND_MODES = (
-    "normal", "darken", "multiply", "color_burn", "lighten", "screen",
-    "color_dodge", "overlay", "soft_light", "hard_light", "difference",
-    "exclusion", "hue", "saturation", "color", "luminosity",
-)
+from DOCUMENTS.blend_mode_catalog import BLEND_MODES, NATIVE_ONLY_BLEND_MODES
 
 def composition_mode(name: str):
     """Compatibility export for callers that still import the old symbol."""
@@ -74,7 +70,7 @@ def composite_layers(width: int, height: int, layers) -> QImage:
     layers = list(layers)
     if any(bool(getattr(layer, "clipping", False))
            or bool(getattr(layer, "blend_parameters", {}))
-           or str(getattr(layer, "blend_mode", "normal")).lower() in {"hue", "saturation", "color", "luminosity"}
+           or str(getattr(layer, "blend_mode", "normal")).lower() in NATIVE_ONLY_BLEND_MODES
            for layer in layers):
         native = composite_layers_advanced(width, height, layers)
         if native is None:
@@ -409,50 +405,6 @@ def resolve_stack(entries, width: int, height: int) -> list:
     return result
 
 
-def _adjustment_spec(layer):
-    value = getattr(layer, "adjustment", None)
-    if not isinstance(value, dict):
-        return None
-    kind = str(value.get("kind", ""))
-    curves = value.get("curves", {})
-    levels = value.get("levels", {})
-    hsl = value.get("hue_saturation", {})
-    exposure = value.get("exposure", {})
-    vibrance = value.get("vibrance", {})
-    balance = value.get("color_balance", {})
-    parametric = value.get("parametric_curves", {})
-    selective = value.get("selective_color", {})
-    luminosity = value.get("luminosity_mask", {})
-    return AdjustmentLayerSpec(
-        kind=kind,
-        curves=CurvesAdjustment(
-            tuple(tuple(point) for point in curves.get("points", ((0, 0), (255, 255)))),
-            {str(channel): tuple(tuple(point) for point in points)
-             for channel, points in dict(curves.get("channels", {})).items()
-             if str(channel) in {"red", "green", "blue"} and isinstance(points, (list, tuple))},
-        ),
-        levels=LevelsAdjustment(**{key: levels[key] for key in
-                                   ("black", "white", "gamma", "output_black", "output_white")
-                                   if key in levels}),
-        hue_saturation=HueSaturationAdjustment(**{key: hsl[key] for key in
-                                                  ("hue", "saturation", "lightness") if key in hsl}),
-        exposure=ExposureAdjustment(**{key: exposure[key] for key in
-                                       ("exposure", "offset", "gamma") if key in exposure}),
-        vibrance=VibranceAdjustment(**{key: vibrance[key] for key in
-                                       ("vibrance", "saturation") if key in vibrance}),
-        color_balance=ColorBalanceAdjustment(**{
-            key: tuple(balance[key]) for key in ("shadows", "midtones", "highlights")
-            if key in balance and isinstance(balance[key], (list, tuple)) and len(balance[key]) == 3}),
-        threshold=int(value.get("threshold", 128)),
-        posterize=int(value.get("posterize", 4)),
-        parametric_curves=ParametricCurvesAdjustment(**{key: parametric[key] for key in
-            ("black", "shadows", "midtones", "highlights", "white") if key in parametric}),
-        selective_color=SelectiveColorAdjustment(channels={str(key): tuple(values) for key, values in
-            dict(selective.get("channels", {})).items() if isinstance(values, (list, tuple)) and len(values) == 4}),
-        luminosity_mask=LuminosityMaskAdjustment(**{key: luminosity[key] for key in
-            ("mode", "amount", "feather", "invert") if key in luminosity}),
-    )
-
 
 def composite_document_layers(document, rect: QRect | None = None) -> QImage:
     """Composite document layers/groups, optionally limited to one tile rect."""
@@ -588,6 +540,14 @@ def composite_document(document) -> QImage:
     def store_signature(store):
         if store is None:
             return (0, 0, 0)
+        # TileStore increments this counter for every native pixel/residency
+        # mutation.  It lets cache hits avoid an O(number of tiles) ctypes
+        # revision scan -- important for fill and magic-wand sampling on
+        # large, layered documents.  Keep the old exact signature only for
+        # compatibility stores that do not provide the counter.
+        mutation_count = getattr(store, "_mutation_count", None)
+        if mutation_count is not None:
+            return (id(store), int(mutation_count), int(store.allocated_bytes()))
         keys = store.occupied_keys
         return (len(keys), sum(store.tile_revision(*tile) for tile in keys),
                 int(store.allocated_bytes()))
@@ -617,7 +577,9 @@ def composite_document(document) -> QImage:
         (group.id, tuple(group.layer_ids), bool(group.visible), float(group.opacity),
          str(group.blend_mode),
          tuple(sorted((str(key), repr(value))
-                      for key, value in getattr(group, "blend_parameters", {}).items())))
+                      for key, value in getattr(group, "blend_parameters", {}).items())),
+         getattr(group, "parent_id", None), bool(getattr(group, "mask_disabled", False)),
+         store_signature(getattr(group, "alpha_mask_store", None)))
         for group in document.layer_groups
     )
     cache_key = (str(getattr(document, "id", "__anonymous_document__")),
@@ -648,3 +610,116 @@ __all__ = ["resolve_stack", "AdjustmentEntry", "adjustment_entry",
            "BLEND_MODES", "composition_mode", "composite_document",
            "composite_document_layers", "composite_layers", "has_non_normal",
            "apply_clipped_adjustment"]
+
+
+_PREVIEW_CACHE = None
+
+
+def _scaled_store_image(store, width: int, height: int, scale: float,
+                        revealed: bool = False) -> QImage:
+    """Draw a sparse tile store at ``scale`` (masks: absent tiles reveal).
+
+    The reduced image is cached per store with each tile's revision; the next
+    call only redraws tiles whose revision changed, so refreshing an overview
+    after a stroke touches a handful of tiles instead of the whole canvas.
+    """
+    global _PREVIEW_CACHE
+    import weakref
+    from PySide6.QtCore import QRectF
+    if _PREVIEW_CACHE is None:
+        _PREVIEW_CACHE = weakref.WeakKeyDictionary()
+    occupied = store.occupied_keys
+    revisions = store.resident_revisions() or {}
+    if set(revisions) != occupied:          # some tiles swapped out: no revisions
+        revisions = {key: store.tile_revision(*key) for key in occupied}
+    entry = _PREVIEW_CACHE.get(store)
+    if entry is not None and entry[0] == (width, height, revealed):
+        image, previous = entry[1], entry[2]
+        changed = {key for key, revision in revisions.items() if previous.get(key) != revision}
+        removed = set(previous) - occupied
+    else:
+        image = QImage(width, height, QImage.Format.Format_ARGB32_Premultiplied)
+        image.fill(QColor(255, 255, 255, 255) if revealed else QColor(0, 0, 0, 0))
+        changed, removed = set(occupied), set()
+    if changed or removed:
+        painter = QPainter(image)
+        painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
+        painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_Source)
+        empty = QColor(255, 255, 255, 255) if revealed else QColor(0, 0, 0, 0)
+        for tx, ty in removed:
+            rect = store.tile_rect(tx, ty)
+            painter.fillRect(QRectF(rect.x() * scale, rect.y() * scale,
+                                    rect.width() * scale, rect.height() * scale), empty)
+        for tx, ty in changed:
+            rect = store.tile_rect(tx, ty)
+            painter.drawImage(QRectF(rect.x() * scale, rect.y() * scale,
+                                     rect.width() * scale, rect.height() * scale),
+                              store.tile(tx, ty))
+        painter.end()
+    _PREVIEW_CACHE[store] = ((width, height, revealed), image, revisions)
+    return image.convertToFormat(QImage.Format.Format_ARGB32)
+
+
+def composite_preview(document, max_side: int = 512) -> QImage:
+    """Small composite for overviews (navigator), without a full-size render.
+
+    Every layer and mask is reduced first, then the reduced stack is blended
+    with the normal compositor: on an 8K canvas this is tens of milliseconds
+    instead of seconds.  Layer effects are applied at the reduced size, which
+    is close enough for an overview.
+    """
+    from math import ceil
+    from PySide6.QtCore import Qt
+    from DOCUMENTS.document import Document
+    from DOCUMENTS.layer import Layer
+    from DOCUMENTS.layer_group import LayerGroup
+
+    scale = min(1.0, max(1, int(max_side)) / max(1, document.width, document.height))
+    if scale >= 1.0:
+        return composite_document(document)
+    width = max(1, ceil(document.width * scale))
+    height = max(1, ceil(document.height * scale))
+    proxy = Document(width, height, getattr(document, "dpi", 72), None)
+    layers = []
+    for layer in document.layers:
+        small = Layer(layer.name, width, height)
+        small.id = layer.id
+        for name in ("visible", "opacity", "blend_mode", "clipping", "layer_kind",
+                     "adjustment", "mask_disabled", "layer_effects", "psd_effects"):
+            if hasattr(layer, name):
+                value = getattr(layer, name)
+                setattr(small, name, list(value) if isinstance(value, list) else value)
+        small.blend_parameters = dict(getattr(layer, "blend_parameters", {}) or {})
+        layer.commit_image_cache()
+        if getattr(layer, "transform_state", None):
+            small.image = layer.render_image().scaled(
+                width, height, Qt.AspectRatioMode.IgnoreAspectRatio,
+                Qt.TransformationMode.SmoothTransformation).convertToFormat(QImage.Format.Format_ARGB32)
+        else:
+            small.image = _scaled_store_image(layer.tile_store, width, height, scale)
+        if getattr(layer, "alpha_mask_store", None) is not None:
+            small.set_alpha_mask(_scaled_store_image(layer.alpha_mask_store, width, height,
+                                                     scale, revealed=True))
+        layers.append(small)
+    groups = []
+    for group in document.layer_groups:
+        small = LayerGroup(name=group.name, id=group.id, layer_ids=list(group.layer_ids),
+                           parent_id=group.parent_id, visible=group.visible,
+                           opacity=group.opacity, blend_mode=group.blend_mode,
+                           blend_parameters=dict(group.blend_parameters),
+                           mask_disabled=bool(getattr(group, "mask_disabled", False)))
+        if getattr(group, "alpha_mask_store", None) is not None:
+            small.set_alpha_mask(_scaled_store_image(group.alpha_mask_store, width, height,
+                                                     scale, revealed=True))
+        groups.append(small)
+    proxy.layers = layers
+    proxy.layer_groups = groups
+    try:
+        return composite_document_layers(proxy)
+    finally:
+        for layer in layers:
+            layer.tile_store.close()
+            if layer.alpha_mask_store is not None:
+                layer.alpha_mask_store.close()
+        for group in groups:
+            group.set_alpha_mask(None)

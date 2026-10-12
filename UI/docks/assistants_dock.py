@@ -8,11 +8,18 @@ from __future__ import annotations
 
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
-    QDockWidget, QWidget, QVBoxLayout, QHBoxLayout,
-    QPushButton, QListWidget, QListWidgetItem, QLabel,
-    QCheckBox, QComboBox, QToolButton,
+    QDockWidget,
+    QWidget,
+    QVBoxLayout,
+    QHBoxLayout,
+    QPushButton,
+    QListWidget,
+    QListWidgetItem,
+    QLabel,
+    QCheckBox,
+    QComboBox,
 )
-from PySide6.QtGui import QIcon, QColor
+from PySide6.QtGui import QColor
 
 from CANVAS.canvas_assistants import AssistantManager
 
@@ -102,16 +109,6 @@ class AssistantsDock(QDockWidget):
 
     def refresh(self) -> None:
         self._refresh_list()
-
-    def set_building_hint(self, kind: str, handles_placed: int, handles_needed: int) -> None:
-        if handles_placed >= handles_needed:
-            self._hint.setText("✅ Assistant placé — cliquer pour peindre.")
-        else:
-            remaining = handles_needed - handles_placed
-            self._hint.setText(
-                f"Cliquer pour placer le point {handles_placed + 1}/{handles_needed}…"
-                f" ({remaining} restant{'s' if remaining > 1 else ''})"
-            )
 
     # ── internals ─────────────────────────────────────────────────────────────
 

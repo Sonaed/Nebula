@@ -14,7 +14,9 @@ class BrushPresetV2Tests(unittest.TestCase):
             names = manager.list_presets()
             self.assertEqual(len(names), 34)
             self.assertEqual(set(manager.categories()), {"01_Sketching", "02_Inking", "03_Painting", "04_Airbrush", "05_Texture", "06_Erasers", "07_Utility"})
-            self.assertEqual({name for name in names if manager.metadata(name)["favorite"]}, {"Pencil HB", "Ink Pen", "Round Soft", "Oil Round", "Airbrush Soft", "Eraser Soft"})
+            self.assertEqual({name for name in names if manager.metadata(name)["favorite"]}, {"Crayon HB", "Stylo encre", "Rond doux", "Huile ronde", "Aérographe doux", "Gomme douce"})
+            # English names keep working as aliases.
+            self.assertEqual(manager.load("Round Soft")["name"], "Rond doux")
             self.assertFalse(manager.load("Pixel")["antialiasing"])
             self.assertEqual(manager.load("G-Pen")["pressureCurve"], 2)
             duplicate = manager.duplicate("Round Soft", "My Soft Brush")

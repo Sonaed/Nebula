@@ -40,10 +40,17 @@ class _FrameTileState:
     dans la synchronisation GPU, à chaque image, y compris pour les tuiles vides.
     """
 
-    __slots__ = ("store", "resident", "swapped", "_revisions", "signature")
+    __slots__ = ("store", "resident", "swapped", "_revisions", "signature",
+                 "mutation", "reusable")
 
     def __init__(self, store) -> None:
         self.store = store
+        self.mutation = getattr(store, "_mutation_count", None)
+        # Scratch workers can be inside a native load while the UI captures
+        # this snapshot. Never carry such an intermediate state to a later
+        # frame, even if its mutation counter was already advanced.
+        self.reusable = (self.mutation is not None
+                         and not getattr(store, "_pending_loads", None))
         # Un seul appel natif renvoie clés ET révisions de toutes les tuiles
         # résidentes (avant : un appel ctypes par tuile et par image).  Bridge
         # ancien ou magasin sans cette méthode : repli sur la lecture tuile à tuile.
@@ -128,12 +135,13 @@ class CanvasGPURenderer:
         # thousands of cached-tile entries (self.textures alone can hold up to
         # max_cached_tiles) on every single frame, even while idle.
         self._prune_last_live_keys: frozenset[str] | None = None
-        self._opaque_tile_cache: dict[tuple[int, int, int], tuple[int, bool]] = {}
+        self._opaque_tile_cache: dict[tuple[str, int, int], tuple[object, bool]] = {}
         # calque -> (signature des révisions, colonnes, lignes, tuiles opaques) : tant que
         # le calque ne change pas, l'occlusion ne coûte plus qu'une comparaison de dict.
-        self._opaque_set_cache: dict[str, tuple[dict, int, int, frozenset]] = {}
+        self._opaque_set_cache: dict[str, tuple[dict, int, int, frozenset, object, object]] = {}
         self._frame_active = False
         self._frame_tiles: dict[int, _FrameTileState] = {}
+        self._previous_frame_tiles: dict[int, _FrameTileState] = {}
         # Passe de dessin en cache par calque : (texture, matrice) de chaque tuile.  Tant
         # que ni la vue ni les révisions ne changent, l'image suivante ne fait que
         # rejouer les appels de dessin ; pendant un trait, seules les tuiles dont la
@@ -287,15 +295,6 @@ class CanvasGPURenderer:
             atlas_bytes = max(0, int(self.atlas_width)) * max(0, int(self.atlas_height)) * 4
         return tile_bytes + atlas_bytes
 
-    @staticmethod
-    def compressed_texture_support() -> dict[str, bool]:
-        """Report BC4/BC7 support; compression remains opt-in per driver."""
-        ctx = QOpenGLContext.currentContext()
-        exts = set(ctx.extensions()) if ctx is not None else set()
-        return {
-            "bc4": b"GL_EXT_texture_compression_rgtc" in exts or b"GL_ARB_texture_compression_rgtc" in exts,
-            "bc7": b"GL_EXT_texture_compression_s3tc" in exts or b"GL_ARB_texture_compression_bptc" in exts,
-        }
 
     @staticmethod
     def bounded_dirty_rect(rect: QRect | None, width: int, height: int) -> QRect:
@@ -350,6 +349,9 @@ class CanvasGPURenderer:
 
     def end_frame(self) -> None:
         self._frame_active = False
+        # Retain only stores actually used in the latest frame. This bounds
+        # the index cache and releases references after document switches.
+        self._previous_frame_tiles = self._frame_tiles
         self._frame_tiles = {}
 
     def _frame_tile_state(self, store) -> _FrameTileState | None:
@@ -358,7 +360,14 @@ class CanvasGPURenderer:
             return None
         state = self._frame_tiles.get(id(store))
         if state is None:
-            state = self._frame_tiles[id(store)] = _FrameTileState(store)
+            previous = self._previous_frame_tiles.get(id(store))
+            if (previous is not None and previous.store is store and previous.reusable
+                    and previous.mutation == getattr(store, "_mutation_count", None)
+                    and not getattr(store, "_pending_loads", None)):
+                state = previous
+            else:
+                state = _FrameTileState(store)
+            self._frame_tiles[id(store)] = state
         return state
 
     @staticmethod
@@ -367,10 +376,14 @@ class CanvasGPURenderer:
             return False
         if not image.hasAlphaChannel():
             return True
-        rgba = image if image.format() == QImage.Format.Format_RGBA8888 else image.convertToFormat(
-            QImage.Format.Format_RGBA8888
-        )
-        raw = memoryview(rgba.constBits()).cast("B")
+        # Both formats keep alpha in byte 3 on the supported little-endian
+        # desktops. Avoiding convertToFormat here matters: scanning every tile
+        # of an 8K opaque PSD otherwise copied hundreds of MiB just to inspect
+        # the alpha byte.
+        source = image if image.format() in (
+            QImage.Format.Format_ARGB32, QImage.Format.Format_RGBA8888,
+        ) else image.convertToFormat(QImage.Format.Format_RGBA8888)
+        raw = memoryview(source.constBits()).cast("B")
         alpha = raw[3::4]
         # Comparaison en C : la version « all(value == 255 ... ) » parcourait chaque
         # octet en Python (0,7 ms par tuile de 64 x 64, 8,8 millions d'itérations
@@ -378,7 +391,9 @@ class CanvasGPURenderer:
         return alpha.tobytes().count(b"\xff") == len(alpha)
 
     def _layer_opaque_tiles(self, layer, document_width: int,
-                            document_height: int) -> set[tuple[int, int]]:
+                            document_height: int,
+                            visible_tiles: frozenset[tuple[int, int]] | None = None,
+                            ) -> set[tuple[int, int]]:
         """Return fully opaque resident tiles; unknown/swapped tiles stay conservative."""
         store = getattr(layer, "tile_store", None)
         tile_size = getattr(store, "tile_size", 64)
@@ -387,16 +402,35 @@ class CanvasGPURenderer:
         opaque = set()
         image = None
         layer_id = str(getattr(layer, "id", "__anonymous__"))
+        source_id = getattr(store, "id", id(store))
         frame = self._frame_tile_state(store)
         signature = frame.signature if frame is not None else None
         if signature is not None:
             hit = self._opaque_set_cache.get(layer_id)
-            if hit is not None and hit[1] == columns and hit[2] == rows and hit[0] == signature:
+            if (hit is not None and hit[1] == columns and hit[2] == rows
+                    and hit[4] == visible_tiles and hit[5] == source_id
+                    and hit[0] == signature):
                 return hit[3]  # lecture seule : l'appelant ne fait que l'unir à d'autres
+        native_opaque = (store.resident_opaque_keys() if store is not None
+                         and hasattr(store, "resident_opaque_keys") else None)
+        if native_opaque is not None:
+            opaque = {(tx, ty) for tx, ty in native_opaque
+                      if 0 <= tx < columns and 0 <= ty < rows
+                      and (visible_tiles is None or (tx, ty) in visible_tiles)}
+            if signature is not None:
+                opaque = frozenset(opaque)
+                self._opaque_set_cache[layer_id] = (
+                    signature, columns, rows, opaque, visible_tiles, source_id)
+            return opaque
         if frame is not None:
             # Seules les tuiles résidentes peuvent être opaques : on ne parcourt
             # plus toute la grille du document, et l'état vient de l'instantané.
-            candidates = ((tx, ty) for tx, ty in frame.resident
+            resident = (frame.resident if visible_tiles is None
+                        else frame.resident.intersection(visible_tiles))
+            candidates = ((tx, ty) for tx, ty in resident
+                          if 0 <= tx < columns and 0 <= ty < rows)
+        elif visible_tiles is not None:
+            candidates = ((tx, ty) for tx, ty in visible_tiles
                           if 0 <= tx < columns and 0 <= ty < rows)
         else:
             candidates = ((tx, ty) for ty in range(rows) for tx in range(columns))
@@ -411,6 +445,7 @@ class CanvasGPURenderer:
             else:
                 image = layer.image
                 revision = int(image.cacheKey())
+            revision = (source_id, revision)
             cached = self._opaque_tile_cache.get(key)
             if cached is not None and cached[0] == revision:
                 is_opaque = cached[1]
@@ -425,15 +460,34 @@ class CanvasGPURenderer:
                 opaque.add((tx, ty))
         if signature is not None:
             opaque = frozenset(opaque)
-            self._opaque_set_cache[layer_id] = (signature, columns, rows, opaque)
+            self._opaque_set_cache[layer_id] = (
+                signature, columns, rows, opaque, visible_tiles, source_id)
         return opaque
 
     def compute_occlusion(self, layers, document_width: int,
-                          document_height: int) -> dict[object, set[tuple[int, int]]]:
-        """Collect tiles covered by eligible opaque layers above each layer."""
+                          document_height: int, *, visible_tiles=None,
+                          ) -> dict[object, set[tuple[int, int]]]:
+        """Collect opaque coverage only where it can affect the current view.
+
+        A missing viewport preserves the full-document compatibility API.
+        Masked layers stay conservative: their unmasked pixel alpha cannot
+        establish coverage of the lower layers.
+        """
+        if visible_tiles is not None:
+            visible_tiles = frozenset(visible_tiles)
         covered: set[tuple[int, int]] = set()
         occluded: dict[int, set[tuple[int, int]]] = {}
-        for layer in reversed(layers):
+        for index in range(len(layers) - 1, -1, -1):
+            layer = layers[index]
+            # Once every requested tile is hidden, lower layers cannot affect
+            # this viewport. Filling their lookup entries directly avoids both
+            # alpha scans and thousands of short-lived set copies on dense PSDs.
+            if visible_tiles is not None and covered.issuperset(visible_tiles):
+                for lower in layers[:index + 1]:
+                    lower_key = str(getattr(lower, "id", "__anonymous__"))
+                    occluded[lower_key] = set(covered)
+                    occluded[id(lower)] = occluded[lower_key]
+                break
             stable_key = str(getattr(layer, "id", "__anonymous__"))
             covered_for_layer = set(covered)
             occluded[stable_key] = covered_for_layer
@@ -446,9 +500,12 @@ class CanvasGPURenderer:
                 and not getattr(layer, "blend_parameters", {})
                 and float(getattr(layer, "opacity", 1.0)) >= 1.0
                 and not bool(getattr(layer, "clipping", False))
+                and (getattr(layer, "alpha_mask_store", None) is None
+                     or bool(getattr(layer, "mask_disabled", False)))
             )
             if eligible:
-                covered.update(self._layer_opaque_tiles(layer, document_width, document_height))
+                covered.update(self._layer_opaque_tiles(
+                    layer, document_width, document_height, visible_tiles))
         return occluded
 
     # ==========================================================
@@ -1443,6 +1500,11 @@ class CanvasGPURenderer:
     # ==========================================================
 
     def cleanup(self) -> None:
+        # CPU snapshots do not require a current GL context and can hold the
+        # last document's native stores alive. Release them even after the
+        # window's GL context has already gone away.
+        self._frame_tiles.clear()
+        self._previous_frame_tiles.clear()
 
         context = (
             QOpenGLContext.currentContext()
@@ -1518,22 +1580,3 @@ class CanvasGPURenderer:
             self.blitter = None
 
         self.initialized = False
-    def upload_compressed_atlas_region(self, data, rect, fmt) -> bool:
-        if not self.atlas_gpu_ready or fmt not in ("BC4", "BC7"):
-            return False
-        support = self.compressed_texture_support()
-        if not support[fmt.lower()]: return False
-        if not self._ensure_gl_upload_function(): return False
-        lib = self._gl_library
-        if not hasattr(lib, "glCompressedTexSubImage2D"):
-            try:
-                lib.glCompressedTexSubImage2D = getattr(__import__('ctypes').CDLL(__import__('ctypes').util.find_library('GL')), 'glCompressedTexSubImage2D')
-            except Exception: return False
-        block = 8 if fmt == "BC4" else 16
-        w,h=rect.w,rect.h; expected=((w+3)//4)*((h+3)//4)*block
-        if len(data)!=expected: return False
-        internal = 0x8DBB if fmt == "BC4" else 0x8E8C
-        self.atlas_texture.bind()
-        try: lib.glCompressedTexSubImage2D(0x0DE1,0,rect.x,rect.y,w,h,internal,len(data),data)
-        finally: self.atlas_texture.release()
-        return True

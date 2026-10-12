@@ -1,14 +1,18 @@
 from DOCUMENTS.document import Document
+from DOCUMENTS.blend_mode_catalog import BLEND_MODE_IDS, NATIVE_ONLY_BLEND_MODES
 from DOCUMENTS.layer import Layer
 import math
 from DOCUMENTS.blend_modes import (composite_document, resolve_stack,
                                    composite_document_layers, composite_layers)
-from CORE.native_bridge import (composite_layer_in_place, move_layer_stack,
-                                plan_visible_layer_merge_groups,
-                                plan_layer_group_cleanup,
-                                remove_layer_stack, update_layer_property,
-                                apply_alpha_mask_native,
-                                native_selection_invert)
+from CORE.native_bridge import (
+    composite_layer_in_place,
+    move_layer_stack,
+    plan_visible_layer_merge_groups,
+    plan_layer_group_cleanup,
+    remove_layer_stack,
+    apply_alpha_mask_native,
+    native_selection_invert,
+)
 from types import SimpleNamespace
 
 
@@ -426,8 +430,8 @@ class LayerManager:
         upper.commit_image_cache(release=True)
         lower.commit_image_cache(release=True)
         if (upper.clipping or upper.blend_parameters or lower.blend_parameters
-                or upper.blend_mode in {"hue", "saturation", "color", "luminosity"}
-                or lower.blend_mode in {"hue", "saturation", "color", "luminosity"}):
+                or upper.blend_mode in NATIVE_ONLY_BLEND_MODES
+                or lower.blend_mode in NATIVE_ONLY_BLEND_MODES):
             # Parameterized blending can change the lower layer's own pixels,
             # so compose the union of occupied tiles against transparent local
             # tiles rather than materializing a full-canvas intermediate.
@@ -458,18 +462,23 @@ class LayerManager:
         else:
             # For standard modes only source-occupied tiles can change. A
             # sparse batch keeps untouched receiver tiles resident/scratch as-is.
-            writes = []
-            for tx, ty in sorted(upper.tile_store.occupied_keys):
-                rect = lower.tile_store.tile_rect(tx, ty)
-                target = lower.tile_store.tile(tx, ty)
-                source = upper.tile_store.tile(tx, ty)
-                composited = composite_layer_in_place(
-                    target, source, upper.opacity, upper.blend_mode
-                )
-                if composited is None or not composited:
-                    raise RuntimeError("CreativeCore is required to merge layers")
-                writes.append((tx, ty, target))
-            if not lower.tile_store.set_tiles_batch(writes):
+            mode = BLEND_MODE_IDS.get(upper.blend_mode)
+            merged = (lower.tile_store.composite_from_store(
+                upper.tile_store, upper.opacity, mode) if mode is not None else None)
+            if merged is None:
+                # Compatibility path for a pre-batch CreativeCore library.
+                writes = []
+                for tx, ty in sorted(upper.tile_store.occupied_keys):
+                    target = lower.tile_store.tile(tx, ty)
+                    source = upper.tile_store.tile(tx, ty)
+                    composited = composite_layer_in_place(
+                        target, source, upper.opacity, upper.blend_mode
+                    )
+                    if composited is None or not composited:
+                        raise RuntimeError("CreativeCore is required to merge layers")
+                    writes.append((tx, ty, target))
+                merged = lower.tile_store.set_tiles_batch(writes)
+            if not merged:
                 return False
             lower.discard_image_cache()
         lower.name = f"{lower.name} + {upper.name}"
@@ -690,4 +699,49 @@ class LayerManager:
         if coverage is None or native_selection_invert(coverage) is False:
             return False
         layer.alpha_mask_store.write_image(coverage)
+        return True
+
+    # ------------------------------------------------------------------
+    # Folder (group) masks
+    # ------------------------------------------------------------------
+
+    def _group(self, group_id: str):
+        return next((g for g in self.document.layer_groups if g.id == group_id), None)
+
+    def add_group_mask(self, group_id: str) -> bool:
+        """Give a folder a white (fully revealing) mask."""
+        group = self._group(group_id)
+        if group is None or group.alpha_mask_store is not None:
+            return False
+        group.ensure_alpha_mask(self.document.width, self.document.height)
+        group.mask_disabled = False
+        group.invalidate()
+        return True
+
+    def remove_group_mask(self, group_id: str) -> bool:
+        group = self._group(group_id)
+        if group is None or group.alpha_mask_store is None:
+            return False
+        group.set_alpha_mask(None)
+        group.mask_disabled = False
+        group.invalidate()
+        return True
+
+    def toggle_group_mask_disabled(self, group_id: str) -> bool:
+        group = self._group(group_id)
+        if group is None or group.alpha_mask_store is None:
+            return False
+        group.mask_disabled = not group.mask_disabled
+        group.invalidate()
+        return True
+
+    def invert_group_mask(self, group_id: str) -> bool:
+        group = self._group(group_id)
+        if group is None or group.alpha_mask_store is None:
+            return False
+        coverage = group.alpha_mask_coverage()
+        if coverage is None or native_selection_invert(coverage) is False:
+            return False
+        group.alpha_mask_store.write_image(coverage)
+        group.invalidate()
         return True

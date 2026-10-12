@@ -1,0 +1,38 @@
+Sun Oct  4 15:49:41 2026    /tmp/nebula-psd-after.prof
+
+         560777 function calls (550224 primitive calls) in 12.088 seconds
+
+   Ordered by: cumulative time
+   List reduced from 1739 to 30 due to restriction <30>
+
+   ncalls  tottime  percall  cumtime  percall filename:lineno(function)
+    194/1    0.008    0.000   12.092   12.092 {built-in method builtins.exec}
+        1    0.000    0.000   12.092   12.092 qualify_real_psd.py:1(<module>)
+        1    0.002    0.002   11.800   11.800 qualify_real_psd.py:18(main)
+        4    0.000    0.000   11.489    2.872 qualify_real_psd.py:15(timed)
+        1    0.000    0.000   10.419   10.419 qualify_real_psd.py:27(<lambda>)
+        1    0.000    0.000   10.419   10.419 format_psd.py:124(_load_native)
+        1    0.000    0.000   10.396   10.396 format_psd.py:136(_import_native_document)
+      4/1    0.001    0.000    7.046    7.046 format_psd.py:217(_import_children)
+       43    0.000    0.000    6.432    0.150 psd_reader.py:102(decode_pixels)
+       43    0.038    0.001    6.432    0.150 psd_reader.py:866(load)
+       43    0.002    0.000    6.394    0.149 psd_reader.py:881(_decode_layer_pixels)
+       88    0.000    0.000    4.000    0.045 tile_store.py:132(counted)
+       43    0.002    0.000    3.933    0.091 format_psd.py:417(_write_pixels)
+       43    0.000    0.000    3.930    0.091 tile_store.py:504(import_rgba)
+       43    3.926    0.091    3.928    0.091 native_bridge.py:688(import_rgba)
+      171    0.186    0.001    3.279    0.019 psd_reader.py:314(_decode_channel)
+     4278    2.504    0.001    3.268    0.001 psd_reader.py:207(unpackbits)
+       66    0.002    0.000    3.206    0.049 psd_reader.py:907(_assemble_rgba)
+       66    3.200    0.048    3.201    0.049 _shape_base_impl.py:655(dstack)
+       32    0.001    0.000    2.742    0.086 format_psd.py:294(_import_leaf)
+     4278    0.759    0.000    0.761    0.000 __init__.py:52(create_string_buffer)
+        1    0.001    0.001    0.639    0.639 qualify_real_psd.py:24(<lambda>)
+        1    0.000    0.000    0.638    0.638 psd_import.py:222(build_overview)
+      353    0.014    0.000    0.621    0.002 psd_import.py:324(_array_to_png)
+      353    0.515    0.001    0.515    0.001 {method 'save' of 'PySide6.QtGui.QImage' objects}
+       28    0.001    0.000    0.442    0.016 __init__.py:1(<module>)
+        2    0.002    0.001    0.430    0.215 psd_import.py:258(decode_composite_tiles)
+   222/12    0.001    0.000    0.294    0.025 <frozen importlib._bootstrap>:1360(_find_and_load)
+   222/12    0.001    0.000    0.294    0.025 <frozen importlib._bootstrap>:1308(_find_and_load_unlocked)
+   210/14    0.001    0.000    0.293    0.021 <frozen importlib._bootstrap>:914(_load_unlocked)

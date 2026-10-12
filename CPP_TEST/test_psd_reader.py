@@ -217,12 +217,12 @@ class PSDReaderTests(unittest.TestCase):
         with self.assertRaises(PSDImportCancelled):
             PSDFormat.load("this-file-must-not-be-opened.psd", cancel=cancel)
 
-    def test_blend_fallback_records_a_per_layer_limitation(self):
+    def test_linear_dodge_import_keeps_the_actual_mode(self):
         warnings, limitations = [], []
         self.assertEqual(PSDFormat._blend_from_key("lddg", "Lumière", warnings, limitations),
-                         "screen")
-        self.assertEqual(warnings, ["Lumière : linear_dodge affiché comme screen"])
-        self.assertEqual(limitations, ["linear_dodge affiché comme screen"])
+                         "linear_dodge")
+        self.assertEqual(warnings, [])
+        self.assertEqual(limitations, [])
 
     def test_raw_composite_region_avoids_full_composite_decode(self):
         composite = np.zeros((8, 8, 3), np.uint8)

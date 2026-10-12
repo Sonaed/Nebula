@@ -218,7 +218,7 @@ bool ProjectionEngine::submitBatch(const CsProjectionTile* tiles, int tileCount)
             if (!src.rgba || src.width < srcTile.width || src.height < srcTile.height ||
                 src.stride < src.width * 4) return false;
             LayerSnapshot layer; layer.width = src.width; layer.height = src.height; layer.stride = src.stride;
-            layer.visible = src.visible; layer.opacity = src.opacity; layer.mode = std::clamp(src.blend_mode, 0, 15); layer.clipping = src.clipping;
+            layer.visible = src.visible; layer.opacity = src.opacity; layer.mode = std::clamp(src.blend_mode, 0, 25); layer.clipping = src.clipping;
             layer.parameterized = src.parameterized;
             std::copy(src.blend_parameters, src.blend_parameters + 11, layer.params);
             for (int p = 0; p < 11; ++p) {

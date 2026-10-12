@@ -1,8 +1,10 @@
 #include "brush_engine.h"
 #include "simd_runtime.h"
+#include "brush_texture.h"
 
 #include <algorithm>
 #include <cmath>
+#include <cstring>
 #include <limits>
 
 namespace {
@@ -123,6 +125,10 @@ void BrushEngine::setSettings(
         clamp01(
             m_settings.sizeJitter
         );
+
+    m_settings.randomSize = clamp01(m_settings.randomSize);
+    m_settings.randomOpacity = clamp01(m_settings.randomOpacity);
+    m_settings.velocitySpacing = clamp01(m_settings.velocitySpacing);
 
     m_settings.rotationJitter =
         std::clamp(
@@ -374,173 +380,397 @@ float BrushEngine::evaluateFlow(
 }
 
 /* ============================================================
- * Tampon de trace
+ * Tampon de trace (stroke buffer)
  *
  * Sépare réellement `flow` et `opacity`, comme Photoshop :
- *   - chaque dab accumule sa couverture : a = a + flow·coverage·(1-a)
- *   - la saturation à 1 est naturelle, sans clamp artificiel
- *   - le masque est composité une seule fois à l'opacité cible
+ *   - chaque dab rapproche la couverture du pixel de l'opacité du dab :
+ *       c = c + flow·dab·(opacité - c)      (si opacité > c)
+ *     la couverture ne dépasse donc jamais l'opacité, même en repassant ;
+ *     avec l'opacité à la pression, appuyer plus fort fonce encore la zone,
+ *     mais un passage léger n'éclaircit jamais une zone déjà foncée ;
+ *   - le pixel est recomposé depuis sa valeur d'avant le trait.
  *
- * Effet de bord bénéfique : l'accumulation se fait en flottant, ce qui
- * supprime la perte de précision 8 bits sur les flows très bas (un dab
- * d'alpha 1/255 sur un pixel opaque ne disparaissait plus après
- * quantification, donc l'aérographe ne montait jamais).
+ * L'accumulation se fait en flottant : un flow très bas monte réellement
+ * (aucune perte de quantification 8 bits par dab).
  * ============================================================ */
 
-void BrushEngine::beginStrokeMask(int width, int height, float opacity, const QColor& color)
+void BrushEngine::resetStrokeBuffer()
 {
-    if (width <= 0 || height <= 0) {
-        m_strokeMaskActive = false;
-        return;
-    }
-    m_strokeMaskWidth = width;
-    m_strokeMaskHeight = height;
-    m_strokeMask.assign(static_cast<size_t>(width) * static_cast<size_t>(height), 0.0f);
-    m_strokeOpacity = clamp01(opacity);
-    m_strokeColor = color;
-    m_strokeMaskActive = true;
-    m_strokeDirtyLeft = width;
-    m_strokeDirtyTop = height;
-    m_strokeDirtyRight = -1;
-    m_strokeDirtyBottom = -1;
+    m_strokeTiles.tiles.clear();
+    m_strokeTiles.tiles.shrink_to_fit();
+    m_strokeTilesX = 0;
+    m_strokeTilesY = 0;
+    m_strokeImageWidth = 0;
+    m_strokeImageHeight = 0;
+    m_strokeFormat = QImage::Format_Invalid;
+    m_strokeBufferActive = false;
 }
 
-void BrushEngine::accumulateStrokeMask(const QImage& dab, int offsetX, int offsetY, float flow)
+void BrushEngine::ensureStrokeBuffer(const QImage& image, const QColor& color, bool erase)
 {
-    if (!m_strokeMaskActive || dab.isNull())
+    const int tilesX = (image.width() + kStrokeTileSize - 1) / kStrokeTileSize;
+    const int tilesY = (image.height() + kStrokeTileSize - 1) / kStrokeTileSize;
+    const bool sameGeometry = m_strokeBufferActive &&
+        m_strokeImageWidth == image.width() &&
+        m_strokeImageHeight == image.height() &&
+        m_strokeFormat == image.format() &&
+        m_strokeTiles.tiles.size() == static_cast<size_t>(tilesX) * static_cast<size_t>(tilesY);
+    // Une couleur différente (jitter, couleur sale) ou un changement de mode
+    // fige le trait courant : les pixels actuels deviennent la nouvelle
+    // origine et la couverture repart de zéro.
+    // Per-dab colour jitter must not restart the buffer: the restart
+    // recoloured the whole footprint of the dab and left pale bands along
+    // the stroke.  The colour is set once per stroke (Photoshop's colour
+    // dynamics "per stroke"); only an intentional gradient along the
+    // stroke still changes it.
+    const bool colourFollowsStroke = m_settings.useStrokeGradient && m_settings.gradientAmount > 0.0f;
+    if (sameGeometry && m_strokeErase == erase &&
+        (erase || color == m_strokeColor || !colourFollowsStroke))
         return;
+    m_strokeTiles.tiles.clear();
+    m_strokeTiles.tiles.resize(static_cast<size_t>(tilesX) * static_cast<size_t>(tilesY));
+    m_strokeTilesX = tilesX;
+    m_strokeTilesY = tilesY;
+    m_strokeImageWidth = image.width();
+    m_strokeImageHeight = image.height();
+    m_strokeFormat = image.format();
+    m_strokeErase = erase;
+    m_strokeColor = color;
+    m_strokeBufferActive = true;
+}
 
+BrushEngine::StrokeTile* BrushEngine::strokeTile(const QImage& image, int tileX, int tileY)
+{
+    auto& slot = m_strokeTiles.tiles[static_cast<size_t>(tileY) * m_strokeTilesX + tileX];
+    if (slot)
+        return slot.get();
+    slot = std::make_unique<StrokeTile>();
+    std::fill(std::begin(slot->coverage), std::end(slot->coverage), 0.0f);
+    std::fill(std::begin(slot->dual), std::end(slot->dual), 0.0f);
+    std::fill(std::begin(slot->original), std::end(slot->original), 0u);
+    // Capture de l'origine au premier contact : aucun pixel de cette tuile
+    // n'a encore été modifié par le trait.
+    const int x0 = tileX * kStrokeTileSize;
+    const int y0 = tileY * kStrokeTileSize;
+    const int w = std::min(kStrokeTileSize, image.width() - x0);
+    const int h = std::min(kStrokeTileSize, image.height() - y0);
+    const bool raw32 = image.depth() == 32;
+    for (int y = 0; y < h; ++y) {
+        uint32_t* destination = slot->original + y * kStrokeTileSize;
+        if (raw32) {
+            std::memcpy(destination, image.constScanLine(y0 + y) + x0 * 4, size_t(w) * 4);
+        } else {
+            for (int x = 0; x < w; ++x)
+                destination[x] = image.pixelColor(x0 + x, y0 + y).rgba();
+        }
+    }
+    return slot.get();
+}
+
+namespace {
+// Lit/écrit un pixel 32 bits non prémultiplié dans l'ordre (r, g, b, a).
+inline void unpackPixel(uint32_t value, QImage::Format format, float& r, float& g, float& b, float& a)
+{
+    if (format == QImage::Format_RGBA8888) {
+        const auto* bytes = reinterpret_cast<const uint8_t*>(&value);
+        r = bytes[0]; g = bytes[1]; b = bytes[2]; a = bytes[3];
+    } else {   // ARGB32 et chemin générique (QRgb)
+        r = qRed(value); g = qGreen(value); b = qBlue(value); a = qAlpha(value);
+    }
+    r *= 1.0f / 255.0f; g *= 1.0f / 255.0f; b *= 1.0f / 255.0f; a *= 1.0f / 255.0f;
+}
+
+inline void writePixel(QImage& image, int x, int y, float r, float g, float b, float a)
+{
+    const uint8_t R = quantizeChannel(r), G = quantizeChannel(g), B = quantizeChannel(b), A = quantizeChannel(a);
+    switch (image.format()) {
+    case QImage::Format_RGBA8888: {
+        uint8_t* p = image.scanLine(y) + size_t(x) * 4;
+        p[0] = R; p[1] = G; p[2] = B; p[3] = A;
+        break;
+    }
+    case QImage::Format_ARGB32:
+        reinterpret_cast<QRgb*>(image.scanLine(y))[x] = qRgba(R, G, B, A);
+        break;
+    default:
+        image.setPixelColor(x, y, QColor(R, G, B, A));
+        break;
+    }
+}
+}
+
+void BrushEngine::depositDab(QImage& image, const QImage& dab, int offsetX, int offsetY,
+                             float flow, float opacityCap)
+{
+    if (!m_strokeBufferActive || dab.isNull())
+        return;
     const float flowAmount = clamp01(flow);
-    if (flowAmount <= 0.0f)
+    const float cap = clamp01(opacityCap);
+    if (flowAmount <= 0.0f || cap <= 0.0f)
         return;
 
-    for (int y = 0; y < dab.height(); ++y) {
-        const int py = offsetY + y;
-        if (py < 0 || py >= m_strokeMaskHeight)
-            continue;
-        const auto* sourceLine = reinterpret_cast<const QRgb*>(dab.constScanLine(y));
-        float* maskRow = m_strokeMask.data() + static_cast<size_t>(py) * m_strokeMaskWidth;
+    const QImage::Format format = image.format();
+    const bool packedFormat = format == QImage::Format_ARGB32 || format == QImage::Format_RGBA8888;
+    const QImage::Format storedFormat = packedFormat ? format : QImage::Format_ARGB32;
 
-        for (int x = 0; x < dab.width(); ++x) {
-            const int px = offsetX + x;
-            if (px < 0 || px >= m_strokeMaskWidth)
-                continue;
-            const int dabAlpha = qAlpha(sourceLine[x]);
+    const int left = std::max(0, offsetX);
+    const int top = std::max(0, offsetY);
+    const int right = std::min(image.width(), offsetX + dab.width());
+    const int bottom = std::min(image.height(), offsetY + dab.height());
+
+    // Paper grain (canvas-space texture) is applied to the whole stroke, as
+    // "texture each tip: off" in Photoshop: the buffer accumulates coverage
+    // freely and the grain shapes what is shown.  Height model: a pit of
+    // depth d needs coverage above strength·d before it takes pigment, so a
+    // light touch only marks the raised fibres and pressing hard fills the
+    // tooth, like graphite on real paper.
+
+    for (int py = top; py < bottom; ++py) {
+        const auto* dabLine = reinterpret_cast<const QRgb*>(dab.constScanLine(py - offsetY));
+        const int tileY = py / kStrokeTileSize;
+        const int localY = py - tileY * kStrokeTileSize;
+        StrokeTile* tile = nullptr;
+        int currentTileX = -1;
+        for (int px = left; px < right; ++px) {
+            const int dabAlpha = qAlpha(dabLine[px - offsetX]);
             if (dabAlpha == 0)
                 continue;
+            const int tileX = px / kStrokeTileSize;
+            if (tileX != currentTileX) {
+                tile = strokeTile(image, tileX, tileY);
+                currentTileX = tileX;
+            }
+            const int index = localY * kStrokeTileSize + (px - tileX * kStrokeTileSize);
+            float& coverage = tile->coverage[index];
+            if (coverage >= cap)
+                continue;   // déjà à l'opacité de ce dab : rien ne change
+            const float deposit = flowAmount * static_cast<float>(dabAlpha) * (1.0f / 255.0f);
+            coverage = std::min(cap, coverage + deposit * (cap - coverage));
 
-            const float coverage = static_cast<float>(dabAlpha) * (1.0f / 255.0f);
-            const float deposit = flowAmount * coverage;
-            float& accumulated = maskRow[px];
-            // Saturation naturelle : on ne dépasse jamais 1.
-            accumulated = accumulated + deposit * (1.0f - accumulated);
-
-            if (px < m_strokeDirtyLeft)   m_strokeDirtyLeft = px;
-            if (px > m_strokeDirtyRight)  m_strokeDirtyRight = px;
-            if (py < m_strokeDirtyTop)    m_strokeDirtyTop = py;
-            if (py > m_strokeDirtyBottom) m_strokeDirtyBottom = py;
+            compositeBufferPixel(image, tile, index, px, py, storedFormat);
         }
     }
 }
 
-void BrushEngine::flushStrokeMask(QImage& image)
+bool BrushEngine::dualActive() const
 {
-    if (!m_strokeMaskActive || m_strokeDirtyRight < m_strokeDirtyLeft)
+    return m_settings.dualBrush && m_strokeBufferActive;
+}
+
+void BrushEngine::compositeBufferPixel(QImage& image, StrokeTile* tile, int index, int px, int py,
+                                       QImage::Format storedFormat)
+{
+    float shown = tile->coverage[index];
+    if (m_settings.dualBrush) {
+        const float m = shown, d = tile->dual[index];
+        switch (m_settings.dualMode) {
+        case 1: shown = std::min(m, d); break;                                       // darken
+        case 2: shown = d <= 0.0f ? 0.0f : clamp01(1.0f - (1.0f - m) / d); break;    // colour burn
+        case 3: shown = clamp01(m + d - 1.0f); break;                                // linear burn
+        case 4: shown = m < 0.5f ? 2.0f * m * d : 1.0f - 2.0f * (1.0f - m) * (1.0f - d); break;
+        case 5: shown = d <= 0.0f ? 0.0f : clamp01(m / std::max(1.0e-3f, 1.0f - d) * d); break;
+        case 6: shown = (m + d >= 1.0f) ? m : 0.0f; break;                          // hard mix (keeps main softness)
+        case 7: shown = clamp01((m - (1.0f - d)) * 2.0f); break;                    // linear height
+        default: shown = m * d; break;                                               // multiply
+        }
+    }
+    if (m_settings.textureCanvasSpace && !m_texture.isNull() && m_settings.textureStrength > 0.0f) {
+        const float grainTile = std::max(8.0f, m_settings.textureScale * 256.0f);
+        const float grain = BrushTexture::sample(
+            m_texture, m_settings, (px + 0.5f) / grainTile, (py + 0.5f) / grainTile, false);
+        const float depth = clamp01(m_settings.textureStrength) * (1.0f - grain);
+        shown = clamp01((shown - depth) / std::max(1.0e-3f, 1.0f - depth));
+    }
+    float dr, dg, db, da;
+    unpackPixel(tile->original[index], storedFormat, dr, dg, db, da);
+    if (m_strokeErase) {
+        writePixel(image, px, py, dr, dg, db, da * (1.0f - shown));
         return;
+    }
+    const float sa = shown;
+    const float oa = sa + da * (1.0f - sa);
+    if (oa <= 0.0f) {
+        writePixel(image, px, py, 0.0f, 0.0f, 0.0f, 0.0f);
+        return;
+    }
+    const float keep = da * (1.0f - sa);
+    const float red = m_strokeColor.redF(), green = m_strokeColor.greenF(), blue = m_strokeColor.blueF();
+    writePixel(image, px, py, (red * sa + dr * keep) / oa, (green * sa + dg * keep) / oa,
+               (blue * sa + db * keep) / oa, oa);
+}
 
-    const int left   = std::max(0, m_strokeDirtyLeft);
-    const int top    = std::max(0, m_strokeDirtyTop);
-    const int right  = std::min(image.width() - 1, m_strokeDirtyRight);
-    const int bottom = std::min(image.height() - 1, m_strokeDirtyBottom);
-
-    const float red   = static_cast<float>(m_strokeColor.red())   * (1.0f / 255.0f);
-    const float green = static_cast<float>(m_strokeColor.green()) * (1.0f / 255.0f);
-    const float blue  = static_cast<float>(m_strokeColor.blue())  * (1.0f / 255.0f);
-
-    for (int py = top; py <= bottom; ++py) {
-        const float* maskRow = m_strokeMask.data() + static_cast<size_t>(py) * m_strokeMaskWidth;
-        for (int px = left; px <= right; ++px) {
-            const float coverage = maskRow[px];
-            if (coverage <= 0.0f)
+void BrushEngine::stampDualAlong(QImage& image, const QPointF& from, const QPointF& to, float mainSize)
+{
+    const float size = std::max(1.0f, mainSize * std::max(0.05f, m_settings.dualSizeRatio));
+    const double step = std::max(0.5, static_cast<double>(size) * std::max(0.01f, m_settings.dualSpacing));
+    const QPointF delta = to - from;
+    const double distance = std::hypot(delta.x(), delta.y());
+    double travelled = step - std::min(m_dualRemainder, step);
+    if (distance <= 0.0)
+        travelled = 0.0;
+    const QImage::Format format = image.format();
+    const bool packed = format == QImage::Format_ARGB32 || format == QImage::Format_RGBA8888;
+    const QImage::Format storedFormat = packed ? format : QImage::Format_ARGB32;
+    BrushSettings tipSettings = m_settings;
+    tipSettings.hardness = m_settings.dualHardness;
+    tipSettings.roundness = 1.0f;
+    tipSettings.textureStrength = 0.0f;
+    tipSettings.antialiasing = true;
+    const int count = std::clamp(m_settings.dualCount, 1, 16);
+    for (; travelled <= distance; travelled += step) {
+        const double t = distance > 0.0 ? travelled / distance : 0.0;
+        const QPointF base = from + delta * t;
+        for (int n = 0; n < count; ++n) {
+            const float scatter = m_settings.dualScatter * size;
+            const double x = base.x() + (scatter > 0.0f ? BrushRandom::range(m_randomState, -scatter, scatter) : 0.0f);
+            const double y = base.y() + (scatter > 0.0f ? BrushRandom::range(m_randomState, -scatter, scatter) : 0.0f);
+            const float rotation = m_dualTip.isNull() ? 0.0f : BrushRandom::range(m_randomState, 0.0f, 360.0f);
+            const int side = std::max(4, static_cast<int>(std::ceil(size)) + 6);
+            QImage dab(side, side, QImage::Format_ARGB32);
+            dab.fill(Qt::transparent);
+            const double cornerX = std::floor(x - side * 0.5);
+            const double cornerY = std::floor(y - side * 0.5);
+            BrushTip::draw(dab, tipSettings, QPointF(side * 0.5, side * 0.5), size, 1.0f, rotation,
+                           1.0f, 0.0f, 0.0f, false, Qt::white, QImage(), m_dualTip,
+                           static_cast<float>(x - side * 0.5 - cornerX),
+                           static_cast<float>(y - side * 0.5 - cornerY), 1.0f);
+            for (int wy = -1; wy <= 1; ++wy)
+            for (int wx = -1; wx <= 1; ++wx) {
+            if ((wx || wy) && !m_settings.wrapAround)
                 continue;
-            // L'opacité cible plafonne la couverture accumulée : c'est ce qui
-            // rend `opacity` et `flow` réellement distincts.
-            const float sourceAlpha = coverage * m_strokeOpacity;
-            if (sourceAlpha <= 0.0f)
+            const int offsetX = static_cast<int>(cornerX) + wx * image.width();
+            const int offsetY = static_cast<int>(cornerY) + wy * image.height();
+            const int left = std::max(0, offsetX), top = std::max(0, offsetY);
+            const int right = std::min(image.width(), offsetX + side);
+            const int bottom = std::min(image.height(), offsetY + side);
+            if (left >= right || top >= bottom)
                 continue;
-
-            if (image.format() == QImage::Format_ARGB32) {
-                auto* row = reinterpret_cast<QRgb*>(image.scanLine(py));
-                const QRgb destination = row[px];
-                const float da = static_cast<float>(qAlpha(destination)) * (1.0f / 255.0f);
-                const float oa = sourceAlpha + da * (1.0f - sourceAlpha);
-                if (oa <= 0.0f) { row[px] = qRgba(0, 0, 0, 0); continue; }
-                const float dr = static_cast<float>(qRed(destination))   * (1.0f / 255.0f);
-                const float dg = static_cast<float>(qGreen(destination)) * (1.0f / 255.0f);
-                const float db = static_cast<float>(qBlue(destination))  * (1.0f / 255.0f);
-                const float outR = (red   * sourceAlpha + dr * da * (1.0f - sourceAlpha)) / oa;
-                const float outG = (green * sourceAlpha + dg * da * (1.0f - sourceAlpha)) / oa;
-                const float outB = (blue  * sourceAlpha + db * da * (1.0f - sourceAlpha)) / oa;
-                row[px] = qRgba(quantizeChannel(outR), quantizeChannel(outG),
-                                quantizeChannel(outB), quantizeChannel(oa));
-            } else if (image.format() == QImage::Format_RGBA8888) {
-                // Mirrors the ARGB32 branch above, byte-per-channel instead of
-                // a packed QRgb. _prepare_cpp_image() (Python side) always
-                // hands the C++ bridge an RGBA8888 buffer - including the
-                // mask-edit buffer built by edit_layer_alpha_mask() - so this
-                // was the actual format on every single dab that reached
-                // here, and it used to fall through to the generic
-                // pixelColor()/setPixelColor() branch below. That branch pays
-                // Qt's per-pixel accessor overhead (conversion + bounds
-                // checks + function-call cost) for every pixel of every dab,
-                // dozens of times slower than the raw scanline writes the
-                // ARGB32 branch already got. Since a plain brush preset with
-                // flowAccumulation (useStrokeMask above) is the common case,
-                // and mask editing is permanently locked onto this
-                // synchronous path (it cannot use the GPU-instanced or async
-                // fast paths - neither is mask-aware), this was the direct
-                // cause of "Trait ralenti : ~488 ms (cible 8 ms)" while
-                // painting on a layer mask.
-                uint8_t* destination = image.scanLine(py) + static_cast<size_t>(px) * 4;
-                const float da = static_cast<float>(destination[3]) * (1.0f / 255.0f);
-                const float oa = sourceAlpha + da * (1.0f - sourceAlpha);
-                if (oa <= 0.0f) {
-                    destination[0] = 0;
-                    destination[1] = 0;
-                    destination[2] = 0;
-                    destination[3] = 0;
-                    continue;
+            for (int py = top; py < bottom; ++py) {
+                const auto* line = reinterpret_cast<const QRgb*>(dab.constScanLine(py - offsetY));
+                const int tileY = py / kStrokeTileSize;
+                const int localY = py - tileY * kStrokeTileSize;
+                for (int px = left; px < right; ++px) {
+                    const int alpha = qAlpha(line[px - offsetX]);
+                    if (alpha == 0)
+                        continue;
+                    const int tileX = px / kStrokeTileSize;
+                    StrokeTile* tile = strokeTile(image, tileX, tileY);
+                    const int index = localY * kStrokeTileSize + (px - tileX * kStrokeTileSize);
+                    const float value = alpha * (1.0f / 255.0f);
+                    if (value <= tile->dual[index])
+                        continue;
+                    tile->dual[index] = value;
+                    if (tile->coverage[index] > 0.0f)
+                        compositeBufferPixel(image, tile, index, px, py, storedFormat);
                 }
-                const float dr = static_cast<float>(destination[0]) * (1.0f / 255.0f);
-                const float dg = static_cast<float>(destination[1]) * (1.0f / 255.0f);
-                const float db = static_cast<float>(destination[2]) * (1.0f / 255.0f);
-                const float outR = (red   * sourceAlpha + dr * da * (1.0f - sourceAlpha)) / oa;
-                const float outG = (green * sourceAlpha + dg * da * (1.0f - sourceAlpha)) / oa;
-                const float outB = (blue  * sourceAlpha + db * da * (1.0f - sourceAlpha)) / oa;
-                destination[0] = quantizeChannel(outR);
-                destination[1] = quantizeChannel(outG);
-                destination[2] = quantizeChannel(outB);
-                destination[3] = quantizeChannel(oa);
+            }
+            }   // wrap shifts
+        }
+        if (distance <= 0.0)
+            break;
+    }
+    m_dualRemainder = distance > 0.0 ? distance - (travelled - step) : step;
+    if (m_dualRemainder < 0.0)
+        m_dualRemainder = 0.0;
+}
+
+bool BrushEngine::setDualTip(const QImage& image)
+{
+    if (image.isNull() || image.width() > 4096 || image.height() > 4096)
+        return false;
+    m_dualTip = image.convertToFormat(QImage::Format_ARGB32);
+    return true;
+}
+
+void BrushEngine::clearDualTip()
+{
+    m_dualTip = QImage();
+}
+
+
+void BrushEngine::wetDab(QImage& image, const QImage& dab, int offsetX, int offsetY,
+                         const QColor& pigment, float strength, int dragX, int dragY,
+                         float smear, float pigmentRate, float pigmentAlpha)
+{
+    if (dab.isNull() || strength <= 0.0f)
+        return;
+    const QImage::Format format = image.format();
+    // Snapshot of the paint under the previous dab position: dragging reads
+    // the canvas as it was before this dab, never pixels it just wrote.
+    const QImage dragged = image.copy(offsetX - dragX, offsetY - dragY, dab.width(), dab.height());
+    const float pr = pigment.redF(), pg = pigment.greenF(), pb = pigment.blueF();
+    const float pa = clamp01(pigmentAlpha);
+    const int left = std::max(0, offsetX), top = std::max(0, offsetY);
+    const int right = std::min(image.width(), offsetX + dab.width());
+    const int bottom = std::min(image.height(), offsetY + dab.height());
+    for (int py = top; py < bottom; ++py) {
+        const auto* dabLine = reinterpret_cast<const QRgb*>(dab.constScanLine(py - offsetY));
+        const uchar* dragLine = dragged.constScanLine(py - offsetY);
+        const uchar* destLine = image.constScanLine(py);
+        for (int px = left; px < right; ++px) {
+            const int mask = qAlpha(dabLine[px - offsetX]);
+            if (mask == 0)
+                continue;
+            const float k = strength * mask * (1.0f / 255.0f);
+            float br, bg, bb, ba, dr, dg, db, da;
+            uint32_t baseRaw, dragRaw;
+            std::memcpy(&baseRaw, destLine + size_t(px) * 4, 4);
+            std::memcpy(&dragRaw, dragLine + size_t(px - offsetX) * 4, 4);
+            unpackPixel(baseRaw, format, br, bg, bb, ba);
+            unpackPixel(dragRaw, format, dr, dg, db, da);
+            // Work premultiplied so transparent paint never drags in black
+            // or invents white.
+            float sr = br * ba + (dr * da - br * ba) * smear;
+            float sg = bg * ba + (dg * da - bg * ba) * smear;
+            float sb = bb * ba + (db * da - bb * ba) * smear;
+            float sa = ba + (da - ba) * smear;
+            sr += (pr * pa - sr) * pigmentRate;
+            sg += (pg * pa - sg) * pigmentRate;
+            sb += (pb * pa - sb) * pigmentRate;
+            sa += (pa - sa) * pigmentRate;
+            const float rr = br * ba + (sr - br * ba) * k;
+            const float rg = bg * ba + (sg - bg * ba) * k;
+            const float rb = bb * ba + (sb - bb * ba) * k;
+            const float ra = ba + (sa - ba) * k;
+            if (ra <= 1.0e-4f)
+                writePixel(image, px, py, 0.0f, 0.0f, 0.0f, 0.0f);
+            else
+                writePixel(image, px, py, rr / ra, rg / ra, rb / ra, ra);
+        }
+    }
+}
+
+void BrushEngine::eraseDabDirect(QImage& image, const QImage& dab, int offsetX, int offsetY, float strength)
+{
+    const float amount = clamp01(strength);
+    if (amount <= 0.0f || dab.isNull())
+        return;
+    const int left = std::max(0, offsetX);
+    const int top = std::max(0, offsetY);
+    const int right = std::min(image.width(), offsetX + dab.width());
+    const int bottom = std::min(image.height(), offsetY + dab.height());
+    for (int py = top; py < bottom; ++py) {
+        const auto* dabLine = reinterpret_cast<const QRgb*>(dab.constScanLine(py - offsetY));
+        for (int px = left; px < right; ++px) {
+            const int dabAlpha = qAlpha(dabLine[px - offsetX]);
+            if (dabAlpha == 0)
+                continue;
+            const float erase = amount * static_cast<float>(dabAlpha) * (1.0f / 255.0f);
+            if (image.format() == QImage::Format_RGBA8888) {
+                uint8_t* p = image.scanLine(py) + size_t(px) * 4;
+                p[3] = quantizeChannel(p[3] * (1.0f / 255.0f) * (1.0f - erase));
+            } else if (image.format() == QImage::Format_ARGB32) {
+                auto* row = reinterpret_cast<QRgb*>(image.scanLine(py));
+                const QRgb pixel = row[px];
+                row[px] = qRgba(qRed(pixel), qGreen(pixel), qBlue(pixel),
+                                quantizeChannel(qAlpha(pixel) * (1.0f / 255.0f) * (1.0f - erase)));
             } else {
-                QColor destination = image.pixelColor(px, py);
-                const float da = static_cast<float>(destination.alphaF());
-                const float oa = sourceAlpha + da * (1.0f - sourceAlpha);
-                if (oa <= 0.0f) continue;
-                QColor result;
-                result.setRgbF(
-                    (red   * sourceAlpha + destination.redF()   * da * (1.0f - sourceAlpha)) / oa,
-                    (green * sourceAlpha + destination.greenF() * da * (1.0f - sourceAlpha)) / oa,
-                    (blue  * sourceAlpha + destination.blueF()  * da * (1.0f - sourceAlpha)) / oa,
-                    oa);
-                image.setPixelColor(px, py, result);
+                QColor pixel = image.pixelColor(px, py);
+                pixel.setAlphaF(pixel.alphaF() * (1.0f - erase));
+                image.setPixelColor(px, py, pixel);
             }
         }
     }
-
-    m_strokeDirtyLeft = m_strokeMaskWidth;
-    m_strokeDirtyTop = m_strokeMaskHeight;
-    m_strokeDirtyRight = -1;
-    m_strokeDirtyBottom = -1;
 }
 
 void BrushEngine::beginStroke(
@@ -555,8 +785,11 @@ void BrushEngine::beginStroke(
             m_lastInput.pressure
         );
 
+    ++m_strokeCounter;
     m_randomState =
-        m_settings.randomSeed;
+        m_settings.randomSeed ^ (m_strokeCounter * 0x9E3779B9u);
+    if (m_randomState == 0)
+        m_randomState = m_settings.randomSeed | 1u;
 
     m_previousColor =
         m_color;
@@ -564,6 +797,8 @@ void BrushEngine::beginStroke(
     m_hasPreviousColor =
         false;
 
+    m_hasPreviousDab = false;
+    m_dualRemainder = 0.0;
     m_wet.begin(
         m_color,
         m_settings
@@ -575,8 +810,13 @@ void BrushEngine::beginStroke(
 
     // Le tampon de trace est (ré)armé au premier dab, quand on connaît la
     // taille de l'image cible et l'opacité effective.
-    m_strokeMaskActive = false;
-    m_strokeMask.clear();
+    resetStrokeBuffer();
+
+    // Le stabilisateur repart du point d'appui : sans cela, un trait dont la
+    // fin n'avait pas appelé endStroke (worker asynchrone) démarrait lissé
+    // depuis la fin du trait précédent.
+    m_hasSmoothPoint = false;
+    m_smoothVelocity = QPointF();
 
     m_hasStroke =
         true;
@@ -695,7 +935,8 @@ void BrushEngine::drawSegment(
             0.5,
             averageSize *
             static_cast<double>(
-                m_settings.spacing
+                m_settings.spacing *
+                (1.0f + m_settings.velocitySpacing * normalizedVelocity)
             )
         );
 
@@ -707,6 +948,16 @@ void BrushEngine::drawSegment(
     // Distance jusqu'au prochain dab, en tenant compte de ce qui restait à
     // parcourir à la fin du segment précédent.
     const bool stationary = distance <= 0.0;
+
+    // Dual brush runs on its own spacing along the whole segment, before
+    // the main dabs, so the main tip finds the second tip's mask in place.
+    const bool bufferEligible = m_settings.flowAccumulation &&
+        (m_settings.eraser || (m_settings.blendMode == BrushBlendMode::Normal &&
+                               !m_settings.smudgeTool && !m_settings.wetMix && cloneSource == nullptr));
+    if (m_settings.dualBrush && bufferEligible) {
+        ensureStrokeBuffer(image, m_color, m_settings.eraser);
+        stampDualAlong(image, start.position, end.position, static_cast<float>(averageSize));
+    }
 
     // A press/release at one point is a real dab.  Treating it like a
     // zero-length segment and waiting for spacingDistance made bitmap tips,
@@ -784,6 +1035,10 @@ void BrushEngine::drawSegment(
                 m_randomState,
                 -m_settings.sizeJitter,
                 m_settings.sizeJitter
+            ) + BrushRandom::range(
+                m_randomState,
+                -m_settings.randomSize,
+                m_settings.randomSize
             );
 
         const float sizeMultiplier =
@@ -894,138 +1149,45 @@ void BrushEngine::drawSegment(
             finalColor = m_wet.color();
         }
 
+        const float opacityVariation = BrushRandom::range(
+            m_randomState,
+            -m_settings.randomOpacity,
+            m_settings.randomOpacity
+        );
         const float paintAlpha =
-            opacity * flow *
+            clamp01(opacity * (1.0f + opacityVariation)) * flow *
             (m_settings.smudgeTool
                 ? std::max(0.05f, m_settings.smudge)
                 : m_settings.paintMix);
 
-        if (m_settings.eraser)
+        /*
+         * BrushTip produit le masque du dab (forme, dureté, texture, pointe
+         * bitmap, position sous-pixel).  La gomme utilise exactement le même
+         * masque : elle respecte donc la dureté et la forme du pinceau au
+         * lieu d'un cône flou aimanté sur la grille de pixels.
+         *
+         * Chemin « tampon de trace » : dépôt de couleur simple et gomme.
+         * Les modes de fusion, le clone et le smudge lisent la destination
+         * pixel par pixel et restent sur le blit direct.
+         */
+        const bool eraseMode = m_settings.eraser;
+        const bool useStrokeMask =
+            m_settings.flowAccumulation &&
+            (eraseMode ||
+             (m_settings.blendMode == BrushBlendMode::Normal &&
+              !m_settings.smudgeTool &&
+              !m_settings.wetMix &&
+              cloneSource == nullptr));
+        // Le tampon applique lui-même flow et opacité : le masque du dab
+        // reste à pleine couverture, sinon l'atténuation serait comptée deux
+        // fois.
+        const bool wetPathPlanned = (m_settings.wetMix || m_settings.smudgeTool)
+            && m_settings.blendMode == BrushBlendMode::Normal && cloneSource == nullptr;
+        const bool fullCoverageDab = useStrokeMask || eraseMode || wetPathPlanned;
         {
-            /*
-             * La gomme ne doit jamais passer par BrushTip::draw : cette
-             * fonction ajoute de la couleur. Elle agit uniquement sur
-             * l'alpha déjà présent dans le calque.
-             */
-            const int radius =
-                std::max(
-                    1,
-                    static_cast<int>(
-                        finalSize *
-                        0.5f
-                    )
-                );
-
-            const QPointF center =
-                basePosition +
-                QPointF(
-                    scatterX,
-                    scatterY
-                );
-
-            for (int y = -radius;
-                 y <= radius;
-                 ++y)
-            {
-                for (int x = -radius;
-                     x <= radius;
-                     ++x)
-                {
-                    const float d =
-                        std::sqrt(
-                            static_cast<float>(
-                                x * x +
-                                y * y
-                            )
-                        );
-
-                    if (d > radius)
-                        continue;
-
-                    const int px =
-                        static_cast<int>(
-                            std::round(
-                                center.x()
-                            )
-                        ) + x;
-
-                    const int py =
-                        static_cast<int>(
-                            std::round(
-                                center.y()
-                            )
-                        ) + y;
-
-                    if (px < 0 ||
-                        py < 0 ||
-                        px >= image.width() ||
-                        py >= image.height())
-                    {
-                        continue;
-                    }
-
-                    const float erase =
-                        paintAlpha *
-                        (1.0f -
-                         d /
-                         std::max(
-                             1.0f,
-                             static_cast<float>(
-                                 radius
-                             )
-                         ));
-
-                    if (image.format() == QImage::Format_ARGB32)
-                    {
-                        auto* row = reinterpret_cast<QRgb*>(image.scanLine(py));
-                        const QRgb pixel = row[px];
-                        const int alpha = qRound(qAlpha(pixel) * (1.0f - clamp01(erase)));
-                        row[px] = qRgba(qRed(pixel), qGreen(pixel), qBlue(pixel), alpha);
-                    }
-                    else
-                    {
-                        QColor pixel = image.pixelColor(px, py);
-                        pixel.setAlphaF(pixel.alphaF() * (1.0f - clamp01(erase)));
-                        image.setPixelColor(px, py, pixel);
-                    }
-                }
-            }
-        }
-        else
-        {
-            /*
-             * BrushTip produit un masque de dab.
-             * On le dessine ensuite avec le mode de fusion.
-             *
-             * Chemin « tampon de trace » : réservé au dépôt de couleur simple.
-             * Les modes de fusion, le clone et le smudge lisent la destination
-             * pixel par pixel et doivent rester sur le blit direct.
-             */
-            const bool useStrokeMask =
-                m_settings.blendMode == BrushBlendMode::Normal &&
-                !m_settings.smudgeTool &&
-                !m_settings.wetMix &&
-                m_bitmapTip.isNull() &&
-                cloneSource == nullptr &&
-                m_settings.flowAccumulation;
-
             QImage dab(
-                std::max(
-                    4,
-                    static_cast<int>(
-                        std::ceil(
-                            finalSize
-                        )
-                    ) + 6
-                ),
-                std::max(
-                    4,
-                    static_cast<int>(
-                        std::ceil(
-                            finalSize
-                        )
-                    ) + 6
-                ),
+                std::max(4, static_cast<int>(std::ceil(finalSize)) + 6),
+                std::max(4, static_cast<int>(std::ceil(finalSize)) + 6),
                 QImage::Format_ARGB32
             );
 
@@ -1046,6 +1208,14 @@ void BrushEngine::drawSegment(
             const float subpixelY =
                 static_cast<float>(exactY - dab.height() * 0.5 - cornerY);
 
+            float tipTextureScale = textureScale;
+            float tipTextureOffsetX = textureOffsetX;
+            float tipTextureOffsetY = textureOffsetY;
+            if (m_settings.textureCanvasSpace) {
+                tipTextureScale = std::max(8.0f, m_settings.textureScale * 256.0f);
+                tipTextureOffsetX = static_cast<float>(exactX);
+                tipTextureOffsetY = static_cast<float>(exactY);
+            }
             BrushTip::draw(
                 dab,
                 m_settings,
@@ -1054,14 +1224,11 @@ void BrushEngine::drawSegment(
                     dab.height() * 0.5
                 ),
                 finalSize,
-                // Le tampon applique lui-même flow puis opacity : le masque
-                // du dab doit rester à pleine couverture, sinon l'atténuation
-                // serait comptée deux fois.
-                useStrokeMask ? 1.0f : paintAlpha,
+                fullCoverageDab ? 1.0f : paintAlpha,
                 finalRotation,
-                textureScale,
-                textureOffsetX,
-                textureOffsetY,
+                tipTextureScale,
+                tipTextureOffsetX,
+                tipTextureOffsetY,
                 m_settings.textureMirror,
                 finalColor,
                 m_texture,
@@ -1072,26 +1239,69 @@ void BrushEngine::drawSegment(
                 1.0f - m_settings.tiltElongation * tiltMagnitude
             );
 
-            const int offsetX = static_cast<int>(cornerX);
-            const int offsetY = static_cast<int>(cornerY);
+            const int baseOffsetX = static_cast<int>(cornerX);
+            const int baseOffsetY = static_cast<int>(cornerY);
+            QPoint wrapShifts[9] = {QPoint(0, 0)};
+            int wrapCount = 1;
+            if (m_settings.wrapAround) {
+                const QRect bounds(0, 0, image.width(), image.height());
+                for (int sy = -1; sy <= 1; ++sy)
+                    for (int sx = -1; sx <= 1; ++sx) {
+                        if (!sx && !sy)
+                            continue;
+                        const QPoint shift(sx * image.width(), sy * image.height());
+                        if (QRect(baseOffsetX + shift.x(), baseOffsetY + shift.y(),
+                                  dab.width(), dab.height()).intersects(bounds))
+                            wrapShifts[wrapCount++] = shift;
+                    }
+            }
+            for (int wrapIndex = 0; wrapIndex < wrapCount; ++wrapIndex) {
+            const int offsetX = baseOffsetX + wrapShifts[wrapIndex].x();
+            const int offsetY = baseOffsetY + wrapShifts[wrapIndex].y();
 
             if (useStrokeMask) {
-                if (!m_strokeMaskActive ||
-                    m_strokeMaskWidth != image.width() ||
-                    m_strokeMaskHeight != image.height()) {
-                    beginStrokeMask(image.width(), image.height(), opacity, finalColor);
-                } else {
-                    // La couleur peut varier en cours de trait (jitter, dirty
-                    // color) : on vide le tampon avant d'en changer.
-                    if (finalColor != m_strokeColor) {
-                        flushStrokeMask(image);
-                        beginStrokeMask(image.width(), image.height(), opacity, finalColor);
-                    } else {
-                        m_strokeOpacity = clamp01(opacity);
-                    }
+                ensureStrokeBuffer(image, finalColor, eraseMode);
+                depositDab(image, dab, offsetX, offsetY,
+                           flow * (eraseMode ? 1.0f : m_settings.paintMix),
+                           opacity);
+                continue;
+            }
+
+            if (eraseMode) {
+                eraseDabDirect(image, dab, offsetX, offsetY, paintAlpha);
+                continue;
+            }
+
+            const bool wetPath = (m_settings.wetMix || m_settings.smudgeTool)
+                && m_settings.blendMode == BrushBlendMode::Normal && cloneSource == nullptr
+                && (image.format() == QImage::Format_RGBA8888 || image.format() == QImage::Format_ARGB32);
+            if (wetPath) {
+                int dragX = 0, dragY = 0;
+                if (m_hasPreviousDab) {
+                    const double limit = std::max(1.0, static_cast<double>(finalSize));
+                    dragX = static_cast<int>(std::lround(std::clamp(exactX - m_previousDab.x(), -limit, limit)));
+                    dragY = static_cast<int>(std::lround(std::clamp(exactY - m_previousDab.y(), -limit, limit)));
                 }
-                accumulateStrokeMask(dab, offsetX, offsetY, flow * m_settings.paintMix);
-                flushStrokeMask(image);
+                const float wetness = clamp01(m_settings.wetness);
+                const float smear = m_settings.smudgeTool
+                    ? clamp01(0.35f + 0.65f * m_settings.smudge)
+                    : clamp01(m_settings.smudge + 0.6f * wetness * m_settings.pickup);
+                const float pigmentRate = m_settings.smudgeTool
+                    ? 0.0f
+                    : std::clamp(m_settings.paintMix * (1.0f - 0.7f * wetness), 0.05f, 1.0f);
+                const float pigmentAlpha = 1.0f - 0.75f * clamp01(m_settings.dilution);
+                // Rates are defined per quarter-diameter of travel, then
+                // converted to per-dab rates: with dense spacing twenty dabs
+                // overlap, and a raw per-dab rate compounded to an opaque,
+                // unmixed stroke.
+                const float spacingFactor = std::clamp(m_settings.spacing / 0.25f, 0.02f, 1.0f);
+                auto perDab = [spacingFactor](float rate) {
+                    return 1.0f - std::pow(1.0f - std::clamp(rate, 0.0f, 0.999f), spacingFactor);
+                };
+                wetDab(image, dab, offsetX, offsetY, finalColor, clamp01(opacity * flow),
+                       dragX, dragY, smear, perDab(pigmentRate), pigmentAlpha);
+                m_previousDab = QPointF(exactX, exactY);
+                m_hasPreviousDab = true;
                 continue;
             }
 
@@ -1155,6 +1365,7 @@ void BrushEngine::drawSegment(
                         image.setPixelColor(px, py, result);
                 }
             }
+            }   // wrap shifts
         }
     }
 
@@ -1178,10 +1389,9 @@ void BrushEngine::endStroke()
 {
     m_hasStroke =
         false;
+    m_hasPreviousDab = false;
     m_distanceRemainder = 0.0;
-    m_strokeMaskActive = false;
-    m_strokeMask.clear();
-    m_strokeMask.shrink_to_fit();
+    resetStrokeBuffer();
     m_hasSmoothPoint = false;
     m_smoothVelocity = QPointF();
 }

@@ -71,10 +71,8 @@ bool DocumentState::createGroup(const std::vector<int>& indices,
         for (int index : group.layerIndices)
             if (index >= 0 && index < layerCount()) grouped[static_cast<std::size_t>(index)] = 1;
     std::vector<int> normalized;
-    if (indices.size() == 1) {
-        const int index = indices.front();
-        if (index < 0 || index >= layerCount() || grouped[static_cast<std::size_t>(index)])
-            return false;
+    if (indices.size() == 1 && indices.front() >= 0 && indices.front() < layerCount()
+        && !grouped[static_cast<std::size_t>(indices.front())]) {
         normalized = indices;
     } else if (!normalizeLayerGroup(layerCount(), indices, grouped, normalized)) {
         // Wrapping one complete root group is the only overlap allowed.  It

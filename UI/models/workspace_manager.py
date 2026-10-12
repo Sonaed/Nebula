@@ -10,13 +10,14 @@ def _truthy(value) -> bool:
 
 
 def _is_open(dock) -> bool:
-    """Panneau « ouvert » : vrai même s'il est un onglet non affiché.
+    """Persist explicit dock visibility, including before the parent is shown.
 
-    ``isHidden()`` est vrai pour un panneau rangé derrière un autre onglet :
-    l'utiliser faisait enregistrer Ressources comme fermé dès qu'on regardait
-    l'onglet Couleur, et il disparaissait à la session suivante."""
+    Qt unchecks toggleViewAction when its ancestor window is hidden. A tab
+    behind another dock is not explicitly hidden, so isHidden preserves both
+    tabbed panels and factory layouts constructed before window.show().
+    """
     try:
-        return bool(dock.toggleViewAction().isChecked())
+        return not dock.isHidden()
     except RuntimeError:
         return False
 
@@ -87,6 +88,9 @@ class WorkspaceManager:
         state = self.settings.value(f"workspaces/{name}/state")
         if geometry is None or state is None:
             return False
+        rollback_geometry = self.window.saveGeometry()
+        rollback_state = self.window.saveState(3)
+        rollback_visibility = self._visibility()
         self.window.setUpdatesEnabled(False)
         try:
             # Un ancien état peut contenir un conteneur de tabulation vide
@@ -98,7 +102,15 @@ class WorkspaceManager:
                 dock.setVisible(False)
             geometry_ok = self.window.restoreGeometry(geometry)
             state_ok = self.window.restoreState(state, 3)
-            self._apply_visibility(self.settings.value(f"workspaces/{name}/visibility"), previous)
+            if geometry_ok and state_ok:
+                self._apply_visibility(self.settings.value(f"workspaces/{name}/visibility"), previous)
+            else:
+                # A damaged Qt blob is a layout failure, not a user request to
+                # close every panel. Restore the known-good arrangement so the
+                # caller can safely select the default preset.
+                self.window.restoreGeometry(rollback_geometry)
+                self.window.restoreState(rollback_state, 3)
+                self._apply_visibility(rollback_visibility)
         finally:
             self.window.setUpdatesEnabled(True)
             self.window.update()
@@ -118,6 +130,9 @@ class WorkspaceManager:
         state = self.settings.value("window/state")
         if geometry is None or state is None:
             return False
+        rollback_geometry = self.window.saveGeometry()
+        rollback_state = self.window.saveState(3)
+        rollback_visibility = self._visibility()
         self.window.setUpdatesEnabled(False)
         try:
             previous = self._visibility()
@@ -125,7 +140,12 @@ class WorkspaceManager:
                 dock.setVisible(False)
             geometry_ok = self.window.restoreGeometry(geometry)
             state_ok = self.window.restoreState(state, 3)
-            self._apply_visibility(self.settings.value("window/visibility"), previous)
+            if geometry_ok and state_ok:
+                self._apply_visibility(self.settings.value("window/visibility"), previous)
+            else:
+                self.window.restoreGeometry(rollback_geometry)
+                self.window.restoreState(rollback_state, 3)
+                self._apply_visibility(rollback_visibility)
         finally:
             self.window.setUpdatesEnabled(True)
             self.window.update()

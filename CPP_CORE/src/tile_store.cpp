@@ -6,6 +6,7 @@
 #include <QSaveFile>
 #include <atomic>
 #include <cstring>
+#include <cmath>
 #include <functional>
 #include <mutex>
 
@@ -232,6 +233,72 @@ bool NativeTileStore::applyBatches(const std::vector<StoreBatch>& batches)
     }
 }
 
+bool NativeTileStore::thumbnail(QImage& output) const
+{
+    if (output.isNull()) return false;
+    QMutexLocker lock(&mutex_);
+    output.fill(Qt::transparent);
+    QPainter painter(&output);
+    painter.setRenderHint(QPainter::SmoothPixmapTransform, true);
+    // Use the same uniform scale as the layer panel, including rounded height.
+    const double scale = std::max(output.width(), output.height()) /
+                         static_cast<double>(std::max(width_, height_));
+    for (const auto& item : tiles_) {
+        const auto& image = item.second.image;
+        painter.drawImage(QRectF(item.first.first * tileSize_ * scale,
+                                 item.first.second * tileSize_ * scale,
+                                 image.width() * scale, image.height() * scale), image);
+    }
+    return painter.end();
+}
+
+bool NativeTileStore::importRgba(const QImage& image, int x, int y)
+{
+    if (image.isNull() || image.format() != QImage::Format_RGBA8888) return false;
+    {
+        QMutexLocker lock(&mutex_);
+        if (!tiles_.empty()) return false;
+    }
+    // Clip with wide arithmetic: PSD layer origins can be negative.
+    const int left = static_cast<int>(std::max(0LL, std::min<long long>(width(), x)));
+    const int top = static_cast<int>(std::max(0LL, std::min<long long>(height(), y)));
+    const int right = static_cast<int>(std::max(0LL, std::min<long long>(width(), static_cast<long long>(x) + image.width())));
+    const int bottom = static_cast<int>(std::max(0LL, std::min<long long>(height(), static_cast<long long>(y) + image.height())));
+    if (right <= left || bottom <= top) return true;
+    std::vector<TileUpdate> batch;
+    batch.reserve(256);
+    for (int ty = top / tileSize_; ty <= (bottom - 1) / tileSize_; ++ty) {
+        for (int tx = left / tileSize_; tx <= (right - 1) / tileSize_; ++tx) {
+            const QRect area(tx * tileSize_, ty * tileSize_,
+                             std::min(tileSize_, width() - tx * tileSize_),
+                             std::min(tileSize_, height() - ty * tileSize_));
+            QImage tile(area.size(), QImage::Format_ARGB32);
+            if (tile.isNull()) return false;
+            tile.fill(Qt::transparent);
+            bool populated = false;
+            for (int row = std::max(top, area.top()); row < std::min(bottom, area.bottom() + 1); ++row) {
+                const auto* source = image.constScanLine(row - y);
+                auto* target = reinterpret_cast<QRgb*>(tile.scanLine(row - area.top()));
+                for (int column = std::max(left, area.left()); column < std::min(right, area.right() + 1); ++column) {
+                    const auto* pixel = source + static_cast<qint64>(column - x) * 4;
+                    if (pixel[3]) {
+                        target[column - area.left()] = qRgba(pixel[0], pixel[1], pixel[2], pixel[3]);
+                        populated = true;
+                    }
+                }
+            }
+            // Invisible RGB in zero-alpha pixels is deliberately canonicalized
+            // to zero, matching the PSD importer without NumPy boolean copies.
+            if (populated) batch.push_back({tx, ty, std::move(tile), true});
+            if (batch.size() == 256) {
+                if (!applyBatch(batch)) return false;
+                batch.clear();
+            }
+        }
+    }
+    return batch.empty() || applyBatch(batch);
+}
+
 int NativeTileStore::writeImage(const QImage& image, int x, int y, int width, int height,
                                 int* changedCoordinates, int pairCapacity)
 {
@@ -288,6 +355,62 @@ bool NativeTileStore::copyTile(int tileX, int tileY, QImage& output)
     painter.setCompositionMode(QPainter::CompositionMode_Source);
     painter.drawImage(0, 0, it->second.image);
     painter.end();
+    return true;
+}
+
+bool NativeTileStore::compositeFrom(const NativeTileStore& source, float opacity, int mode)
+{
+    if (&source == this || !std::isfinite(opacity) || mode < 0 || mode > 11 ||
+        width_ != source.width_ || height_ != source.height_ || tileSize_ != source.tileSize_)
+        return false;
+    static const QPainter::CompositionMode modes[] = {
+        QPainter::CompositionMode_SourceOver, QPainter::CompositionMode_Darken,
+        QPainter::CompositionMode_Multiply, QPainter::CompositionMode_ColorBurn,
+        QPainter::CompositionMode_Lighten, QPainter::CompositionMode_Screen,
+        QPainter::CompositionMode_ColorDodge, QPainter::CompositionMode_Overlay,
+        QPainter::CompositionMode_SoftLight, QPainter::CompositionMode_HardLight,
+        QPainter::CompositionMode_Difference, QPainter::CompositionMode_Exclusion,
+    };
+    // A stable two-store lock prevents a merge racing a simultaneous native read.
+    std::unique_lock<QMutex> first(mutex_, std::defer_lock);
+    std::unique_lock<QMutex> second(source.mutex_, std::defer_lock);
+    if (std::less<const NativeTileStore*>{}(this, &source)) std::lock(first, second);
+    else std::lock(second, first);
+    try {
+        for (const auto& [key, sourceEntry] : source.tiles_) {
+            auto target = tiles_.find(key);
+            if (target == tiles_.end()) {
+                QImage blank = blankTile(key.first, key.second);
+                if (blank.isNull()) return false;
+                target = tiles_.emplace(key, Entry{std::move(blank)}).first;
+            }
+            // Source-over with a fully opaque source is an exact replacement.
+            // Sharing the immutable source backing store avoids a QPainter setup
+            // and a full per-pixel blend for dense paint layers; a later write
+            // detaches normally through QImage copy-on-write.
+            bool sourceOpaque = (mode == 0 && opacity >= 1.0f - 1e-7f);
+            for (int row = 0; sourceOpaque && row < sourceEntry.image.height(); ++row) {
+                const auto* pixels = reinterpret_cast<const QRgb*>(sourceEntry.image.constScanLine(row));
+                for (int column = 0; column < sourceEntry.image.width(); ++column) {
+                    if (qAlpha(pixels[column]) != 255) { sourceOpaque = false; break; }
+                }
+            }
+            if (sourceOpaque) {
+                target->second.image = sourceEntry.image;
+                revisions_[key] = g_revision.fetch_add(1, std::memory_order_relaxed);
+                accesses_[key] = g_access.fetch_add(1, std::memory_order_relaxed);
+                continue;
+            }
+            QPainter painter(&target->second.image);
+            if (!painter.isActive()) return false;
+            painter.setCompositionMode(modes[mode]);
+            painter.setOpacity(std::clamp(opacity, 0.0f, 1.0f));
+            painter.drawImage(0, 0, sourceEntry.image);
+            painter.end();
+            revisions_[key] = g_revision.fetch_add(1, std::memory_order_relaxed);
+            accesses_[key] = g_access.fetch_add(1, std::memory_order_relaxed);
+        }
+    } catch (...) { return false; }
     return true;
 }
 
@@ -425,6 +548,33 @@ int NativeTileStore::copyKeyRevisions(int* coordinates, unsigned long long* revi
     }
     return fill ? std::min(pairCapacity, static_cast<int>(tiles_.size()))
                 : static_cast<int>(tiles_.size());
+}
+
+int NativeTileStore::copyOpaqueKeys(int* coordinates, int pairCapacity) const
+{
+    QMutexLocker lock(&mutex_);
+    const bool fill = coordinates && pairCapacity > 0;
+    int count = 0;
+    for (const auto& [key, entry] : tiles_) {
+        const QImage& image = entry.image;
+        bool opaque = !image.isNull();
+        for (int row = 0; row < image.height() && opaque; ++row) {
+            const auto* pixels = reinterpret_cast<const QRgb*>(image.constScanLine(row));
+            for (int column = 0; column < image.width(); ++column) {
+                if (qAlpha(pixels[column]) != 255) {
+                    opaque = false;
+                    break;
+                }
+            }
+        }
+        if (!opaque) continue;
+        if (fill && count < pairCapacity) {
+            coordinates[count * 2] = key.first;
+            coordinates[count * 2 + 1] = key.second;
+        }
+        ++count;
+    }
+    return fill ? std::min(pairCapacity, count) : count;
 }
 
 bool NativeTileStore::removeTile(int tileX, int tileY)

@@ -111,8 +111,8 @@ class _CountingHandle:
     revision through ctypes.
     """
 
-    _MUTATING = frozenset({"set", "set_many", "write_image", "remove", "load_png", "resize",
-                           "clear", "copy_resident_from", "close"})
+    _MUTATING = frozenset({"set", "set_many", "write_image", "import_rgba", "remove", "load_png", "resize",
+                           "clear", "copy_resident_from", "composite_from", "close"})
 
     def __init__(self, handle, owner):
         import weakref
@@ -179,6 +179,10 @@ class TileStore:
     def resident_revisions(self) -> dict[tuple[int, int], int] | None:
         """Révision de chaque tuile résidente en un appel natif (None : bridge ancien)."""
         return self._native_handle.key_revisions() if self._native_handle else {}
+
+    def resident_opaque_keys(self) -> set[tuple[int, int]] | None:
+        """Opaque resident tiles from CreativeCore (None with an old bridge)."""
+        return self._native_handle.opaque_keys() if self._native_handle else set()
 
     def remove_resident_tile(self, tx: int, ty: int) -> bool:
         return bool(self._native_handle and self._native_handle.remove(tx, ty))
@@ -447,6 +451,29 @@ class TileStore:
         self._evict_if_needed()
         return True
 
+    def composite_from_store(self, source: "TileStore", opacity: float, mode: int) -> bool | None:
+        """Merge resident source tiles natively; None means this bridge is too old."""
+        if not self._native_handle or not getattr(source, "_native_handle", None):
+            return None
+        result = self._native_handle.composite_from(source._native_handle, opacity, mode)
+        if result is None:
+            return None
+        if not result:
+            return False
+        # Native storage is now authoritative. Drop stale scratch references
+        # for destination tiles and update LRU metadata without copying pixels.
+        for key in source.occupied_keys:
+            self._failed_loads.pop(key, None)
+            previous_swap = self._swapped.pop(key, None)
+            if previous_swap is not None:
+                try:
+                    previous_swap.unlink(missing_ok=True)
+                except OSError:
+                    pass
+            self._touch(key)
+        self._evict_if_needed()
+        return True
+
     def set_tiles_batch(self, writes) -> bool:
         """Publish several history tiles with one native bridge crossing."""
         prepared = []
@@ -500,6 +527,23 @@ class TileStore:
                     pass
             self._failed_loads.pop(key, None)
         return updated
+
+    def import_rgba(self, image: QImage, x: int, y: int) -> bool | None:
+        """Initialize an empty store from PSD pixels; None means older native ABI."""
+        if self.occupied_keys:
+            raise ValueError("PSD pixel import requires an empty tile store")
+        if image.format() != QImage.Format.Format_RGBA8888:
+            raise ValueError("PSD pixel import requires straight-alpha RGBA")
+        return self._native_handle.import_rgba(image, x, y)
+
+    def thumbnail(self, size: int = 36) -> QImage | None:
+        """Resident overview without copying every tile through Python."""
+        if self._swapped:
+            return None  # The caller must include scratch-backed pixels too.
+        scale = max(1, int(size)) / max(1, self.width, self.height)
+        image = QImage(max(1, round(self.width * scale)), max(1, round(self.height * scale)),
+                       QImage.Format.Format_ARGB32_Premultiplied)
+        return image if self._native_handle.thumbnail(image) else None
 
     def write_image_at(self, image: QImage, x: int, y: int) -> set[tuple[int, int]]:
         """Copy a smaller source image into this store at document coordinates.

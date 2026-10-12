@@ -29,6 +29,10 @@ struct BrushSettings
     float scatter = 0.0f;
     float sizeJitter = 0.0f;
     float rotationJitter = 0.0f;
+    // Independent per-dab dynamics.  sizeJitter predates the brush editor;
+    // randomSize/randomOpacity are the controls exposed in its Dynamics tab.
+    float randomSize = 0.0f;
+    float randomOpacity = 0.0f;
 
     /*
      * Oriente le dab sur la tangente du trait (« Angle Jitter: Direction »
@@ -56,6 +60,26 @@ struct BrushSettings
 
     bool textureMirror = false;
     bool textureAffectOpacity = true;
+    // Paper grain: sample the texture in canvas pixels (fixed to the page)
+    // instead of per dab.  textureScale is then the tile size / 256 px.
+    bool textureCanvasSpace = false;
+
+    // Dual brush (Photoshop "Dual Brush"): a second tip stamped along the
+    // same path; the main tip only shows where the second one has inked.
+    bool dualBrush = false;
+    float dualSizeRatio = 1.0f;     // second tip diameter / main diameter
+    float dualSpacing = 0.25f;      // fraction of the second tip diameter
+    float dualScatter = 0.0f;       // fraction of the second tip diameter
+    int dualCount = 1;              // stamps per spacing step
+    float dualHardness = 1.0f;      // used when no second-tip image is set
+    // How the two tips combine (Photoshop's dual brush modes):
+    // 0 multiply, 1 darken, 2 colour burn, 3 linear burn, 4 overlay,
+    // 5 colour dodge, 6 hard mix, 7 linear height.
+    int dualMode = 0;
+
+    // Wrap-around (seamless tiles): a dab crossing an edge continues on the
+    // opposite side of the image.
+    bool wrapAround = false;
 
     // Color
     bool dirtyColor = false;
@@ -112,6 +136,10 @@ struct BrushSettings
     float velocityFlow = 0.0f;
     float tiltSize = 0.0f;
     float tiltOpacity = 0.0f;
+    // At high cursor velocity, increase the distance between dabs.  This is
+    // deliberately separate from size dynamics so ink brushes can stay thin
+    // while becoming more textured during fast gestures.
+    float velocitySpacing = 0.0f;
 
     // Deterministic random
     unsigned int randomSeed = 12345;

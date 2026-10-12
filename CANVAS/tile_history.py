@@ -14,6 +14,7 @@ from PySide6.QtGui import QColor, QFont, QImage
 from DOCUMENTS.layer import Layer
 from DOCUMENTS.canvas_objects import EditableText, ReferenceImage
 from DOCUMENTS.tile_store import TILE_SIZE
+from CANVAS.history_labels import describe_step
 from CORE.native_bridge import (create_native_history_cursor,
                                 create_native_history_payload,
                                 copy_image_rect_native,
@@ -25,6 +26,7 @@ from CORE.native_bridge import (create_native_history_cursor,
 
 SELECTION_TILE_ID = "__selection_mask__"
 ALPHA_MASK_TILE_PREFIX = "__alpha_mask__:"
+SELECTION_HISTORY_TILE = 512
 
 
 @dataclass
@@ -34,8 +36,13 @@ class UndoStep:
     tiles: Mapping
     swap_path: str | None = None
     native_state_bytes: int = 0
+    label: str = ""
+    detail: str = ""
 
     def __post_init__(self):
+        if not self.label:
+            self.label, inferred_detail = describe_step(self.before, self.after, self.tiles)
+            self.detail = self.detail or inferred_detail
         if not isinstance(self.tiles, NativeTileDeltaMap):
             self.tiles = NativeTileDeltaMap(self.tiles)
 
@@ -128,9 +135,11 @@ class NativeTileDeltaMap(Mapping):
 class TileHistory:
     """Bounded undo history that retains pixel data only for changed tiles."""
 
-    def __init__(self, tile_size: int = TILE_SIZE, max_steps: int = 30) -> None:
+    def __init__(self, tile_size: int = TILE_SIZE, max_steps: int = 30,
+                 max_snapshot_bytes: int = 512 * 1024 * 1024) -> None:
         self.tile_size = TILE_SIZE
         self.max_steps = max(1, int(max_steps))
+        self.max_snapshot_bytes = max(8 * 1024 * 1024, int(max_snapshot_bytes))
         self.steps: list[UndoStep] = []
         self._native_cursor = create_native_history_cursor(self.max_steps)
         if not self._native_cursor:
@@ -260,6 +269,26 @@ class TileHistory:
         self._discard_oldest_python(removed)
         self._assert_cursor_consistency()
 
+    @property
+    def resident_snapshot_bytes(self) -> int:
+        """Undo payload still resident in RAM (disk-swapped steps cost zero)."""
+        total = 0
+        for step in self.steps:
+            if step.swap_path:
+                continue
+            total += int(getattr(step, "native_state_bytes", 0))
+            total += int(getattr(step.tiles, "native_storage_bytes", 0))
+        return total
+
+    def set_max_snapshot_bytes(self, maximum: int) -> None:
+        self.max_snapshot_bytes = max(8 * 1024 * 1024, int(maximum))
+        self._enforce_snapshot_budget()
+
+    def _enforce_snapshot_budget(self) -> None:
+        """Rotate oldest heavy undo steps before a long session consumes RAM."""
+        while len(self.steps) > 1 and self.resident_snapshot_bytes > self.max_snapshot_bytes:
+            self.discard_oldest(1)
+
     def _append_step(self, step: UndoStep) -> None:
         self._assert_cursor_consistency()
         if self._native_cursor.transaction_open:
@@ -291,6 +320,7 @@ class TileHistory:
             del self.steps[branch_start:]
         self.steps.append(step)
         self._discard_oldest_python(discarded)
+        self._enforce_snapshot_budget()
         self._assert_cursor_consistency()
 
     @staticmethod
@@ -337,6 +367,7 @@ class TileHistory:
             "selection_width": int(state["selection_width"]),
             "selection_height": int(state["selection_height"]),
             "selection_format": getattr(state["selection_format"], "value", state["selection_format"]),
+            "selection_tile_size": state.get("selection_tile_size", TILE_SIZE),
             "active_layer_index": int(state["active_layer_index"]),
             "layers": [{**item, "format": getattr(item["format"], "value", item["format"])}
                        for item in state["layers"]],
@@ -375,9 +406,10 @@ class TileHistory:
             "history_mode": mode,
             "width": document.width,
             "height": document.height,
-            "selection_width": document.selection.image.width(),
-            "selection_height": document.selection.image.height(),
-            "selection_format": document.selection.image.format(),
+            "selection_width": document.selection.width,
+            "selection_height": document.selection.height,
+            "selection_format": QImage.Format.Format_ARGB32,
+            "selection_tile_size": SELECTION_HISTORY_TILE,
         }
         if mode in {"general", "structure"}:
             state.update({
@@ -389,6 +421,9 @@ class TileHistory:
                     "layer_ids": list(group.layer_ids), "visible": group.visible,
                     "opacity": group.opacity, "blend_mode": group.blend_mode,
                     "blend_parameters": dict(group.blend_parameters),
+                    "parent_id": getattr(group, "parent_id", None),
+                    "alpha_mask_present": getattr(group, "alpha_mask_store", None) is not None,
+                    "mask_disabled": bool(getattr(group, "mask_disabled", False)),
                 } for group in getattr(document, "layer_groups", ())],
             })
         if mode == "general" and include_objects:
@@ -410,6 +445,8 @@ class TileHistory:
         dirty_only: bool = False,
         selection_only: bool = False,
         structure_only: bool = False,
+        label: str = "",
+        detail: str = "",
     ) -> None:
         if self._pending is not None or self._native_cursor.transaction_open:
             return
@@ -436,7 +473,12 @@ class TileHistory:
                 "state": state,
                 "mode": mode,
                 "before_tiles": before_tiles,
+                "label": label,
+                "detail": detail,
             }
+            if mode == "structure":
+                for group in getattr(document, "layer_groups", ()):
+                    self.capture_group_mask_before(group)
             self._assert_cursor_consistency()
         except Exception:
             self._native_cursor.cancel_transaction()
@@ -481,10 +523,37 @@ class TileHistory:
             self._pending["before_tiles"][key] = image
         mask_store = layer.alpha_mask_store
         if mask_store is not None:
-            for tx, ty in (mask_store.occupied_keys if keys is None else set(keys)):
+            occupied_mask = mask_store.occupied_keys
+            for tx, ty in (occupied_mask if keys is None else occupied_mask | set(keys)):
                 key = (ALPHA_MASK_TILE_PREFIX + layer.id, int(tx), int(ty))
                 if key not in self._pending["before_tiles"]:
-                    self._pending["before_tiles"][key] = mask_store.tile(tx, ty)
+                    self._pending["before_tiles"][key] = mask_store.tile(tx, ty) if (tx, ty) in occupied_mask else None
+
+    @staticmethod
+    def _owners(document) -> dict:
+        """Everything that can own pixels or a mask, by id (layers and groups)."""
+        owners = {group.id: group for group in getattr(document, "layer_groups", ())}
+        owners.update({layer.id: layer for layer in document.layers})
+        return owners
+
+    def capture_group_mask_before(self, group, whole_grid: bool = False) -> None:
+        """Capture a group's mask before a structural mask edit.
+
+        ``whole_grid`` also records absent (white) tiles, for edits such as
+        invert that write every tile.
+        """
+        if self._pending is None or self._pending["mode"] not in {"dirty", "structure"}:
+            return
+        store = getattr(group, "alpha_mask_store", None)
+        if store is None:
+            return
+        occupied = store.occupied_keys
+        keys = self._tile_keys(store.width, store.height) if whole_grid else occupied
+        for tx, ty in keys:
+            key = (ALPHA_MASK_TILE_PREFIX + group.id, int(tx), int(ty))
+            if key not in self._pending["before_tiles"]:
+                self._pending["before_tiles"][key] = (
+                    store.tile(tx, ty) if (tx, ty) in occupied else None)
 
     def capture_mask_before(self, layer, rect: QRect) -> None:
         """Capture alpha-mask tiles before a mask edit begins."""
@@ -538,9 +607,16 @@ class TileHistory:
         selection = document.selection
         bounds = selection.bounds()
         captured = {}
-        for tx, ty in self._tile_keys(selection.width, selection.height, bounds):
-            tile = self._tile(selection.image, tx, ty)
-            if tile is not None:
+        if bounds.isEmpty():
+            return captured
+        image = selection.image
+        size = SELECTION_HISTORY_TILE
+        for ty in range(bounds.top() // size, bounds.bottom() // size + 1):
+            for tx in range(bounds.left() // size, bounds.right() // size + 1):
+                rect = QRect(tx*size, ty*size, size, size).intersected(image.rect())
+                tile = crop_image_native(image, rect)
+                if tile is None:
+                    raise RuntimeError('CreativeCore is required to capture selection history')
                 captured[(SELECTION_TILE_ID, tx, ty)] = tile
         return captured
 
@@ -554,6 +630,11 @@ class TileHistory:
             if mask_store is not None:
                 for tx, ty in mask_store.occupied_keys:
                     captured[(ALPHA_MASK_TILE_PREFIX + layer.id, tx, ty)] = mask_store.tile(tx, ty)
+        for group in getattr(document, "layer_groups", ()):
+            mask_store = getattr(group, "alpha_mask_store", None)
+            if mask_store is not None:
+                for tx, ty in mask_store.occupied_keys:
+                    captured[(ALPHA_MASK_TILE_PREFIX + group.id, tx, ty)] = mask_store.tile(tx, ty)
         captured.update(self._capture_selection_tiles(document))
         return captured
 
@@ -567,8 +648,8 @@ class TileHistory:
                 diffs[key] = (old_tile, new_tile)
         return diffs
 
-    def _append_if_changed(self, before, after, diffs) -> bool:
-        step = UndoStep(before, after, diffs)
+    def _append_if_changed(self, before, after, diffs, label="", detail="") -> bool:
+        step = UndoStep(before, after, diffs, label=label, detail=detail)
         if before == after and not step.tiles:
             return False
         self._append_step(step)
@@ -603,17 +684,19 @@ class TileHistory:
         if pending["mode"] == "selection":
             diffs = self._make_diffs(
                 pending["before_tiles"], self._capture_selection_tiles(document))
-            return self._append_if_changed(before, after, diffs)
+            return self._append_if_changed(before, after, diffs, pending.get("label", ""), pending.get("detail", ""))
 
         if pending["mode"] == "dirty":
             current_layers = {layer.id: layer for layer in document.layers}
+            owners = self._owners(document)
             occupied_by_store: dict[int, set] = {}
             for key, old_tile in pending["before_tiles"].items():
                 layer_id, tx, ty = key
                 is_mask = layer_id.startswith(ALPHA_MASK_TILE_PREFIX)
                 real_id = layer_id[len(ALPHA_MASK_TILE_PREFIX):] if is_mask else layer_id
-                layer = current_layers.get(real_id)
-                store = (layer.alpha_mask_store if is_mask else layer.tile_store) if layer else None
+                layer = owners.get(real_id) if is_mask else current_layers.get(real_id)
+                store = (getattr(layer, "alpha_mask_store", None) if is_mask
+                         else layer.tile_store) if layer else None
                 if store is None:
                     current_keys = set()
                 else:
@@ -624,17 +707,19 @@ class TileHistory:
                             if (tx, ty) in current_keys else None)
                 if old_tile is not None or new_tile is not None:
                     diffs[key] = (old_tile, new_tile)
-            return self._append_if_changed(before, after, diffs)
+            return self._append_if_changed(before, after, diffs, pending.get("label", ""), pending.get("detail", ""))
 
         if pending["mode"] == "structure":
             current_layers = {layer.id: layer for layer in document.layers}
+            owners = self._owners(document)
             occupied_by_store: dict[int, set] = {}
             for key, old_tile in pending["before_tiles"].items():
                 layer_id, tx, ty = key
                 is_mask = layer_id.startswith(ALPHA_MASK_TILE_PREFIX)
                 real_id = layer_id[len(ALPHA_MASK_TILE_PREFIX):] if is_mask else layer_id
-                layer = current_layers.get(real_id)
-                store = (layer.alpha_mask_store if is_mask else layer.tile_store) if layer else None
+                layer = owners.get(real_id) if is_mask else current_layers.get(real_id)
+                store = (getattr(layer, "alpha_mask_store", None) if is_mask
+                         else layer.tile_store) if layer else None
                 if store is None:
                     current_keys = set()
                 else:
@@ -654,12 +739,12 @@ class TileHistory:
                     for tx, ty in layer.alpha_mask_store.occupied_keys:
                         diffs[(ALPHA_MASK_TILE_PREFIX + layer_id, tx, ty)] = (
                             None, layer.alpha_mask_store.tile(tx, ty))
-            return self._append_if_changed(before, after, diffs)
+            return self._append_if_changed(before, after, diffs, pending.get("label", ""), pending.get("detail", ""))
 
         diffs = self._make_diffs(
             pending["before_tiles"], self._capture_document_tiles(document))
 
-        return self._append_if_changed(before, after, diffs)
+        return self._append_if_changed(before, after, diffs, pending.get("label", ""), pending.get("detail", ""))
 
     @staticmethod
     def _copy_tile(target: QImage, tile: QImage, tx: int, ty: int, tile_size: int) -> None:
@@ -742,20 +827,47 @@ class TileHistory:
                 layers.append(layer)
 
         by_id = {layer.id: layer for layer in layers}
+        existing_groups = {group.id: group for group in getattr(document, "layer_groups", ())}
+        if fast_scope:
+            groups = list(existing_groups.values())
+        else:
+            from DOCUMENTS.layer_group import LayerGroup
+            groups = []
+            for item in state.get("layer_groups", []):
+                # Reuse the live group so its mask store and cache survive.
+                group = existing_groups.get(item["id"]) or LayerGroup(id=item["id"])
+                group.name = item["name"]
+                group.layer_ids = list(item["layer_ids"])
+                group.visible = item["visible"]
+                group.opacity = item["opacity"]
+                group.blend_mode = item["blend_mode"]
+                group.blend_parameters = dict(item.get("blend_parameters", {}))
+                if "parent_id" in item:
+                    group.parent_id = item["parent_id"]
+                if "alpha_mask_present" in item:
+                    if item["alpha_mask_present"]:
+                        group.ensure_alpha_mask(state["width"], state["height"])
+                    else:
+                        group.set_alpha_mask(None)
+                group.mask_disabled = bool(item.get("mask_disabled", group.mask_disabled))
+                group.invalidate()
+                groups.append(group)
+        mask_owners = {group.id: group for group in groups}
+        mask_owners.update(by_id)
         tiles = self.load_step_swap(step) if step.swap_path and not step.tiles else step.tiles
         native_tiles = (tiles if isinstance(tiles, NativeTileDeltaMap) and tiles.is_native
                         and all(layer.tile_store._native_handle for layer in layers) else None)
         native_side = 1 if after else 0
         if mode == "dirty" and any(
                 (layer_id[len(ALPHA_MASK_TILE_PREFIX):] if layer_id.startswith(ALPHA_MASK_TILE_PREFIX)
-                 else layer_id) not in by_id
+                 else layer_id) not in mask_owners
                 for layer_id, _x, _y in tiles):
             raise RuntimeError("Raster history references a layer outside the current stack")
         if mode == "selection" and any(layer_id != SELECTION_TILE_ID
                                         for layer_id, _x, _y in tiles):
             raise RuntimeError("Selection history contains a non-selection tile")
         if native_tiles is not None:
-            if not native_tiles.apply_layers(by_id, native_side):
+            if not native_tiles.apply_layers(mask_owners, native_side):
                 raise OSError("Could not restore native history tiles atomically")
             for layer in layers:
                 layer.discard_image_cache()
@@ -769,7 +881,7 @@ class TileHistory:
             tile = values[1] if after else values[0]
             is_mask = layer_id.startswith(ALPHA_MASK_TILE_PREFIX)
             real_id = layer_id[len(ALPHA_MASK_TILE_PREFIX):] if is_mask else layer_id
-            layer = by_id.get(real_id)
+            layer = mask_owners.get(real_id) if is_mask else by_id.get(real_id)
             if layer is not None:
                 store = layer.ensure_alpha_mask() if is_mask else layer.tile_store
                 rect = store.tile_rect(tx, ty)
@@ -784,54 +896,48 @@ class TileHistory:
         for layer_id, writes in layer_writes.items():
             is_mask = layer_id.startswith(ALPHA_MASK_TILE_PREFIX)
             real_id = layer_id[len(ALPHA_MASK_TILE_PREFIX):] if is_mask else layer_id
-            layer = by_id[real_id]
+            layer = mask_owners[real_id] if is_mask else by_id[real_id]
             store = layer.ensure_alpha_mask() if is_mask else layer.tile_store
             if not store.set_tiles_batch(writes):
                 raise OSError(f"Could not restore history tiles for layer {layer_id}")
             if not is_mask:
                 layer.discard_image_cache()
 
-        selection = document.selection.image
-        if (
-            selection.width() != state["selection_width"]
-            or selection.height() != state["selection_height"]
-            or selection.format() != state["selection_format"]
-        ):
-            selection = QImage(
-                state["selection_width"], state["selection_height"], state["selection_format"]
-            )
-            if not fill_image_native(selection, QColor(0, 0, 0, 0)):
-                raise RuntimeError("CreativeCore is required to clear the selection history")
-        for (layer_id, tx, ty), values in tiles.items():
-            if layer_id != SELECTION_TILE_ID:
-                continue
-            tile = values[1] if after else values[0]
-            rect = QRect(tx * self.tile_size, ty * self.tile_size,
-                         self.tile_size, self.tile_size).intersected(selection.rect())
-            if rect.isEmpty():
-                continue
-            if tile is None:
-                tile = QImage(rect.size(), selection.format())
-                if not fill_image_native(tile, QColor(0, 0, 0, 0)):
-                    raise RuntimeError("CreativeCore is required to clear history tiles")
-            self._copy_tile(selection, tile, tx, ty, self.tile_size)
+        selection = None
+        selection_keys = [key for key in tiles if key[0] == SELECTION_TILE_ID]
+        if selection_keys or mode in {"general", "selection"}:
+            selection = document.selection.image
+            if (selection.width() != state["selection_width"] or
+                    selection.height() != state["selection_height"] or
+                    selection.format() != state["selection_format"]):
+                selection = QImage(state["selection_width"], state["selection_height"], state["selection_format"])
+                selection.fill(0)
+            size = state.get("selection_tile_size", self.tile_size)
+            # Do not deserialize paint deltas just to look for selection entries.
+            for layer_id, tx, ty in selection_keys:
+                if isinstance(tiles, NativeTileDeltaMap):
+                    tile = tiles._payload.tile(tiles._indices[(layer_id, tx, ty)], native_side)
+                else:
+                    tile = tiles[(layer_id, tx, ty)][native_side]
+                rect = QRect(tx*size, ty*size, size, size).intersected(selection.rect())
+                if rect.isEmpty():
+                    continue
+                if tile is None:
+                    tile = QImage(rect.size(), selection.format())
+                    tile.fill(0)
+                self._copy_tile(selection, tile, tx, ty, size)
 
         if not fast_scope:
             document.layers = layers
-            from DOCUMENTS.layer_group import LayerGroup
-            document.layer_groups = [LayerGroup(
-                name=item["name"], id=item["id"], layer_ids=list(item["layer_ids"]),
-                visible=item["visible"], opacity=item["opacity"],
-                blend_mode=item["blend_mode"],
-                blend_parameters=dict(item.get("blend_parameters", {})),
-            ) for item in state.get("layer_groups", [])]
+            document.layer_groups = groups
             document.width = state["width"]
             document.height = state["height"]
             document.active_layer_index = min(
                 state["active_layer_index"], max(0, len(layers) - 1)
             )
-            document.selection.image = selection
-            document.selection.invalidate()
+            if selection is not None:
+                document.selection.image = selection
+                document.selection.invalidate()
             if "reference_images" in state:
                 document.reference_images = [item.copy() for item in state["reference_images"]]
             if "text_objects" in state:
@@ -839,8 +945,9 @@ class TileHistory:
             document.blend_presets = deepcopy(state.get("blend_presets", {}))
             document.sync_native_state()
         elif mode == "selection":
-            document.selection.image = selection
-            document.selection.invalidate()
+            if selection is not None:
+                document.selection.image = selection
+                document.selection.invalidate()
 
     def undo(self, document) -> bool:
         self._assert_cursor_consistency()

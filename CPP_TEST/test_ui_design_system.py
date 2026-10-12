@@ -28,6 +28,7 @@ from UI.widgets.blend_preview import BlendPreviewWidget, PREVIEW_SIZE
 from UI.widgets.color_wheel import ColorWheel
 from PySide6.QtGui import QColor
 from UI.ui import CreativeSystemUI
+from UI.models.workspace_manager import WorkspaceManager
 from CORE.memory_manager import MemoryManager, _create_swap_directory
 from unittest.mock import patch
 
@@ -39,14 +40,55 @@ class UIDesignSystemTests(unittest.TestCase):
 
     def test_theme_and_reusable_widgets_construct(self) -> None:
         ThemeManager.apply(self.app)
-        self.assertIn("#080D1A", self.app.styleSheet())
-        self.assertIn("#8975EC", self.app.styleSheet())
+        self.assertIn("#14161B", self.app.styleSheet())
+        self.assertIn("#A795F3", self.app.styleSheet())
         slider = NumericSlider("Size", 1.0, 100.0, 42.0, 1.0, " px")
         section = CollapsibleSection("Dynamics")
         section.addWidget(slider)
         self.assertEqual(slider.value(), 42.0)
         section.header.setChecked(True)
         self.assertTrue(section.content.isVisibleTo(section))
+
+    def test_workspace_manager_keeps_closed_panels_distinct_from_bad_state(self) -> None:
+        from PySide6.QtWidgets import QDockWidget
+        with tempfile.TemporaryDirectory() as directory:
+            settings = QSettings(str(Path(directory) / "layout.ini"), QSettings.Format.IniFormat)
+            window = QMainWindow()
+            first, second = QDockWidget("First", window), QDockWidget("Second", window)
+            first.setObjectName("FirstDock")
+            second.setObjectName("SecondDock")
+            window.addDockWidget(Qt.DockWidgetArea.LeftDockWidgetArea, first)
+            window.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, second)
+            window.show()
+            self.app.processEvents()
+            manager = WorkspaceManager(window, settings)
+            manager.set_docks((first, second))
+            second.hide()  # A user-closed panel must remain closed after restore.
+            manager.save("Closed panel")
+            second.show()
+            self.assertTrue(manager.load("Closed panel"))
+            self.assertFalse(second.toggleViewAction().isChecked())
+
+            settings.setValue("workspaces/Bad/state", b"not a Qt dock state")
+            settings.setValue("workspaces/Bad/geometry", window.saveGeometry())
+            self.assertFalse(manager.load("Bad"))
+            self.assertTrue(first.toggleViewAction().isChecked())
+            window.close()
+
+    def test_color_dock_uses_compact_keyboard_reachable_mode_selector(self) -> None:
+        from UI.docks.color_dock import ColorDock
+        canvas = Canvas()
+        dock = ColorDock(canvas)
+        try:
+            self.assertEqual([dock.mode_selector.itemText(i) for i in range(dock.mode_selector.count())],
+                             ["TSV", "TSL", "RVB"])
+            dock.mode_selector.setCurrentText("RVB")
+            self.assertEqual(dock._tabs.currentIndex(), 2)
+            # The wheel is always visible, not hidden behind a mode.
+            self.assertFalse(dock.wheel.isHidden())
+        finally:
+            dock.close()
+            canvas.close()
 
     def test_tile_scratch_defaults_to_the_user_cache(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -70,8 +112,8 @@ class UIDesignSystemTests(unittest.TestCase):
 
     def test_requested_preferences_pages_and_tool_icons_exist(self) -> None:
         dialog = PreferencesDialog(None, {})
-        for name in ("General", "Interface", "Canvas", "Input", "Tablet", "Brush",
-                     "Performance", "CPU", "Files", "Autosave", "Color Management"):
+        for name in ("Général", "Interface", "Toile", "Stylet et pinceau",
+                     "Performances", "Fichiers", "Raccourcis"):
             self.assertIn(name, PreferencesDialog.CATEGORIES)
             self.assertGreater(dialog.pages.count(), 0)
         assets = Path(__file__).resolve().parents[1] / "UI" / "icons"
@@ -79,7 +121,7 @@ class UIDesignSystemTests(unittest.TestCase):
         dialog.close()
         self.assertIn(
             "performance/memory_limit_mb",
-            {option[1] for option in PreferencesDialog.OPTIONS["Performance"]},
+            {option[1] for option in PreferencesDialog.OPTIONS["Performances"]},
         )
 
     def test_memory_manager_reports_document_and_gpu_estimates(self) -> None:
@@ -113,6 +155,82 @@ class UIDesignSystemTests(unittest.TestCase):
             )
             canvas.mouseMoveEvent(event)
             self.assertEqual(canvas.cursor_position, QPointF(40, 40))
+        finally:
+            canvas.close()
+
+    def test_status_strip_reports_document_layer_and_cursor_context(self) -> None:
+        """The permanent work context must remain available beside transient hints."""
+        window = QMainWindow()
+        canvas = Canvas()
+        canvas.resize(800, 600)
+        ui = CreativeSystemUI(window, canvas)
+        try:
+            window.show()
+            self.app.processEvents()
+            canvas.cursor_position = QPointF(400, 300)
+            ui._refresh_document_info()
+            self.assertIn("px", ui.document_label.text())
+            self.assertIn("Calque :", ui.layer_status.text())
+            self.assertNotEqual(ui.cursor_status.text(), "—, —")
+        finally:
+            window.close()
+            canvas.close()
+
+    def test_status_notification_never_overlaps_the_persistent_tool_hint(self) -> None:
+        """Transient messages occupy QStatusBar's normal-widget lane."""
+        window = QMainWindow()
+        canvas = Canvas()
+        ui = CreativeSystemUI(window, canvas)
+        try:
+            ui.show_workspace()
+            window.show()
+            self.app.processEvents()
+            bar = window.statusBar()
+            bar.showMessage("Bibliothèque mise à jour")
+            self.app.processEvents()
+            self.assertFalse(ui.status_hint.isVisible())
+            bar.clearMessage()
+            self.app.processEvents()
+            self.assertTrue(ui.status_hint.isVisible())
+        finally:
+            window.close()
+            canvas.close()
+
+    def test_tool_feedback_is_a_real_canvas_overlay(self) -> None:
+        """A shortcut acknowledgement is painted over artwork, never as a dialog."""
+        canvas = Canvas()
+        try:
+            canvas.tools.set_transform()
+            overlay = QImage(280, 100, QImage.Format.Format_ARGB32)
+            overlay.fill(Qt.GlobalColor.transparent)
+            painter = QPainter(overlay)
+            canvas.draw_tool_feedback(painter)
+            painter.end()
+            self.assertGreater(overlay.pixelColor(20, 20).alpha(), 0)
+        finally:
+            canvas.close()
+
+    def test_brush_radius_cursor_is_available_for_all_painting_tools(self) -> None:
+        """Clone and retouch tools share the brush radius and must show it."""
+        canvas = Canvas()
+        try:
+            canvas.resize(300, 220)
+            canvas.cursor_visible = True
+            canvas.cursor_position = QPointF(120, 100)
+            canvas.tools.brush.size = 32.0
+            for activate in (canvas.tools.set_smudge, canvas.tools.set_clone_stamp,
+                             canvas.tools.set_blur, canvas.tools.set_sharpen):
+                activate()
+                image = QImage(300, 220, QImage.Format.Format_ARGB32)
+                image.fill(Qt.GlobalColor.transparent)
+                painter = QPainter(image)
+                canvas.draw_brush_cursor(painter)
+                painter.end()
+                self.assertTrue(any(image.pixelColor(x, y).alpha() > 0
+                                    for y in range(76, 125)
+                                    for x in range(96, 145)))
+                if canvas.tools.current_tool == "clone_stamp":
+                    self.assertGreater(image.pixelColor(120, 100).alpha(), 0)
         finally:
             canvas.close()
 
@@ -274,6 +392,25 @@ class UIDesignSystemTests(unittest.TestCase):
         finally:
             canvas.close()
 
+    def test_visibility_invalidation_only_discards_affected_projection_tiles(self) -> None:
+        canvas = Canvas()
+        try:
+            lower = canvas.document.get_active_layer()
+            upper = canvas.document.add_layer("Top")
+            lower.image.setPixelColor(2, 2, QColor("red"))
+            upper.image.setPixelColor(70, 2, QColor("blue"))
+            lower.commit_image_cache()
+            upper.commit_image_cache()
+            canvas._projection_tile_signatures = {(0, 0): "left", (1, 0): "right"}
+            canvas._projection_ready_tiles = {(0, 0), (1, 0)}
+            invalidated = canvas.invalidate_projection_for_layers((upper,))
+            self.assertEqual(invalidated, 1)
+            self.assertIn((0, 0), canvas._projection_tile_signatures)
+            self.assertNotIn((1, 0), canvas._projection_tile_signatures)
+            self.assertEqual(canvas.performance_stats_snapshot()["projection_cache"]["visibility_invalidated_tiles"], 1)
+        finally:
+            canvas.close()
+
     def test_transform_commit_keeps_rotation_and_translation_without_scaling(self) -> None:
         canvas = Canvas()
         try:
@@ -309,6 +446,42 @@ class UIDesignSystemTests(unittest.TestCase):
 
         self.assertEqual(canvas.tile_history.index, 0)
         canvas.close()
+
+    def test_deferred_undo_burst_is_drained_at_history_boundary(self) -> None:
+        canvas = Canvas()
+        try:
+            layer = canvas.document.get_active_layer()
+            canvas.begin_history_action()
+            layer.image.setPixelColor(8, 8, QColor("red"))
+            canvas.commit_history_action()
+
+            canvas.begin_history_action(dirty_only=True)
+            canvas.undo()
+            canvas.undo()
+            self.assertEqual(canvas._deferred_undo_count, 2)
+            canvas.cancel_history_action()
+
+            loop = QEventLoop()
+            QTimer.singleShot(40, loop.quit)
+            loop.exec()
+            self.assertEqual(canvas.tile_history.index, 0)
+            self.assertEqual(canvas._deferred_undo_count, 0)
+            self.assertIsNone(canvas.tile_history._pending)
+        finally:
+            canvas.close()
+
+    def test_new_stroke_closes_an_unfinished_dirty_action(self) -> None:
+        canvas = Canvas()
+        try:
+            canvas.begin_history_action(dirty_only=True)
+            self.assertEqual(canvas.tile_history._pending["mode"], "dirty")
+            canvas.begin_stroke_history()
+            self.assertEqual(canvas.tile_history._pending["mode"], "dirty")
+            self.assertEqual(canvas.tile_history.index, 0)
+            canvas.cancel_history_action()
+            self.assertIsNone(canvas.tile_history._pending)
+        finally:
+            canvas.close()
 
     def test_selection_shortcut_edit_is_undoable_without_layer_snapshots(self) -> None:
         canvas = Canvas()
@@ -774,13 +947,16 @@ class UIDesignSystemTests(unittest.TestCase):
         canvas = Canvas()
         canvas.set_assistant_mode("ruler")
         snapped = canvas.constrain_assistant_point(QPoint(390, 100))
-        self.assertEqual(snapped.x(), 400)
+        # Brush points stay sub-pixel: the ruler snaps to the exact centre of
+        # an 800 px canvas, (800 - 1) / 2.
+        self.assertAlmostEqual(snapped.x(), 399.5)
         self.assertEqual(snapped.y(), 100)
         canvas.set_assistant_mode("perspective")
         start = canvas.constrain_assistant_point(QPoint(600, 300), begin=True)
         end = canvas.constrain_assistant_point(QPoint(640, 320))
-        self.assertEqual(start.y(), 300)
-        self.assertEqual(end.y(), 300)
+        # Default vanishing point: exact centre of a 600 px tall canvas.
+        self.assertAlmostEqual(start.y(), 299.5)
+        self.assertAlmostEqual(end.y(), 299.5)
         canvas.set_vanishing_point(QPoint(200, 150))
         self.assertAlmostEqual(canvas.assistant_vanishing_point.x(), 200 / 799)
         self.assertAlmostEqual(canvas.assistant_vanishing_point.y(), 150 / 599)

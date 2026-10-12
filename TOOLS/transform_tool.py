@@ -32,15 +32,6 @@ class TransformState:
                 "scale_x": float(self.scale_x), "scale_y": float(self.scale_y),
                 "rotation": float(self.rotation)}
 
-    @classmethod
-    def from_value(cls, value) -> "TransformState":
-        value = value or {}
-        if not isinstance(value, dict):
-            raise ValueError("TransformState invalide")
-        return cls(**{name: float(value.get(name, default)) for name, default in
-                      (("translate_x", 0), ("translate_y", 0), ("scale_x", 1),
-                       ("scale_y", 1), ("rotation", 0))})
-
 
 @dataclass(frozen=True)
 class PerspectiveSpec:

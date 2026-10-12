@@ -346,11 +346,6 @@ class ResourceManager:
                 imported.append(target)
         return imported
 
-    def dependency_status(self, record: ResourceRecord) -> tuple[str, ...]:
-        """Return missing resource identifiers without importing side effects."""
-        available = {f"{item.kind}:{item.name}" for item in self.catalog(app=None)}
-        return tuple(dependency for dependency in record.dependencies if dependency not in available)
-
     def update_resource(self, record: ResourceRecord, source: str | Path) -> ResourceRecord:
         """Atomically replace a resource while retaining a content-addressed rollback copy."""
         source = Path(source)

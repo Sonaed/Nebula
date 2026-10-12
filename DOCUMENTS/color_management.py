@@ -16,10 +16,6 @@ class ColorProfile:
     name: str
     icc_bytes: bytes = b""
 
-    @property
-    def is_embedded(self) -> bool:
-        return bool(self.icc_bytes)
-
     def validate(self) -> None:
         if self.icc_bytes and len(self.icc_bytes) < 128:
             raise ValueError("ICC profile is truncated")

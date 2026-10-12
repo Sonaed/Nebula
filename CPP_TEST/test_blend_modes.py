@@ -11,7 +11,8 @@ from PySide6.QtGui import QColor, QFont, QImage, QPainter
 from PySide6.QtWidgets import QApplication
 
 from DOCUMENTS.document import Document
-from DOCUMENTS.blend_modes import BLEND_MODES, composite_document, composite_layers
+from DOCUMENTS.blend_modes import (BLEND_MODES, clear_composition_cache,
+                                   composite_document, composite_layers)
 from DOCUMENTS.canvas_objects import EditableText
 from CPP_TEST.legacy_blend_reference import composite_reference, _qimage_rgba
 from DOCUMENTS.blend_presets import BLEND_PARAMS, BlendPresetManager
@@ -19,6 +20,45 @@ from DOCUMENTS.layer_manager import LayerManager
 
 
 class BlendModeTests(unittest.TestCase):
+    def test_composite_cache_hit_uses_tile_store_mutation_counter(self) -> None:
+        """A repeated sampled composite must not scan every tile revision."""
+        clear_composition_cache()
+        document = Document(128, 128)
+        layer = document.get_active_layer()
+        tile = QImage(64, 64, QImage.Format.Format_ARGB32)
+        tile.fill(QColor(20, 40, 60, 255))
+        for ty in range(2):
+            for tx in range(2):
+                layer.tile_store.set_tile(tx, ty, tile)
+        original = layer.tile_store.tile_revision
+        reads = 0
+
+        def counted(tx, ty):
+            nonlocal reads
+            reads += 1
+            return original(tx, ty)
+
+        layer.tile_store.tile_revision = counted
+        composite_document(document)
+        reads_before_hit = reads
+        composite_document(document)
+        self.assertEqual(reads, reads_before_hit)
+
+    def test_native_tile_merge_marks_destination_cache_mutated(self) -> None:
+        """The direct native merge must invalidate render/composite caches."""
+        document = Document(64, 64)
+        lower = document.get_active_layer()
+        upper = document.add_layer("Upper")
+        lower.image.fill(QColor("red"))
+        upper.image.fill(QColor("blue"))
+        lower.commit_image_cache()
+        upper.commit_image_cache()
+        before = lower.tile_store._mutation_count
+        self.assertTrue(lower.tile_store.composite_from_store(
+            upper.tile_store, 1.0, 0))
+        self.assertGreater(lower.tile_store._mutation_count, before)
+        self.assertEqual(lower.tile_store.tile(0, 0).pixelColor(0, 0), QColor("blue"))
+
     def test_editable_alpha_mask_is_applied_by_native_document_composition(self) -> None:
         document = Document(2, 1)
         layer = document.get_active_layer()
@@ -320,7 +360,8 @@ class BlendModeTests(unittest.TestCase):
             "clamp": 0.87, "softness": 0.62, "hue_shift": 27.0,
             "saturation_boost": 1.24, "offset": 0.08,
         }
-        for mode in BLEND_MODES:
+        # Frozen legacy oracle; the ten added modes have independent tests.
+        for mode in BLEND_MODES[:16]:
             with self.subTest(mode=mode):
                 top.blend_mode = mode
                 top.blend_parameters = dict(parameters)

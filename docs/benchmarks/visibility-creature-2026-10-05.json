@@ -1,0 +1,111 @@
+{
+  "source": "/run/media/deanos/Stockage/one_million_creature.psd",
+  "scope": "CPU offscreen; no GPU frame-rate claim",
+  "import_seconds": 9.7113,
+  "report": {
+    "layers": 43,
+    "groups": 3,
+    "adjustments": 0,
+    "clipped_layers": 2,
+    "masks": 0,
+    "warnings": []
+  },
+  "thumbnail_seconds": 0.0914,
+  "set_document_seconds": 0.0002,
+  "fit_seconds": 9.3616,
+  "fit_ready": true,
+  "visibility_layer": "Layer 40",
+  "visibility": [
+    {
+      "visible": false,
+      "dispatch_seconds": 0.2857,
+      "preview_available": true,
+      "preview_hash": "9cb3080027aba108aa732f7f69c4701f8b1e9599169581402854f512035ac3f4",
+      "first_projection_slice_seconds": 0.1522,
+      "profiled": false,
+      "exact_seconds": 0.2167,
+      "exact_ready": true,
+      "preview_retired": true
+    },
+    {
+      "visible": true,
+      "dispatch_seconds": 0.0805,
+      "preview_available": true,
+      "preview_hash": "b339803d750ca1af8dd402a26927de2530b9b0e558b8d89794d5f4750c7472d0",
+      "first_projection_slice_seconds": 0.1572,
+      "profiled": false,
+      "exact_seconds": 0.1575,
+      "exact_ready": true,
+      "preview_retired": true
+    },
+    {
+      "visible": false,
+      "dispatch_seconds": 0.079,
+      "preview_available": true,
+      "preview_hash": "9cb3080027aba108aa732f7f69c4701f8b1e9599169581402854f512035ac3f4",
+      "first_projection_slice_seconds": 0.1831,
+      "profiled": false,
+      "exact_seconds": 0.1834,
+      "exact_ready": true,
+      "preview_retired": true
+    },
+    {
+      "visible": true,
+      "dispatch_seconds": 0.0806,
+      "preview_available": true,
+      "preview_hash": "b339803d750ca1af8dd402a26927de2530b9b0e558b8d89794d5f4750c7472d0",
+      "first_projection_slice_seconds": 0.1519,
+      "profiled": false,
+      "exact_seconds": 0.1522,
+      "exact_ready": true,
+      "preview_retired": true
+    }
+  ],
+  "visibility_feedback_changes": true,
+  "zoom_seconds": 0.0325,
+  "zoom_ready": true,
+  "pan_seconds": 0.0157,
+  "pan_ready": true,
+  "idle_seconds": 0.0001,
+  "performance": {
+    "input_to_paint": {
+      "samples": 0,
+      "average_ms": 0.0,
+      "p95_ms": 0.0,
+      "max_ms": 0.0
+    },
+    "native_brush_segment": {
+      "samples": 0,
+      "average_ms": 0.0,
+      "p95_ms": 0.0,
+      "max_ms": 0.0
+    },
+    "projection_cache": {
+      "visible_hits": 38800,
+      "visible_misses": 9751,
+      "prefetch_hits": 140,
+      "prefetch_misses": 52,
+      "visibility_invalidated_tiles": 136,
+      "visibility_deferred_tiles": 0
+    },
+    "tile_cache": {
+      "visible": 266,
+      "recent": 4096,
+      "prefetch": 96,
+      "cold": 0,
+      "requests": 9803,
+      "ready": 9803,
+      "retained_frames": 178,
+      "pan": [
+        -300.0,
+        -180.0
+      ],
+      "zoom": 1.0
+    },
+    "budget_ms": {
+      "target": 8.0,
+      "warning": 16.0,
+      "unacceptable": 40.0
+    }
+  }
+}

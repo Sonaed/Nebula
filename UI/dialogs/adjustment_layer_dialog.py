@@ -86,23 +86,3 @@ class AdjustmentLayerDialog(QDialog):
     def integer(self,f,l,k,v,a,b): c=QSpinBox(self);c.setRange(a,b);c.setValue(int(v));f.addRow(l,c);self.controls[k]=c
     def decimal(self,f,l,k,v,a,b,d): c=QDoubleSpinBox(self);c.setRange(a,b);c.setDecimals(d);c.setValue(float(v));f.addRow(l,c);self.controls[k]=c
     def decimal_mask(self,f,l,k,v,a,b,d): c=QDoubleSpinBox(self);c.setRange(a,b);c.setDecimals(d);c.setValue(float(v));f.addRow(l,c);self.mask_controls[k]=c
-    def result_spec(self):
-        r=dict(self.spec)
-        if self.kind=="curves":r["curves"]={"points":self.editor.curves["rgb"],"channels":{k:self.editor.curves[k] for k in ("red","green","blue")}}
-        elif self.kind=="levels":r["levels"]={k:c.value() for k,c in self.controls.items()}
-        elif self.kind=="hue_saturation":r["hue_saturation"]={k:c.value() for k,c in self.controls.items()}
-        elif self.kind=="exposure":r["exposure"]={k:c.value() for k,c in self.controls.items()}
-        elif self.kind=="brightness_contrast":r["brightness_contrast"]={k:c.value() for k,c in self.controls.items()}
-        elif self.kind=="vibrance":r["vibrance"]={k:c.value() for k,c in self.controls.items()}
-        elif self.kind=="color_balance":r["color_balance"]={zone:[self.controls[f"{zone}_{i}"].value() for i in range(3)] for zone in ("shadows","midtones","highlights")}
-        elif self.kind=="threshold":r["threshold"]=self.controls["threshold"].value()
-        elif self.kind=="posterize":r["posterize"]=self.controls["posterize"].value()
-        elif self.kind=="parametric_curves":r["parametric_curves"]={k:self.controls[k].value() for k in ("black","shadows","midtones","highlights","white")}
-        elif self.kind=="luminosity_mask":r["luminosity_mask"]={"mode":self.mode.currentText(),"amount":self.controls["amount"].value(),"feather":self.controls["feather"].value(),"invert":False}
-        elif self.kind=="selective_color":r["selective_color"]={"channels":{channel:[self.controls[key].value() for key in keys] for channel,keys in self.selective_channels.items()}}
-        if self.kind != "luminosity_mask" and hasattr(self, "mask_mode"):
-            if self.mask_mode.currentText() == "none":
-                r.pop("luminosity_mask", None)
-            else:
-                r["luminosity_mask"]={"mode":self.mask_mode.currentText(),"amount":self.mask_controls["amount"].value(),"feather":self.mask_controls["feather"].value(),"invert":False}
-        return r

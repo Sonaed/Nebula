@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from PySide6.QtCore import Qt
-from PySide6.QtGui import QColor
+from PySide6.QtGui import QColor, QIcon
 from PySide6.QtWidgets import (
     QCheckBox,
     QColorDialog,
@@ -22,7 +22,7 @@ FLOAT_GROUPS = {
     "Base": [
         ("size", "Taille", 0.1, 1000.0, 1.0),
         ("opacity", "Opacité", 0.0, 1.0, 0.01),
-        ("flow", "Flow", 0.0, 1.0, 0.01),
+        ("flow", "Flux", 0.0, 1.0, 0.01),
         ("hardness", "Dureté", 0.0, 1.0, 0.01),
         ("spacing", "Espacement", 0.001, 5.0, 0.01),
         ("roundness", "Rondeur", 0.01, 1.0, 0.01),
@@ -34,10 +34,12 @@ FLOAT_GROUPS = {
     "Pression": [
         ("minimumSize", "Taille minimale", 0.0, 1.0, 0.01),
         ("minimumOpacity", "Opacité minimale", 0.0, 1.0, 0.01),
-        ("minimumFlow", "Flow minimal", 0.0, 1.0, 0.01),
+        ("minimumFlow", "Flux minimal", 0.0, 1.0, 0.01),
         ("velocitySize", "Vitesse → taille", 0.0, 1.0, 0.01),
         ("velocityOpacity", "Vitesse → opacité", 0.0, 1.0, 0.01),
-        ("velocityFlow", "Vitesse → flow", 0.0, 1.0, 0.01),
+        ("velocityFlow", "Vitesse → flux", 0.0, 1.0, 0.01),
+        ("tiltFollow", "Inclinaison → orientation", 0.0, 1.0, 0.01),
+        ("tiltElongation", "Inclinaison → aplatissement", 0.0, 1.0, 0.01),
         ("tiltSize", "Inclinaison → taille", 0.0, 1.0, 0.01),
         ("tiltOpacity", "Inclinaison → opacité", 0.0, 1.0, 0.01),
         ("randomSize", "Aléatoire → taille", 0.0, 1.0, 0.01),
@@ -56,38 +58,56 @@ FLOAT_GROUPS = {
         ("hueJitter", "Variation teinte", 0.0, 1.0, 0.01),
         ("saturationJitter", "Variation saturation", 0.0, 1.0, 0.01),
         ("brightnessJitter", "Variation luminosité", 0.0, 1.0, 0.01),
-        ("gradientAmount", "Quantité gradient", 0.0, 1.0, 0.01),
+        ("gradientAmount", "Quantité de dégradé", 0.0, 1.0, 0.01),
     ],
     "Peinture / Wet": [
-        ("paintMix", "Paint mix", 0.0, 1.0, 0.01),
+        ("paintMix", "Mélange", 0.0, 1.0, 0.01),
         ("wetness", "Humidité", 0.0, 1.0, 0.01),
-        ("pickup", "Pickup", 0.0, 1.0, 0.01),
+        ("pickup", "Prélèvement", 0.0, 1.0, 0.01),
         ("dilution", "Dilution", 0.0, 1.0, 0.01),
-        ("smudge", "Smudge", 0.0, 1.0, 0.01),
+        ("smudge", "Estompage", 0.0, 1.0, 0.01),
         ("paintPersistence", "Persistance", 0.0, 1.0, 0.01),
         ("colorCarry", "Transport couleur", 0.0, 1.0, 0.01),
     ],
+    "Double pointe": [
+        ("dualSizeRatio", "Taille de la 2ᵉ pointe", 0.05, 3.0, 0.01),
+        ("dualSpacing", "Espacement", 0.01, 3.0, 0.01),
+        ("dualScatter", "Dispersion", 0.0, 3.0, 0.01),
+        ("dualCount", "Nombre", 1.0, 16.0, 1.0),
+        ("dualHardness", "Dureté (pointe ronde)", 0.0, 1.0, 0.01),
+    ],
 }
 
+# Photoshop's dual brush modes, in the engine's order.
+DUAL_MODES = ["Produit", "Obscurcir", "Densité couleur +", "Densité linéaire +",
+              "Incrustation", "Densité couleur −", "Mélange maximal", "Hauteur linéaire"]
+
 BOOL_GROUPS = {
+    "Base": [
+        ("antialiasing", "Anticrénelage"),
+        ("wrapAround", "Répéter aux bords de la toile"),
+    ],
     "Pression": [
         ("pressureSize", "Pression → taille"),
         ("pressureOpacity", "Pression → opacité"),
-        ("pressureFlow", "Pression → flow"),
+        ("pressureFlow", "Pression → flux"),
     ],
     "Texture": [
         ("textureMirror", "Miroir"),
         ("textureAffectOpacity", "Texture sur l’opacité"),
     ],
     "Couleur": [
-        ("dirtyColor", "Dirty color"),
-        ("strokeGradient", "Gradient du trait"),
-        ("linearGradient", "Gradient linéaire"),
-        ("radialGradient", "Gradient radial"),
+        ("dirtyColor", "Couleur sale (garde la couleur précédente)"),
+        ("strokeGradient", "Dégradé le long du trait"),
+        ("linearGradient", "Dégradé linéaire"),
+        ("radialGradient", "Dégradé radial"),
     ],
     "Peinture / Wet": [
-        ("wetMix", "Wet mix"),
-        ("sampleCanvas", "Échantillonner le canvas"),
+        ("wetMix", "Peinture humide"),
+        ("sampleCanvas", "Prélever la couleur de la toile"),
+    ],
+    "Double pointe": [
+        ("dualBrush", "Activer la double pointe"),
     ],
 }
 
@@ -98,7 +118,7 @@ class BrushSettingsDialog(QDialog):
     def __init__(self, canvas, parent=None) -> None:
         super().__init__(parent)
         self.canvas = canvas
-        self.setWindowTitle("Paramètres du brush C++")
+        self.setWindowTitle("Réglages du pinceau")
         self.resize(620, 620)
 
         root = QVBoxLayout(self)
@@ -112,13 +132,18 @@ class BrushSettingsDialog(QDialog):
 
             for key, label, minimum, maximum, step in fields:
                 spin = QDoubleSpinBox()
-                spin.setRange(minimum, maximum)
-                spin.setDecimals(3)
-                spin.setSingleStep(step)
-                spin.setValue(float(values[key]))
+                percent = (minimum >= -1.0 and maximum <= 1.0 and step <= 0.01) or key in (
+                    "spacing", "scatter", "dualSizeRatio", "dualSpacing", "dualScatter")
+                scale = 100.0 if percent else 1.0
+                spin.setRange(minimum * scale, maximum * scale)
+                spin.setDecimals(0 if percent or step >= 1.0 else 2)
+                spin.setSingleStep(1.0 if percent else step)
+                spin.setSuffix(" %" if percent else (" °" if key in ("angle", "rotationJitter") else
+                                                    (" px" if key == "size" else "")))
+                spin.setValue(float(values[key]) * scale)
                 spin.valueChanged.connect(
-                    lambda value, setting=key:
-                    self.canvas.set_brush_setting(setting, value)
+                    lambda value, setting=key, factor=scale:
+                    self.canvas.set_brush_setting(setting, value / factor)
                 )
                 form.addRow(label, spin)
 
@@ -151,16 +176,26 @@ class BrushSettingsDialog(QDialog):
 
             if group_name == "Peinture / Wet":
                 blend = QComboBox()
-                blend.addItems(["Normal", "Multiply", "Screen", "Overlay", "Darken", "Lighten"])
+                blend.addItems(["Normal", "Produit", "Écran", "Incrustation", "Obscurcir", "Éclaircir"])
                 blend.setCurrentIndex(int(values["blendMode"]))
                 blend.currentIndexChanged.connect(
                     lambda index: self.canvas.set_brush_setting("blendMode", index)
                 )
                 form.addRow("Mode de mélange", blend)
 
-            tabs.addTab(page, group_name)
+            if group_name == "Double pointe":
+                dual_mode = QComboBox()
+                dual_mode.addItems(DUAL_MODES)
+                dual_mode.setCurrentIndex(int(values.get("dualMode", 0)))
+                dual_mode.currentIndexChanged.connect(
+                    lambda index: self.canvas.set_brush_setting("dualMode", float(index)))
+                form.addRow("Mode de fusion", dual_mode)
+
+            tabs.addTab(page, {"Peinture / Wet": "Peinture", "Pression": "Dynamique"}.get(group_name, group_name))
 
         buttons = QDialogButtonBox(QDialogButtonBox.Close)
+        buttons.button(QDialogButtonBox.Close).setText("Fermer")
+        buttons.button(QDialogButtonBox.Close).setIcon(QIcon())
         buttons.rejected.connect(self.reject)
         root.addWidget(buttons)
 

@@ -11,10 +11,7 @@ from PySide6.QtGui import QImage
 from CORE.native_bridge import configure_projection_api
 
 
-_MODES = ("normal", "darken", "multiply", "color_burn", "lighten", "screen",
-          "color_dodge", "overlay", "soft_light", "hard_light", "difference",
-          "exclusion", "hue", "saturation", "color", "luminosity")
-_MODE_IDS = {name: i for i, name in enumerate(_MODES)}
+from DOCUMENTS.blend_mode_catalog import BLEND_MODES as _MODES, BLEND_MODE_IDS as _MODE_IDS
 _PARAMS = ("opacity", "opposite_mix", "intensity", "gamma", "mix_normal", "pivot",
            "clamp", "softness", "hue_shift", "saturation_boost", "offset")
 _DEFAULTS = (1., 0., 1., 1., 0., .5, 1., .5, 0., 1., 0.)

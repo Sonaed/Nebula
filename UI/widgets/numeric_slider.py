@@ -9,9 +9,11 @@ class NumericSlider(QWidget):
 
     def __init__(self, label: str, minimum: float, maximum: float, value: float,
                  step: float = 0.01, unit: str = "", default: float | None = None,
-                 parent=None) -> None:
+                 parent=None, display_scale: float = 1.0) -> None:
         super().__init__(parent)
         self._minimum, self._maximum = minimum, maximum
+        # Normalised 0–1 settings read as percentages (display_scale=100).
+        self._scale = float(display_scale) or 1.0
         self._steps = max(1, round((maximum - minimum) / step))
         self._default = value if default is None else default
         root = QVBoxLayout(self)
@@ -19,13 +21,15 @@ class NumericSlider(QWidget):
         root.setSpacing(2)
         header = QHBoxLayout()
         header.setContentsMargins(0, 0, 0, 0)
-        self.label = QLabel(label.upper())
+        self.label = QLabel(label)
         self.label.setObjectName("parameterLabel")
         self.spin = QDoubleSpinBox()
         self.spin.setObjectName("parameterValue")
-        self.spin.setRange(minimum, maximum)
-        self.spin.setSingleStep(step)
-        self.spin.setDecimals(max(0, min(4, len(str(step).split(".")[-1]))))
+        self.spin.setRange(minimum * self._scale, maximum * self._scale)
+        shown_step = step * self._scale
+        self.spin.setSingleStep(shown_step)
+        self.spin.setDecimals(0 if float(shown_step).is_integer() else
+                              max(0, min(3, len(str(shown_step).split(".")[-1]))))
         self.spin.setSuffix(unit)
         self.spin.setButtonSymbols(QDoubleSpinBox.ButtonSymbols.NoButtons)
         self.spin.setFrame(False)
@@ -50,11 +54,12 @@ class NumericSlider(QWidget):
     def _slider_changed(self, value: int) -> None:
         actual = self._from_slider(value)
         blocked = self.spin.blockSignals(True)
-        self.spin.setValue(actual)
+        self.spin.setValue(actual * self._scale)
         self.spin.blockSignals(blocked)
         self.valueChanged.emit(actual)
 
     def _spin_changed(self, value: float) -> None:
+        value = value / self._scale
         blocked = self.slider.blockSignals(True)
         self.slider.setValue(self._to_slider(value))
         self.slider.blockSignals(blocked)
@@ -63,7 +68,7 @@ class NumericSlider(QWidget):
     def setValue(self, value: float, *, emit: bool = False) -> None:
         for control in (self.spin, self.slider):
             control.blockSignals(True)
-        self.spin.setValue(value)
+        self.spin.setValue(value * self._scale)
         self.slider.setValue(self._to_slider(value))
         for control in (self.spin, self.slider):
             control.blockSignals(False)
@@ -71,7 +76,7 @@ class NumericSlider(QWidget):
             self.valueChanged.emit(float(value))
 
     def value(self) -> float:
-        return self.spin.value()
+        return self.spin.value() / self._scale
 
     def mouseDoubleClickEvent(self, event) -> None:
         self.setValue(self._default, emit=True)

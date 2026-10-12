@@ -20,6 +20,34 @@ class ColorWheel(QWidget):
         self._hue, self._saturation, self._value = 0.0, 0.0, 0.0
         self._cache: QPixmap | None = None
         self._drag_zone = ""
+        # Gamut mask: allowed hue sectors as (centre°, width°). Empty = off.
+        self._gamut: list[tuple[float, float]] = []
+
+    # ── gamut mask ──────────────────────────────────────────────────────────
+    def set_gamut(self, sectors: list[tuple[float, float]]) -> None:
+        """Restrict hue picking to sectors (centre in degrees, width in degrees)."""
+        self._gamut = [(c % 360.0, max(1.0, min(360.0, w))) for c, w in sectors]
+        self._cache = None
+        self.update()
+
+    def gamut(self) -> list[tuple[float, float]]:
+        return list(self._gamut)
+
+    def _in_gamut(self, degrees_value: float) -> bool:
+        if not self._gamut:
+            return True
+        return any(abs((degrees_value - c + 180.0) % 360.0 - 180.0) <= w / 2 for c, w in self._gamut)
+
+    def _snap_to_gamut(self, degrees_value: float) -> float:
+        if self._in_gamut(degrees_value):
+            return degrees_value
+        best, best_distance = degrees_value, 1e9
+        for centre, width in self._gamut:
+            for edge in (centre - width / 2, centre + width / 2):
+                distance = abs((degrees_value - edge + 180.0) % 360.0 - 180.0)
+                if distance < best_distance:
+                    best, best_distance = edge % 360.0, distance
+        return best
 
     def color(self) -> QColor:
         return QColor.fromHsvF(self._hue, self._saturation, self._value)
@@ -57,6 +85,20 @@ class ColorWheel(QWidget):
         painter.setBrush(hue)
         painter.drawEllipse(wheel)
         inner = wheel.adjusted(wheel.width() * .12, wheel.height() * .12, -wheel.width() * .12, -wheel.height() * .12)
+        if self._gamut:
+            # Darken the hues outside the mask on the ring.
+            shade = QColor(COLORS["wheel_surface"])
+            shade.setAlpha(205)
+            painter.setBrush(shade)
+            # One pie per contiguous run of excluded hues (no seams).
+            start = None
+            for step in range(361):
+                outside = step < 360 and not self._in_gamut(step + 0.5)
+                if outside and start is None:
+                    start = step
+                elif not outside and start is not None:
+                    painter.drawPie(wheel, int(start * 16), int((step - start) * 16))
+                    start = None
         painter.setBrush(QColor(COLORS["wheel_surface"]))
         painter.drawEllipse(inner)
         saturation = QLinearGradient(field.topLeft(), field.topRight())
@@ -101,7 +143,7 @@ class ColorWheel(QWidget):
         if self._drag_zone == "wheel" or (not self._drag_zone and distance > wheel.width() * .36):
             self._drag_zone = "wheel"
             angle = degrees(atan2(center.y() - position.y(), position.x() - center.x())) % 360
-            self._hue = angle / 360.0
+            self._hue = self._snap_to_gamut(angle) / 360.0
             self._cache = None
         else:
             self._drag_zone = "field"

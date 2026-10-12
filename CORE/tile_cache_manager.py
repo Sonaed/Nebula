@@ -33,6 +33,7 @@ class TileCacheManager:
         self._recent: OrderedDict[tuple[int, int], None] = OrderedDict()
         self.pan_vector = (0.0, 0.0)
         self.zoom = 1.0
+        self._demand_key = None
         self.metrics = {"visible": 0, "recent": 0, "prefetch": 0, "cold": 0,
                         "requests": 0, "ready": 0, "retained_frames": 0}
 
@@ -49,18 +50,34 @@ class TileCacheManager:
         # band; zoomed-out views favor the already available projection mipmap.
         radius = 1 if speed < 40 else 0
         lead = 0 if self.zoom < .5 else (3 if speed >= 40 else 1)
+        sx = 1 if dx < 0 else -1 if dx > 0 else 0
+        sy = 1 if dy < 0 else -1 if dy > 0 else 0
+        valid = set(all_keys) if all_keys else None
+        demand_key = (frozenset(self.visible), frozenset(self.active_group),
+                      radius, lead, sx if lead else 0, sy if lead else 0,
+                      None if valid is None else frozenset(valid))
+        if demand_key == self._demand_key:
+            # A large fit-to-window projection takes several budgeted frames.
+            # Its spatial demand is unchanged while tiles arrive; rebuilding
+            # the halo and touching every LRU entry per frame is quadratic.
+            while len(self._recent) > self.budgets.projection_tiles:
+                self._recent.popitem(last=False)
+            self.metrics.update({"recent": len(self._recent),
+                                 "cold": max(0, len(valid or ()) - len(self._recent))})
+            return self.visible | self.prefetch
+        self._demand_key = demand_key
         prefetch = set()
         for tx, ty in self.visible:
             for oy in range(-radius, radius + 1):
                 for ox in range(-radius, radius + 1): prefetch.add((tx + ox, ty + oy))
             if lead:
-                sx = 1 if dx < 0 else -1 if dx > 0 else 0
-                sy = 1 if dy < 0 else -1 if dy > 0 else 0
                 for step in range(1, lead + 1): prefetch.add((tx + sx * step, ty + sy * step))
-        valid = set(all_keys) if all_keys else None
         self.prefetch = (prefetch if valid is None else prefetch & valid) - self.visible
-        for key in self.visible | self.prefetch | self.active_group:
-            self._recent[key] = None; self._recent.move_to_end(key)
+        # Demand priority must also be LRU priority: an arbitrary set order
+        # could evict the visible tile before speculative halo tiles.
+        for category in (self.prefetch, self.active_group, self.visible):
+            for key in category:
+                self._recent[key] = None; self._recent.move_to_end(key)
         while len(self._recent) > self.budgets.projection_tiles: self._recent.popitem(last=False)
         self.metrics.update({"visible": len(self.visible), "recent": len(self._recent), "prefetch": len(self.prefetch),
                              "cold": max(0, len(valid or ()) - len(self._recent))})

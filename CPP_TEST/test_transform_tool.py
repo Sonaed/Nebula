@@ -81,6 +81,49 @@ class TransformToolTests(unittest.TestCase):
             restored = NebulaFormat.load(target)
         self.assertEqual(restored.get_active_layer().transform_state["rotation"], 12.0)
 
+    def test_complex_transform_log_round_trips(self) -> None:
+        import tempfile
+        from pathlib import Path
+        from DOCUMENTS.document import Document
+        from DOCUMENTS.format_nebula import NebulaFormat
+        document = Document(16, 16)
+        layer = document.get_active_layer()
+        layer.transform_operations = [{"kind": "warp", "controls": [{"x": 2, "y": 2, "dx": 1, "dy": 0}]}]
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory) / "complex-transform.nebula"
+            self.assertTrue(NebulaFormat.save(document, target))
+            restored = NebulaFormat.load(target)
+        self.assertEqual(restored.get_active_layer().transform_operations, layer.transform_operations)
+
+    def test_vector_mask_metadata_round_trips_with_link_state(self) -> None:
+        import tempfile
+        from pathlib import Path
+        from DOCUMENTS.document import Document
+        from DOCUMENTS.format_nebula import NebulaFormat
+        document = Document(16, 16)
+        layer = document.get_active_layer()
+        layer.mask_linked = False
+        layer.vector_mask = [{"closed": True, "points": [[1, 1], [12, 1], [12, 12]]}]
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory) / "vector-mask.nebula"
+            self.assertTrue(NebulaFormat.save(document, target))
+            restored = NebulaFormat.load(target).get_active_layer()
+        self.assertFalse(restored.mask_linked)
+        self.assertEqual(restored.vector_mask, layer.vector_mask)
+
+    def test_versioned_resource_manifest_round_trips(self) -> None:
+        import tempfile
+        from pathlib import Path
+        from DOCUMENTS.document import Document
+        from DOCUMENTS.format_nebula import NebulaFormat
+        document = Document(16, 16)
+        document.resource_manifest = {"stardust.brushes": {"version": "1", "value": {"count": 2}}}
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "resources.nebula"
+            self.assertTrue(NebulaFormat.save(document, path))
+            restored = NebulaFormat.load(path)
+        self.assertEqual(restored.resource_manifest, document.resource_manifest)
+
     def test_native_selection_transform_matches_independent_reference(self) -> None:
         native = load_creative_core()
         self.assertIsNotNone(native)

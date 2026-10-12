@@ -92,11 +92,20 @@ def _configure_tile_store(library) -> None:
         ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int,
         ctypes.c_int, ctypes.c_int, ctypes.POINTER(ctypes.c_int), ctypes.c_int]
     library.cs_tile_store_write_image.restype = ctypes.c_int
+    if hasattr(library, "cs_tile_store_import_rgba"):
+        library.cs_tile_store_import_rgba.argtypes = [handle, byte_ptr] + [ctypes.c_int] * 5
+        library.cs_tile_store_import_rgba.restype = ctypes.c_int
+    if hasattr(library, "cs_tile_store_thumbnail"):
+        library.cs_tile_store_thumbnail.argtypes = [handle, byte_ptr] + [ctypes.c_int] * 3
+        library.cs_tile_store_thumbnail.restype = ctypes.c_int
     library.cs_tile_store_copy.argtypes = [handle, ctypes.c_int, ctypes.c_int, byte_ptr,
         ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int]
     library.cs_tile_store_copy.restype = ctypes.c_int
     library.cs_tile_store_copy_store.argtypes = [handle, handle]
     library.cs_tile_store_copy_store.restype = ctypes.c_int
+    if hasattr(library, "cs_tile_store_composite_from"):
+        library.cs_tile_store_composite_from.argtypes = [handle, handle, ctypes.c_float, ctypes.c_int]
+        library.cs_tile_store_composite_from.restype = ctypes.c_int
     library.cs_tile_store_materialize.argtypes = [handle, byte_ptr, ctypes.c_int,
         ctypes.c_int, ctypes.c_int, ctypes.c_int]
     library.cs_tile_store_materialize.restype = ctypes.c_int
@@ -110,6 +119,10 @@ def _configure_tile_store(library) -> None:
         library.cs_tile_store_copy_key_revisions.argtypes = [
             handle, ctypes.POINTER(ctypes.c_int), ctypes.POINTER(ctypes.c_uint64), ctypes.c_int]
         library.cs_tile_store_copy_key_revisions.restype = ctypes.c_int
+    if hasattr(library, "cs_tile_store_copy_opaque_keys"):
+        library.cs_tile_store_copy_opaque_keys.argtypes = [
+            handle, ctypes.POINTER(ctypes.c_int), ctypes.c_int]
+        library.cs_tile_store_copy_opaque_keys.restype = ctypes.c_int
     library.cs_tile_store_remove.argtypes = [handle, ctypes.c_int, ctypes.c_int]
     library.cs_tile_store_remove.restype = ctypes.c_int
     library.cs_tile_store_write_png.argtypes = [handle, ctypes.c_int, ctypes.c_int, ctypes.c_char_p]
@@ -638,6 +651,22 @@ class NativeTileStoreHandle:
         flat = pairs[:copied * 2]
         return dict(zip(zip(flat[0::2], flat[1::2]), revisions[:copied]))
 
+    def opaque_keys(self):
+        """Fully opaque resident tile coordinates, or None with an old bridge."""
+        function = getattr(self._library, "cs_tile_store_copy_opaque_keys", None)
+        if function is None or not self._handle:
+            return None
+        count = function(self._handle, None, 0)
+        if count < 0:
+            return None
+        if count == 0:
+            return set()
+        values = (ctypes.c_int * (count * 2))()
+        copied = function(self._handle, values, count)
+        if copied < 0:
+            return None
+        return {(values[i * 2], values[i * 2 + 1]) for i in range(copied)}
+
     def count(self):
         return len(self.keys())
 
@@ -676,8 +705,26 @@ class NativeTileStoreHandle:
         return bool(self._handle and source and self._library.cs_tile_store_copy_store(
             self._handle, source._handle))
 
+    def composite_from(self, source: "NativeTileStoreHandle", opacity: float, mode: int):
+        function = getattr(self._library, "cs_tile_store_composite_from", None)
+        if not self._handle or not source or function is None:
+            return None
+        return bool(function(self._handle, source._handle, float(opacity), int(mode)))
+
     def materialize(self, image):
         return self._image_call("cs_tile_store_materialize", image)
+
+    def import_rgba(self, image, x, y):
+        function = getattr(self._library, "cs_tile_store_import_rgba", None)
+        if function is None:
+            return None
+        return bool(function(self._handle, qimage_const_pointer(image), image.width(),
+                             image.height(), image.bytesPerLine(), int(x), int(y)))
+
+    def thumbnail(self, image):
+        function = getattr(self._library, "cs_tile_store_thumbnail", None)
+        return bool(function and function(self._handle, qimage_pointer(image),
+                         image.width(), image.height(), image.bytesPerLine()))
 
     def write_image(self, image, rect, capacity):
         changed = (ctypes.c_int * max(1, int(capacity) * 2))()
@@ -1067,6 +1114,15 @@ def _configure_gradients(library) -> None:
         *([ctypes.c_float] * 4), *([ctypes.c_int] * 4),
     ]
     library.cs_apply_linear_gradient.restype = ctypes.c_int
+    extended = getattr(library, "cs_apply_gradient", None)
+    if extended is not None:
+        byte_ptr = ctypes.POINTER(ctypes.c_uint8)
+        extended.argtypes = [
+            byte_ptr, *([ctypes.c_int] * 4), *([ctypes.c_double] * 4),
+            *([ctypes.c_int] * 3), ctypes.c_double, *([ctypes.c_int] * 8),
+            byte_ptr, *([ctypes.c_int] * 4),
+        ]
+        extended.restype = ctypes.c_int
 
 
 def _configure_canvas_api(library) -> None:
@@ -1122,14 +1178,20 @@ def _configure_canvas_api(library) -> None:
         ctypes.POINTER(ctypes.c_float), ctypes.POINTER(ctypes.c_float)]
     library.cs_brush_smooth_point.restype = ctypes.c_int
     float_setters = (
+        "cs_brush_set_dual_size_ratio", "cs_brush_set_dual_spacing",
+        "cs_brush_set_dual_scatter", "cs_brush_set_dual_count", "cs_brush_set_dual_hardness",
+        "cs_brush_set_dual_mode",
         "cs_brush_set_size", "cs_brush_set_opacity", "cs_brush_set_flow",
         "cs_brush_set_hardness", "cs_brush_set_spacing", "cs_brush_set_roundness",
         "cs_brush_set_angle", "cs_brush_set_scatter", "cs_brush_set_size_jitter",
         "cs_brush_set_rotation_jitter",
         "cs_brush_set_direction_follow", "cs_brush_set_tilt_follow",
-        "cs_brush_set_tilt_elongation",
+        "cs_brush_set_tilt_elongation", "cs_brush_set_tilt_size",
+        "cs_brush_set_tilt_opacity", "cs_brush_set_random_size",
+        "cs_brush_set_random_opacity",
         "cs_brush_set_velocity_size",
         "cs_brush_set_velocity_opacity", "cs_brush_set_velocity_flow",
+        "cs_brush_set_velocity_spacing",
         "cs_brush_set_texture_strength", "cs_brush_set_texture_scale",
         "cs_brush_set_texture_random_scale", "cs_brush_set_texture_random_offset",
         "cs_brush_set_texture_brightness", "cs_brush_set_texture_contrast",
@@ -1142,7 +1204,9 @@ def _configure_canvas_api(library) -> None:
     )
     int_setters = (
         "cs_brush_set_eraser", "cs_brush_set_texture_mirror",
-        "cs_brush_set_texture_affect_opacity", "cs_brush_set_dirty_color",
+        "cs_brush_set_texture_affect_opacity", "cs_brush_set_texture_canvas_space",
+        "cs_brush_set_dual_brush", "cs_brush_set_wrap_around",
+        "cs_brush_set_dirty_color",
         "cs_brush_set_stroke_gradient", "cs_brush_set_linear_gradient",
         "cs_brush_set_radial_gradient", "cs_brush_set_wet_mix",
         "cs_brush_set_sample_canvas", "cs_brush_set_smudge_tool",
@@ -1220,11 +1284,18 @@ def _configure_canvas_api(library) -> None:
         "cs_brush_set_bitmap_tip_path": ([handle, ctypes.c_char_p], ctypes.c_int),
         "cs_brush_set_bitmap_tip_png": ([handle, byte_ptr, ctypes.c_uint64], ctypes.c_int),
         "cs_brush_clear_bitmap_tip": ([handle], None),
+        "cs_brush_set_dual_tip_png": ([handle, byte_ptr, ctypes.c_uint64], ctypes.c_int),
+        "cs_brush_clear_dual_tip": ([handle], None),
         "cs_brush_draw_segment_tilt": (
             [handle, byte_ptr, *([ctypes.c_int] * 3), *([ctypes.c_float] * 10)], None,
         ),
         "cs_fill": (
             [byte_ptr, *([ctypes.c_int] * 7), *([ctypes.c_uint8] * 4),
+             int_ptr, int_ptr, int_ptr, int_ptr], ctypes.c_int,
+        ),
+        "cs_fill_ex": (
+            [byte_ptr, *([ctypes.c_int] * 4), byte_ptr, ctypes.c_int, ctypes.c_int,
+             *([ctypes.c_int] * 5), *([ctypes.c_uint8] * 4), ctypes.c_int,
              int_ptr, int_ptr, int_ptr, int_ptr], ctypes.c_int,
         ),
         "cs_fill_bounds": (
@@ -1435,8 +1506,7 @@ _BLEND_MODE_IDS = {
     "lighten": 4, "screen": 5, "color_dodge": 6, "overlay": 7,
     "soft_light": 8, "hard_light": 9, "difference": 10, "exclusion": 11,
 }
-_PARAMETER_MODE_IDS = {**_BLEND_MODE_IDS, "hue": 12, "saturation": 13,
-                       "color": 14, "luminosity": 15}
+from DOCUMENTS.blend_mode_catalog import BLEND_MODE_IDS as _PARAMETER_MODE_IDS
 _PARAMETER_KEYS = ("opacity", "opposite_mix", "intensity", "gamma", "mix_normal",
                    "pivot", "clamp", "softness", "hue_shift",
                    "saturation_boost", "offset")
@@ -1492,7 +1562,7 @@ def composite_layers_native(width: int, height: int, layers):
         if image.isNull():
             return None
         keepalive.append(image)
-        entries.append((qimage_pointer(image), image.bytesPerLine(), image.format().value,
+        entries.append((qimage_const_pointer(image), image.bytesPerLine(), image.format().value,
                         float(layer.opacity), mode, 1))
     composite_type = library._cs_composite_layer_type
     native_layers = (composite_type * len(entries))(*[
@@ -1535,7 +1605,7 @@ def composite_layers_advanced(width: int, height: int, layers):
                 value = default
             values.append(value if math.isfinite(value) else default)
         keepalive.append(image)
-        entries.append((qimage_pointer(image), image.bytesPerLine(), float(layer.opacity),
+        entries.append((qimage_const_pointer(image), image.bytesPerLine(), float(layer.opacity),
                         mode, 1, int(bool(getattr(layer, "clipping", False))), values))
     native_type = library._cs_advanced_composite_layer_type
     native_layers = (native_type * len(entries))(*[
@@ -1609,38 +1679,28 @@ def filter_brush_segment(image, start_x: float, start_y: float,
     return True
 
 
-def native_flood_fill(image, x: int, y: int, tolerance: int, color,
-                      library=None):
-    """Run CreativeCore's connected fill; return its bounds or None offline."""
+def native_fill_ex(target, reference, x: int, y: int, tolerance: int, gap: int, grow: int,
+                   color, apply: bool, library=None):
+    """Colouring fill (reference image, gap closing, grow). Returns bounds or None."""
     from PySide6.QtGui import QImage
 
-    function = getattr(library, "cs_fill", None) if library else None
-    if (function is None or image.format() not in (
-            QImage.Format.Format_ARGB32, QImage.Format.Format_RGBA8888)):
+    function = getattr(library or load_creative_core(), "cs_fill_ex", None)
+    formats = (QImage.Format.Format_ARGB32, QImage.Format.Format_RGBA8888)
+    if function is None or target.format() not in formats:
+        return None
+    if reference is not None and (reference.format() not in formats or reference.size() != target.size()):
         return None
     bounds = [ctypes.c_int() for _ in range(4)]
-    if not function(
-        qimage_pointer(image), image.width(), image.height(), image.bytesPerLine(),
-        image.format().value, int(x), int(y), int(tolerance), color.red(),
-        color.green(), color.blue(), color.alpha(),
-        *(ctypes.byref(value) for value in bounds),
-    ):
-        return (0, 0, 0, 0)
-    return tuple(value.value for value in bounds)
-
-
-def native_flood_fill_bounds(image, x: int, y: int, tolerance: int, library=None):
-    """Return the connected fill's bounds without modifying its image."""
-    from PySide6.QtGui import QImage
-
-    function = getattr(library or load_creative_core(), "cs_fill_bounds", None)
-    if (function is None or image.format() not in (
-            QImage.Format.Format_ARGB32, QImage.Format.Format_RGBA8888)):
-        return None
-    bounds = [ctypes.c_int() for _ in range(4)]
-    if not function(qimage_pointer(image), image.width(), image.height(),
-                    image.bytesPerLine(), image.format().value, int(x), int(y),
-                    int(tolerance), *(ctypes.byref(value) for value in bounds)):
+    ref_ptr = qimage_pointer(reference) if reference is not None else None
+    ok = function(
+        qimage_pointer(target), target.width(), target.height(), target.bytesPerLine(),
+        target.format().value,
+        ref_ptr, reference.bytesPerLine() if reference is not None else 0,
+        reference.format().value if reference is not None else 0,
+        int(x), int(y), int(tolerance), int(gap), int(grow),
+        color.red(), color.green(), color.blue(), color.alpha(), 1 if apply else 0,
+        *(ctypes.byref(value) for value in bounds))
+    if not ok:
         return None
     return tuple(value.value for value in bounds)
 
@@ -1655,7 +1715,7 @@ def native_magic_wand(image, x: int, y: int, tolerance: int, mask,
             QImage.Format.Format_ARGB32, QImage.Format.Format_RGBA8888)):
         return None
     return bool(function(
-        qimage_pointer(image), image.width(), image.height(), image.bytesPerLine(),
+        qimage_const_pointer(image), image.width(), image.height(), image.bytesPerLine(),
         image.format().value, int(x), int(y), int(tolerance),
         qimage_pointer(mask), mask.bytesPerLine(),
     ))
@@ -1676,7 +1736,7 @@ def native_selection_combine(destination, candidate, operation: str) -> bool | N
             or candidate.format() != QImage.Format.Format_ARGB32):
         return None
     return bool(library.cs_selection_combine(
-        qimage_pointer(destination), qimage_pointer(candidate),
+        qimage_pointer(destination), qimage_const_pointer(candidate),
         destination.width(), destination.height(), destination.bytesPerLine(),
         candidate.bytesPerLine(), _SELECTION_OPERATION_IDS[str(operation)],
     ))
@@ -1702,7 +1762,7 @@ def native_selection_bounds(image):
         return None
     values = [ctypes.c_int() for _ in range(4)]
     if not library.cs_selection_bounds(
-        qimage_pointer(image), image.width(), image.height(), image.bytesPerLine(),
+        qimage_const_pointer(image), image.width(), image.height(), image.bytesPerLine(),
         *(ctypes.byref(value) for value in values),
     ):
         return None
@@ -1717,7 +1777,7 @@ def native_selection_contains(image, x: int, y: int) -> bool | None:
         return None
     selected = ctypes.c_int()
     if not library.cs_selection_contains(
-        qimage_pointer(image), image.width(), image.height(), image.bytesPerLine(),
+        qimage_const_pointer(image), image.width(), image.height(), image.bytesPerLine(),
         int(x), int(y), ctypes.byref(selected),
     ):
         return None
@@ -1945,6 +2005,38 @@ def apply_linear_gradient_native(image, start_x: float, start_y: float,
     ))
 
 
+def apply_gradient_native(image, start_x: float, start_y: float,
+                          end_x: float, end_y: float, start_color, end_color, *,
+                          geometry: str = "linear", spread: str = "pad",
+                          reverse: bool = False, opacity: float = 1.0,
+                          selection_mask=None) -> bool | None:
+    """Adapt two gradient stops and an optional selection to the native ABI."""
+    library = load_creative_core()
+    function = getattr(library, "cs_apply_gradient", None) if library else None
+    if function is None:
+        return None
+    geometry_id = {"linear": 0, "radial": 1, "conical": 2}.get(geometry)
+    spread_id = {"pad": 0, "repeat": 1, "reflect": 2}.get(spread)
+    if geometry_id is None or spread_id is None:
+        return False
+    mask_arguments = (None, 0, 0, 0, 0)
+    if selection_mask is not None:
+        if selection_mask.isNull() or selection_mask.size() != image.size():
+            return False
+        mask_arguments = (
+            qimage_const_pointer(selection_mask), selection_mask.width(), selection_mask.height(),
+            selection_mask.bytesPerLine(), selection_mask.format().value,
+        )
+    return bool(function(
+        qimage_pointer(image), image.width(), image.height(), image.bytesPerLine(),
+        image.format().value, float(start_x), float(start_y), float(end_x), float(end_y),
+        geometry_id, spread_id, int(bool(reverse)), float(opacity),
+        start_color.red(), start_color.green(), start_color.blue(), start_color.alpha(),
+        end_color.red(), end_color.green(), end_color.blue(), end_color.alpha(),
+        *mask_arguments,
+    ))
+
+
 def native_shape_path(shape: str, start_x: float, start_y: float,
                       end_x: float, end_y: float):
     """Generate a line/rectangle/ellipse path in CreativeCore, or None offline."""
@@ -1991,7 +2083,7 @@ def crop_image_native(image, rect, output_format=None):
                     image.format() if output_format is None else output_format)
     if output.isNull():
         return None
-    if not function(qimage_pointer(image), image.width(), image.height(),
+    if not function(qimage_const_pointer(image), image.width(), image.height(),
                     image.bytesPerLine(), image.format().value,
                     rect.x(), rect.y(), rect.width(), rect.height(),
                     qimage_pointer(output), output.bytesPerLine(),
@@ -2008,7 +2100,7 @@ def copy_image_rect_native(source, destination, source_rect, destination_x: int,
     if function is None or source.isNull() or destination.isNull() or source_rect.isEmpty():
         return None
     return bool(function(
-        qimage_pointer(source), source.width(), source.height(), source.bytesPerLine(),
+        qimage_const_pointer(source), source.width(), source.height(), source.bytesPerLine(),
         source.format().value, source_rect.x(), source_rect.y(),
         qimage_pointer(destination), destination.width(), destination.height(),
         destination.bytesPerLine(), destination.format().value,
@@ -2079,7 +2171,7 @@ def apply_alpha_mask_native(image, mask) -> bool | None:
         return None
     return bool(function(
         qimage_pointer(image), image.width(), image.height(), image.bytesPerLine(),
-        image.format().value, qimage_pointer(mask), mask.width(), mask.height(),
+        image.format().value, qimage_const_pointer(mask), mask.width(), mask.height(),
         mask.bytesPerLine(), mask.format().value,
     ))
 
@@ -2195,7 +2287,7 @@ def translate_image_native(image, dx: int, dy: int):
             QImage.Format.Format_ARGB32, QImage.Format.Format_RGBA8888):
         return None
     output = QImage(image.size(), image.format())
-    if not library.cs_translate_image(qimage_pointer(image), image.width(), image.height(),
+    if not library.cs_translate_image(qimage_const_pointer(image), image.width(), image.height(),
             image.bytesPerLine(), image.format().value, qimage_pointer(output),
             output.bytesPerLine(), int(dx), int(dy)):
         return None
@@ -2386,6 +2478,20 @@ def create_native_document_state(width: int, height: int, dpi: int):
         return None
     state = NativeDocumentStateHandle(library, width, height, dpi)
     return state if state else None
+
+
+def qimage_const_pointer(image):
+    """Read-only native input without detaching Qt's implicitly shared pixels.
+
+    Keep the view, ndarray and image alive until the synchronous call returns.
+    Never pass this pointer to a native function that writes its argument.
+    """
+    import numpy as np
+    bits = image.constBits()
+    array = np.frombuffer(bits, dtype=np.uint8)
+    pointer = array.ctypes.data_as(ctypes.POINTER(ctypes.c_uint8))
+    pointer._qimage_keepalive = (image, bits, array)
+    return pointer
 
 
 def qimage_pointer(image):

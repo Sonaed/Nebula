@@ -13,7 +13,7 @@ from __future__ import annotations
 import time
 
 from PySide6.QtCore import QPointF, QSettings, Qt, QTimer
-from PySide6.QtGui import QColor, QPainter, QPainterPath, QPen
+from PySide6.QtGui import QColor, QPainter, QPen
 
 TAIL_SECONDS = 0.16      # durée de la queue affichée (fenêtre de latence typique)
 LINGER_SECONDS = 0.28    # après le lever du stylet, le temps que le worker finisse
@@ -43,7 +43,9 @@ class LiveStrokePreview:
                 "size": float(settings.get("size", 10.0)),
                 "opacity": float(settings.get("opacity", 1.0)) * (alpha / 255.0),
                 "pressure_size": bool(settings.get("pressureSize", True)),
+                "pressure_opacity": bool(settings.get("pressureOpacity", False)),
                 "minimum": float(settings.get("minimumSize", 0.05)),
+                "minimum_opacity": float(settings.get("minimumOpacity", 0.0)),
                 "color": (int(red), int(green), int(blue)),
             }
         except Exception:  # noqa: BLE001 — l'aperçu ne doit jamais gêner le dessin
@@ -99,22 +101,30 @@ class LiveStrokePreview:
             return
         style = self.style
         zoom = float(getattr(self.canvas, "zoom", 1.0) or 1.0)
-        pressure = recent[-1][1]
-        scale = max(style["minimum"], pressure) if style["pressure_size"] else 1.0
-        width = max(1.0, style["size"] * zoom * scale)
-        color = QColor(*style["color"])
         fade = 1.0
         if self.released_at is not None:
             fade = max(0.0, 1.0 - (now - self.released_at) / LINGER_SECONDS)
-        color.setAlphaF(max(0.0, min(1.0, style["opacity"] * 0.85 * fade)))
-        path = QPainterPath(recent[0][0])
-        for point, _p, _t in recent[1:]:
-            path.lineTo(point)
         painter.save()
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        painter.setPen(QPen(color, width, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
         painter.setBrush(Qt.BrushStyle.NoBrush)
-        painter.drawPath(path)
+        # The overlay is the first thing an artist sees after a fast pen move.
+        # Using the final pressure for the whole tail made tapering look like a
+        # flat tube until the native pixels arrived. Draw the short tail in
+        # pressure-aware segments instead; it stays bounded to 160 ms / 256
+        # samples and never changes document pixels.
+        for (start, start_pressure, _), (end, end_pressure, _) in zip(recent, recent[1:]):
+            pressure = max(0.0, min(1.0, (start_pressure + end_pressure) * 0.5))
+            scale = max(style["minimum"], pressure) if style["pressure_size"] else 1.0
+            width = max(1.0, style["size"] * zoom * scale)
+            opacity_scale = (
+                style["minimum_opacity"] + (1.0 - style["minimum_opacity"]) * pressure
+                if style["pressure_opacity"] else 1.0
+            )
+            color = QColor(*style["color"])
+            color.setAlphaF(max(0.0, min(1.0, style["opacity"] * opacity_scale * 0.85 * fade)))
+            painter.setPen(QPen(color, width, Qt.PenStyle.SolidLine,
+                                Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
+            painter.drawLine(start, end)
         painter.restore()
 
 

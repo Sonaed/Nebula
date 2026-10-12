@@ -429,6 +429,24 @@ QStatusBar {{
 QStatusBar::item {{
     border: 0;
 }}
+QLabel#documentStatus,
+QLabel#layerStatus,
+QLabel#cursorStatus {{
+    color: {text_muted};
+    background: {panel};
+    border: 1px solid {border_soft};
+    border-radius: 4px;
+    margin: 3px 2px;
+    padding: 1px 7px;
+}}
+QLabel#layerStatus {{
+    color: {text};
+    max-width: 230px;
+}}
+QLabel#cursorStatus {{
+    color: {cyan};
+    font-family: "JetBrains Mono", "Cascadia Mono", monospace;
+}}
 
 /* ── Tooltips ─────────────────────────────────────────────────────────────── */
 QToolTip {{
@@ -675,8 +693,24 @@ QPushButton#searchButton:hover {{
     border-color: {accent};
     color: {text};
 }}
-QComboBox#workspaceCombo, QComboBox#presetCombo {{
+QComboBox#workspaceCombo {{
     min-width: 110px;
+}}
+QPushButton#presetButton {{
+    background: {input_bg};
+    border: 1px solid {border};
+    border-radius: 7px;
+    padding: 3px 10px 3px 6px;
+    color: {text};
+    font-weight: 600;
+    text-align: left;
+}}
+QPushButton#presetButton::menu-indicator {{
+    image: none;
+    width: 0;
+}}
+QPushButton#presetButton:hover {{
+    border-color: {accent};
 }}
 QToolButton#zoomButton {{
     padding: 2px 10px;
@@ -712,3 +746,81 @@ QPushButton#railTool {{
     min-height: 0;
     padding: 0;
 }}
+
+/* Studio workspace: restrained surfaces and clear typographic hierarchy. */
+QMainWindow::separator {{ background: {window}; width: 5px; height: 5px; }}
+QMainWindow::separator:hover {{ background: {accent}; }}
+QToolBar#MainToolbar {{ padding: 4px 8px; spacing: 6px; }}
+QWidget#optionPair {{ background: {control}; border: 1px solid {border_soft}; border-radius: 6px; }}
+QWidget#optionPair QLabel {{ font-size: 10px; color: {text_muted}; background: transparent; border: none; }}
+QWidget#optionPair QSpinBox {{ background: transparent; border: none; padding: 0 2px; min-height: 17px; font-size: 11px; }}
+QWidget#optionPair QSlider {{ background: transparent; border: none; min-height: 8px; }}
+QWidget#optionPair QSlider::handle:horizontal {{ width: 7px; height: 7px; margin: -2px 0; border-radius: 3px; }}
+QLabel#homeTitle {{ font-size: 19px; font-weight: 700; letter-spacing: 2px; }}
+QLabel#homeSubtitle {{ color: {accent_hover}; font-size: 10px; font-weight: 600; letter-spacing: 2px; }}
+QLabel#welcomeTitle {{ font-size: 40px; font-weight: 600; color: {text}; }}
+QLabel#welcomeDescription {{ font-size: 14px; color: {text_muted}; padding: 2px 0; }}
+QLabel#sectionTitle {{ font-size: 10px; font-weight: 600; letter-spacing: 1px; color: {text_muted}; }}
+QLabel#homeVersion, QLabel#homeFooter {{ font-size: 11px; color: {disabled}; }}
+QScrollArea#homeScroll, QWidget#homeContent {{ background: {window}; }}
+QLabel#artworkTitle {{ color: #FFFFFF; font-size: 25px; font-weight: 600; }}
+QLabel#artworkCaption {{ color: #D5CAE9; font-size: 9px; letter-spacing: 2px; }}
+QPushButton#newDocumentButton {{ background: {accent_soft}; border: 1px solid {accent}; border-radius: 12px; }}
+QPushButton#openDocumentButton {{ background: {panel_raised}; border: 1px solid {border}; border-radius: 12px; }}
+QPushButton#newDocumentButton:hover, QPushButton#openDocumentButton:hover {{ background: {control_hover}; border-color: {accent_hover}; }}
+QLabel#actionTitle {{ font-size: 13px; font-weight: 600; }}
+QLabel#actionIcon {{ color: {accent_hover}; font-size: 27px; }}
+QLabel#actionShortcut {{ color: {text_muted}; font-size: 10px; }}
+QLabel#actionDescription {{ font-size: 11px; }}
+QPushButton#formatCard {{ text-align: left; background: {panel}; border: 1px solid {border_soft}; border-radius: 9px; padding: 10px 16px; }}
+QPushButton#formatCard:hover {{ background: {panel_raised}; border-color: {accent}; }}
+QPushButton#recentDocument {{ text-align: left; background: transparent; border: 1px solid transparent; border-radius: 7px; padding: 7px 10px; }}
+QPushButton#recentDocument:hover {{ background: {control_hover}; border-color: {border}; }}
+QLabel#emptyRecent {{ color: {text_muted}; padding: 6px; }}
+QDialog#newDocumentDialog {{ background: {window}; }}
+QLabel#dialogTitle {{ font-size: 25px; font-weight: 600; padding: 4px 0; }}
+QLabel#dialogDescription {{ font-size: 12px; color: {text_muted}; }}
+QFrame#documentPreviewPanel {{ background: {panel}; border: 1px solid {border_soft}; border-radius: 10px; }}
+QLabel#documentEstimate {{ color: {text_muted}; font-size: 11px; padding: 8px; }}
+QPushButton#documentCreate {{ background: {accent}; color: {window}; font-weight: 700; padding: 8px 24px; }}
+QPushButton#documentCreate:hover {{ background: {accent_hover}; }}
+QComboBox#gradientGeometry, QComboBox#gradientColors, QComboBox#gradientSpread {{ min-width: 95px; }}
+
+/* ═══ Nebula 26.4.0 — interface épurée ═══════════════════════════════════════
+   Dock tabs are flat labels with an accent underline: the boxed tabs plus a
+   second uppercase header inside each panel doubled the chrome above every
+   piece of content. */
+QMainWindow > QTabBar {{ background: {panel}; border: 0; }}
+QMainWindow > QTabBar::tab {{
+    background: transparent;
+    color: {text_muted};
+    border: 0;
+    border-bottom: 2px solid transparent;
+    border-radius: 0;
+    padding: 8px 12px 6px 12px;
+    margin: 0 2px 0 0;
+    font-weight: 600;
+}}
+QMainWindow > QTabBar::tab:hover {{ color: {text}; background: transparent; }}
+QMainWindow > QTabBar::tab:selected {{
+    color: {text};
+    background: transparent;
+    border-top: 0;
+    border-bottom: 2px solid {accent};
+}}
+QWidget#dockGrip {{ background: {panel}; border-bottom: 1px solid {border_soft}; }}
+QWidget#dockGrip:hover {{ background: {control}; }}
+QPushButton#dockTitleButton {{
+    padding: 0; min-height: 0; border-radius: 4px;
+    color: {text_muted}; background: transparent; border: 1px solid transparent;
+}}
+QPushButton#dockTitleButton:hover {{ color: {text}; background: {control_hover}; }}
+QWidget#optionPair QSlider::handle:horizontal {{ width: 9px; height: 9px; margin: -3px 0; border-radius: 4px; }}
+QLabel#layerCount {{ color: {disabled}; font-size: 10px; padding: 0 2px; }}
+QLabel#fieldCaption {{ color: {text_muted}; font-size: 11px; font-weight: 600; }}
+QToolButton#layerAction, QToolButton#layerActionDanger, QToolButton#layerMore {{
+    background: transparent; border: 1px solid transparent; border-radius: 6px; padding: 0;
+}}
+QToolButton#layerAction:hover, QToolButton#layerMore:hover {{ background: {control_hover}; border-color: {border_soft}; }}
+QToolButton#layerAction:checked {{ background: {accent_soft}; border-color: {accent}; }}
+QToolButton#layerActionDanger:hover {{ background: rgba(214, 106, 120, 0.18); border-color: {danger}; }}

@@ -11,7 +11,24 @@ from PySide6.QtWidgets import (
     QListWidget,
     QListWidgetItem,
     QCheckBox,
+    QFrame,
+    QGridLayout,
 )
+
+from PySide6.QtCore import Qt
+from UI.widgets.document_preview import _CanvasPreview
+
+# Dimensions are stored in pixels; print presets explicitly carry their DPI.
+DOCUMENT_PRESETS = (
+    ("illustration", "Illustration · carré", 2048, 2048, 300),
+    ("storyboard", "Écran / storyboard · Full HD", 1920, 1080, 72),
+    ("portrait", "Portrait · illustration", 2400, 3200, 300),
+    ("a4", "Papier A4 · 210 × 297 mm", 2480, 3508, 300),
+    ("a3", "Papier A3 · 297 × 420 mm", 3508, 4961, 300),
+    ("4k", "Écran · 4K UHD", 3840, 2160, 72),
+    ("vertical", "Écran vertical · 9:16", 1080, 1920, 72),
+)
+
 
 # Préréglages « prêts pour le pixel art » (module Pixel Art d'Existence).
 # (nom, largeur, hauteur, tuile, palette, zoom)
@@ -31,271 +48,161 @@ PIXEL_PRESETS = [
 
 class DocumentDialog(QDialog):
 
-    def __init__(
-        self,
-        parent: QWidget | None = None,
-        pixel_art: bool = False,
-    ) -> None:
-
-        super().__init__(
-            parent
-        )
-
-        self.setWindowTitle(
-            "Nouveau document"
-        )
-
-        self.setFixedWidth(
-            420
-        )
-
+    def __init__(self, parent: QWidget | None = None, pixel_art: bool = False,
+                 preset: str | None = None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Nouveau document")
+        self.setObjectName("newDocumentDialog")
+        self.setMinimumWidth(680)
+        self.resize(720, 560)
+        self._updating_dimensions = False
+        self._aspect_ratio = 4 / 3
         outer = QVBoxLayout(self)
+        outer.setContentsMargins(24, 20, 24, 20)
+        outer.setSpacing(12)
+        title = QLabel("Une nouvelle toile.")
+        title.setObjectName("dialogTitle")
+        outer.addWidget(title)
+        subtitle = QLabel("Choisissez un format, puis faites-le vôtre.")
+        subtitle.setObjectName("dialogDescription")
+        outer.addWidget(subtitle)
         self.tabs = QTabWidget()
-        outer.addWidget(self.tabs)
+        outer.addWidget(self.tabs, 1)
         standard = QWidget()
-        layout = QVBoxLayout(standard)
-        self.tabs.addTab(standard, "Standard")
+        self.tabs.addTab(standard, "Dessin · peinture")
         self._pixel_enabled = bool(pixel_art)
         if self._pixel_enabled:
-            self.tabs.addTab(self._build_pixel_tab(), "▦ Pixel Art")
-
-        # =====================================================
-        # FORMAT
-        # =====================================================
-
-        preset_title = QLabel(
-            "Format"
-        )
-
-        layout.addWidget(
-            preset_title
-        )
-
+            self.tabs.addTab(self._build_pixel_tab(), "Pixel Art")
+        layout = QHBoxLayout(standard)
+        layout.setContentsMargins(14, 18, 14, 14)
+        layout.setSpacing(24)
+        form = QVBoxLayout()
+        form.setSpacing(12)
+        form.addWidget(QLabel("FORMAT DE DÉPART"))
         self.preset_combo = QComboBox()
-
-        self.preset_combo.addItem(
-            "Personnalisé",
-            None
-        )
-
-        self.preset_combo.addItem(
-            "800 × 600",
-            (800, 600)
-        )
-
-        self.preset_combo.addItem(
-            "1920 × 1080 (Full HD)",
-            (1920, 1080)
-        )
-
-        self.preset_combo.addItem(
-            "2560 × 1440 (QHD)",
-            (2560, 1440)
-        )
-
-        self.preset_combo.addItem(
-            "3840 × 2160 (4K UHD)",
-            (3840, 2160)
-        )
-
-        layout.addWidget(
-            self.preset_combo
-        )
-
-        # =====================================================
-        # LARGEUR
-        # =====================================================
-
-        width_layout = QHBoxLayout()
-
-        width_label = QLabel(
-            "Largeur"
-        )
-
-        self.width_spin = QSpinBox()
-
-        self.width_spin.setMinimum(
-            1
-        )
-
-        self.width_spin.setMaximum(
-            20000
-        )
-
-        self.width_spin.setValue(
-            800
-        )
-
-        self.width_spin.setSuffix(
-            " px"
-        )
-
-        width_layout.addWidget(
-            width_label
-        )
-
-        width_layout.addWidget(
-            self.width_spin
-        )
-
-        layout.addLayout(
-            width_layout
-        )
-
-        # =====================================================
-        # HAUTEUR
-        # =====================================================
-
-        height_layout = QHBoxLayout()
-
-        height_label = QLabel(
-            "Hauteur"
-        )
-
-        self.height_spin = QSpinBox()
-
-        self.height_spin.setMinimum(
-            1
-        )
-
-        self.height_spin.setMaximum(
-            20000
-        )
-
-        self.height_spin.setValue(
-            600
-        )
-
-        self.height_spin.setSuffix(
-            " px"
-        )
-
-        height_layout.addWidget(
-            height_label
-        )
-
-        height_layout.addWidget(
-            self.height_spin
-        )
-
-        layout.addLayout(
-            height_layout
-        )
-
-        # =====================================================
-        # DPI
-        # =====================================================
-
-        dpi_layout = QHBoxLayout()
-
-        dpi_label = QLabel(
-            "Résolution"
-        )
-
-        self.dpi_spin = QSpinBox()
-
-        self.dpi_spin.setMinimum(
-            1
-        )
-
-        self.dpi_spin.setMaximum(
-            2400
-        )
-
-        self.dpi_spin.setValue(
-            300
-        )
-
-        self.dpi_spin.setSuffix(
-            " DPI"
-        )
-
-        dpi_layout.addWidget(
-            dpi_label
-        )
-
-        dpi_layout.addWidget(
-            self.dpi_spin
-        )
-
-        layout.addLayout(
-            dpi_layout
-        )
-
-        # =====================================================
-        # FOND
-        # =====================================================
-
-        background_title = QLabel(
-            "Fond"
-        )
-
-        layout.addWidget(
-            background_title
-        )
-
+        self.preset_combo.addItem("Personnalisé", None)
+        for key, name, w, h, dpi in DOCUMENT_PRESETS:
+            self.preset_combo.addItem(name, (w, h, dpi, key))
+        form.addWidget(self.preset_combo)
+        grid = QGridLayout()
+        grid.setHorizontalSpacing(12)
+        grid.setVerticalSpacing(12)
+        self.width_spin, self.height_spin, self.dpi_spin = QSpinBox(), QSpinBox(), QSpinBox()
+        for row, (label, spin, value, maximum, suffix) in enumerate((
+            ("Largeur", self.width_spin, 800, 20000, " px"),
+            ("Hauteur", self.height_spin, 600, 20000, " px"),
+            ("Résolution", self.dpi_spin, 300, 2400, " ppp"),
+        )):
+            spin.setRange(1, maximum)
+            spin.setValue(value)
+            spin.setSuffix(suffix)
+            spin.setMinimumWidth(128)
+            spin.setAccessibleName(label)
+            grid.addWidget(QLabel(label), row, 0)
+            grid.addWidget(spin, row, 1)
+        form.addLayout(grid)
+        row = QHBoxLayout()
+        self.aspect_lock = QCheckBox("Lier les proportions")
+        self.aspect_lock.toggled.connect(self._set_aspect_lock)
+        row.addWidget(self.aspect_lock)
+        self.swap_button = QPushButton("⇄")
+        self.swap_button.setToolTip("Permuter largeur et hauteur")
+        self.swap_button.setAccessibleName("Permuter largeur et hauteur")
+        self.swap_button.clicked.connect(self.swap_orientation)
+        row.addWidget(self.swap_button)
+        form.addLayout(row)
+        form.addWidget(QLabel("ARRIÈRE-PLAN"))
         self.background_combo = QComboBox()
+        for name, value in (("Blanc", "white"), ("Transparent", "transparent"), ("Noir", "black")):
+            self.background_combo.addItem(name, value)
+        form.addWidget(self.background_combo)
+        form.addStretch()
+        layout.addLayout(form, 1)
+        panel = QFrame()
+        panel.setObjectName("documentPreviewPanel")
+        preview_layout = QVBoxLayout(panel)
+        self.preview = _CanvasPreview()
+        preview_layout.addWidget(self.preview, 1)
+        self.estimate_label = QLabel()
+        self.estimate_label.setObjectName("documentEstimate")
+        self.estimate_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.estimate_label.setWordWrap(True)
+        preview_layout.addWidget(self.estimate_label)
+        layout.addWidget(panel, 1)
+        buttons = QHBoxLayout()
+        buttons.addStretch()
+        cancel = QPushButton("Annuler")
+        cancel.clicked.connect(self.reject)
+        self.create_button = QPushButton("Créer la toile")
+        self.create_button.setObjectName("documentCreate")
+        self.create_button.setDefault(True)
+        self.create_button.clicked.connect(self.accept)
+        buttons.addWidget(cancel)
+        buttons.addWidget(self.create_button)
+        outer.addLayout(buttons)
+        self.preset_combo.currentIndexChanged.connect(self.change_preset)
+        self.width_spin.valueChanged.connect(lambda _: self._dimension_changed("width"))
+        self.height_spin.valueChanged.connect(lambda _: self._dimension_changed("height"))
+        self.dpi_spin.valueChanged.connect(self._dpi_changed)
+        self.background_combo.currentIndexChanged.connect(self._update_preview)
+        if preset:
+            for index in range(1, self.preset_combo.count()):
+                if self.preset_combo.itemData(index)[3] == preset:
+                    self.preset_combo.setCurrentIndex(index)
+                    break
+        self._update_preview()
 
-        self.background_combo.addItem(
-            "Blanc",
-            "white"
-        )
+    def _set_aspect_lock(self, checked):
+        self._aspect_ratio = self.width_spin.value() / self.height_spin.value()
 
-        self.background_combo.addItem(
-            "Transparent",
-            "transparent"
-        )
+    def _dimension_changed(self, axis):
+        if self._updating_dimensions:
+            return
+        self._updating_dimensions = True
+        try:
+            if self.aspect_lock.isChecked():
+                if axis == "width":
+                    intended = round(self.width_spin.value() / self._aspect_ratio)
+                    self.height_spin.setValue(intended)
+                    if self.height_spin.value() != intended:
+                        self.width_spin.setValue(round(self.height_spin.value() * self._aspect_ratio))
+                else:
+                    intended = round(self.height_spin.value() * self._aspect_ratio)
+                    self.width_spin.setValue(intended)
+                    if self.width_spin.value() != intended:
+                        self.height_spin.setValue(round(self.width_spin.value() / self._aspect_ratio))
+            self.preset_combo.setCurrentIndex(0)
+        finally:
+            self._updating_dimensions = False
+        self._update_preview()
 
-        self.background_combo.addItem(
-            "Noir",
-            "black"
-        )
+    def swap_orientation(self):
+        self._updating_dimensions = True
+        try:
+            w, h = self.get_dimensions()
+            self.width_spin.setValue(h)
+            self.height_spin.setValue(w)
+            self._aspect_ratio = h / w
+            self.preset_combo.setCurrentIndex(0)
+        finally:
+            self._updating_dimensions = False
+        self._update_preview()
 
-        layout.addWidget(
-            self.background_combo
-        )
+    def _dpi_changed(self, *_):
+        if not self._updating_dimensions:
+            self.preset_combo.setCurrentIndex(0)
+        self._update_preview()
 
-        # =====================================================
-        # BOUTONS
-        # =====================================================
-
-        buttons_layout = QHBoxLayout()
-
-        cancel_button = QPushButton(
-            "Annuler"
-        )
-
-        create_button = QPushButton(
-            "Créer"
-        )
-
-        buttons_layout.addWidget(
-            cancel_button
-        )
-
-        buttons_layout.addWidget(
-            create_button
-        )
-
-        outer.addLayout(
-            buttons_layout
-        )
-
-        # =====================================================
-        # CONNEXIONS
-        # =====================================================
-
-        self.preset_combo.currentIndexChanged.connect(
-            self.change_preset
-        )
-
-        cancel_button.clicked.connect(
-            self.reject
-        )
-
-        create_button.clicked.connect(
-            self.accept
-        )
+    def _update_preview(self, *_):
+        w, h = self.width_spin.value(), self.height_spin.value()
+        dpi = self.dpi_spin.value()
+        self.preview.dimensions = (w, h)
+        self.preview.background = self.background_combo.currentData()
+        self.preview.update()
+        self.estimate_label.setText(
+            f"{w/dpi*25.4:.1f} × {h/dpi*25.4:.1f} mm à {dpi} ppp\n"
+            f"{w*h/1_000_000:.1f} Mpx · {w*h*4/1048576:.1f} Mio / calque RGBA\n"
+            "Estimation hors historique et caches")
 
     # =========================================================
     # PIXEL ART
@@ -365,44 +272,20 @@ class DocumentDialog(QDialog):
     # PRESETS
     # =========================================================
 
-    def change_preset(
-        self,
-        index: int
-    ) -> None:
-
-        preset = self.preset_combo.itemData(
-            index
-        )
-
-        if preset is None:
-
-            self.width_spin.setEnabled(
-                True
-            )
-
-            self.height_spin.setEnabled(
-                True
-            )
-
+    def change_preset(self, index: int) -> None:
+        preset = self.preset_combo.itemData(index)
+        if preset is None or self._updating_dimensions:
             return
-
-        width, height = preset
-
-        self.width_spin.setValue(
-            width
-        )
-
-        self.height_spin.setValue(
-            height
-        )
-
-        self.width_spin.setEnabled(
-            False
-        )
-
-        self.height_spin.setEnabled(
-            False
-        )
+        width, height, dpi, _key = preset
+        self._updating_dimensions = True
+        try:
+            self.width_spin.setValue(width)
+            self.height_spin.setValue(height)
+            self.dpi_spin.setValue(dpi)
+            self._aspect_ratio = width / height
+        finally:
+            self._updating_dimensions = False
+        self._update_preview()
 
     # =========================================================
     # VALEURS

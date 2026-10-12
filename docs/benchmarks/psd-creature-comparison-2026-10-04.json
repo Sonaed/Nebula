@@ -1,0 +1,316 @@
+{
+  "scope": "Unprofiled import and thumbnail timings; one run per version on user PSD",
+  "source_bytes": 747793922,
+  "before": {
+    "import": 25.1917,
+    "thumbnails": 2.8241
+  },
+  "after": {
+    "import": 10.4827,
+    "thumbnails": 0.0941
+  },
+  "all_43_layer_pixel_hashes_and_metadata_match": true,
+  "layers": [
+    {
+      "name": "Background",
+      "visible": true,
+      "opacity": 1.0,
+      "blend": "normal",
+      "hash": "536960a958cabc956a4de5d38f37881187d26ab26d663a115c9340b4543827c0"
+    },
+    {
+      "name": "Background copy",
+      "visible": true,
+      "opacity": 1.0,
+      "blend": "normal",
+      "hash": "536960a958cabc956a4de5d38f37881187d26ab26d663a115c9340b4543827c0"
+    },
+    {
+      "name": "Layer 2",
+      "visible": true,
+      "opacity": 1.0,
+      "blend": "normal",
+      "hash": "3f169263fef3c6a50085e4730fd0b7795779b1f264fdb694726d9c4cc0912075"
+    },
+    {
+      "name": "Layer 6",
+      "visible": false,
+      "opacity": 1.0,
+      "blend": "normal",
+      "hash": "05ff817d9a384e493b46c285ca7398aa1682b8586ca555450dd1fbb4e21d19c8"
+    },
+    {
+      "name": "Layer 7",
+      "visible": false,
+      "opacity": 1.0,
+      "blend": "normal",
+      "hash": "99c637288777f95a05dbcd1a63d24b7a1ae01cb362ddf21da9874deaeac3a96c"
+    },
+    {
+      "name": "Layer 8",
+      "visible": false,
+      "opacity": 1.0,
+      "blend": "normal",
+      "hash": "b0812fd85c27100a2281a630ab89f1b62152699c14bb924d69656a9a4bdb1ea7"
+    },
+    {
+      "name": "Layer 16",
+      "visible": true,
+      "opacity": 1.0,
+      "blend": "normal",
+      "hash": "83406ccafcf0d56d3812a08012b89744dbeb5c018d513bc9a4b130735a2cbf59"
+    },
+    {
+      "name": "Layer 29",
+      "visible": true,
+      "opacity": 1.0,
+      "blend": "normal",
+      "hash": "b1aa762d1946dddd0794fca63c435d746365dc8fe7fe760a176830ad18f2aeb7"
+    },
+    {
+      "name": "Layer 14",
+      "visible": false,
+      "opacity": 1.0,
+      "blend": "normal",
+      "hash": "f3774ce79dc20c78f3f606cd5b27824d137063f038f4a211fd40fbcba75dfdb9"
+    },
+    {
+      "name": "Layer 14 copy",
+      "visible": false,
+      "opacity": 1.0,
+      "blend": "normal",
+      "hash": "3e0cf04ae571293785d22083e34860635b41fbc9e5ad7589c37e794746f8219a"
+    },
+    {
+      "name": "Layer 14 copy 2",
+      "visible": true,
+      "opacity": 1.0,
+      "blend": "normal",
+      "hash": "fe4da783fa50fd63c15eeac49c882976ed4667a97689fa4a8fc7f0bcc86fcdb2"
+    },
+    {
+      "name": "Layer 15",
+      "visible": true,
+      "opacity": 1.0,
+      "blend": "multiply",
+      "hash": "e5c59b54e118b6fb54051bead1da57c41d950d26eac7b320e2cb3ffc77e269ca"
+    },
+    {
+      "name": "Layer 17",
+      "visible": true,
+      "opacity": 1.0,
+      "blend": "overlay",
+      "hash": "7129c0421c882b35f31d290295fc85b458ab61781aa886b5a1806decf17041d3"
+    },
+    {
+      "name": "Layer 5",
+      "visible": false,
+      "opacity": 0.1803921568627451,
+      "blend": "normal",
+      "hash": "8aabac3da2f88cb1dd753100bda8125929726c3a7e21fc7a19d2e691bcd26eee"
+    },
+    {
+      "name": "Layer 13",
+      "visible": true,
+      "opacity": 1.0,
+      "blend": "normal",
+      "hash": "fda0d2df69e582d6505ec711b52a1e5b1838a7ea31b70f9f0a669f49dff0c912"
+    },
+    {
+      "name": "Layer 18",
+      "visible": true,
+      "opacity": 1.0,
+      "blend": "normal",
+      "hash": "84b26398a1f69d375844917460e4288ae8b54cdf338d837b467a04158c6947eb"
+    },
+    {
+      "name": "Layer 19",
+      "visible": true,
+      "opacity": 1.0,
+      "blend": "normal",
+      "hash": "a55e73d70411ec88994844e64eaf1515d228ee99453a0e5e9481b4ddbf67eadb"
+    },
+    {
+      "name": "Layer 20",
+      "visible": true,
+      "opacity": 1.0,
+      "blend": "normal",
+      "hash": "13edce8611544f64c276e47652ddfbbf492450ae064785315a5e9bd55a96d496"
+    },
+    {
+      "name": "Layer 21",
+      "visible": true,
+      "opacity": 1.0,
+      "blend": "multiply",
+      "hash": "bb9c5c95e48c2c8c235604d0d7155a0f5f2257f46c159305d2f5d06207862822"
+    },
+    {
+      "name": "Layer 22",
+      "visible": true,
+      "opacity": 1.0,
+      "blend": "normal",
+      "hash": "34d4b9f69cce9dd5edd0e5e5ce33c3f926aacda986318d4926631e829c84d873"
+    },
+    {
+      "name": "Layer 23",
+      "visible": true,
+      "opacity": 1.0,
+      "blend": "multiply",
+      "hash": "f1d4b6622ac88eb03823d95051da9560b734a7ccef43228d0b3c4ad8cb8385c6"
+    },
+    {
+      "name": "Layer 24",
+      "visible": true,
+      "opacity": 1.0,
+      "blend": "overlay",
+      "hash": "d0fbc502492498f0e2c5865d566d3c20605a0be7a6dc8a5d97405ba832958219"
+    },
+    {
+      "name": "Layer 25",
+      "visible": true,
+      "opacity": 1.0,
+      "blend": "normal",
+      "hash": "e63c0683de4a49f4c0cd49924a3fce9153f853b295aa6ae4099da846b1fb5453"
+    },
+    {
+      "name": "Layer 26",
+      "visible": true,
+      "opacity": 1.0,
+      "blend": "multiply",
+      "hash": "a9e3c3c24c83169d1d5ffebd94b467e021c1ac373059b50d94584b232457cec1"
+    },
+    {
+      "name": "Layer 27",
+      "visible": true,
+      "opacity": 1.0,
+      "blend": "normal",
+      "hash": "9d23047f20bb72d707b548153c0590e7d2515c4366c6fb6e255e6609450fdf63"
+    },
+    {
+      "name": "Group 2 copy",
+      "visible": true,
+      "opacity": 1.0,
+      "blend": "normal",
+      "hash": "139143dfb0c64d0ada60a70ab8743eb88aeaefc0b2a6848a3d540248b2a61220"
+    },
+    {
+      "name": "Layer 28",
+      "visible": true,
+      "opacity": 0.45098039215686275,
+      "blend": "normal",
+      "hash": "2d097eeb6a1c65d9deb5ee6866da945e75e1c55f57aef50da0804b455fb5f3a3"
+    },
+    {
+      "name": "Layer 30",
+      "visible": true,
+      "opacity": 1.0,
+      "blend": "multiply",
+      "hash": "118d34876993f6f674ec5dc07c662fa3a18fbc0e532278925e6ba5f4bb751ebb"
+    },
+    {
+      "name": "Layer 31",
+      "visible": true,
+      "opacity": 1.0,
+      "blend": "normal",
+      "hash": "d260972b72a4eb4d0f96947b7e8de54e145e008ca7bea3f2d106e5f6f7832e53"
+    },
+    {
+      "name": "Layer 34",
+      "visible": true,
+      "opacity": 1.0,
+      "blend": "normal",
+      "hash": "6ba645e55c4299604d6f8c62c0e79c453d598575230fc498a1989ad5b55a1387"
+    },
+    {
+      "name": "Layer 33",
+      "visible": true,
+      "opacity": 1.0,
+      "blend": "normal",
+      "hash": "b4db6aeb230f0aa5ada08560a223d03807829fd8ac6d786456e594f5c63f88ae"
+    },
+    {
+      "name": "Layer 35",
+      "visible": true,
+      "opacity": 1.0,
+      "blend": "normal",
+      "hash": "9d2ec3a26e39c8dbae46cdfa33593d9ef7ed5b897e429d479a9a01de8dc90663"
+    },
+    {
+      "name": "Layer 36",
+      "visible": true,
+      "opacity": 1.0,
+      "blend": "normal",
+      "hash": "c7b4a8b212b17a28018357b5f91aa2b2f0fc77a7f8d53442ee3fd4bbf6f27ffd"
+    },
+    {
+      "name": "Layer 38",
+      "visible": true,
+      "opacity": 1.0,
+      "blend": "overlay",
+      "hash": "9f328ced65ec13d866fea7dddb47df15c8cdcdeab40ef917f9219aeb25e460b9"
+    },
+    {
+      "name": "Layer 37",
+      "visible": true,
+      "opacity": 1.0,
+      "blend": "multiply",
+      "hash": "cd640484d9815790ff046340864e49679cd54982922efce1259791d6fd10a889"
+    },
+    {
+      "name": "Layer 39",
+      "visible": true,
+      "opacity": 1.0,
+      "blend": "normal",
+      "hash": "38f6319f5d813b235a2fee6b1a4ba8e8c2a0df06ebd8336630cc6176d71c317a"
+    },
+    {
+      "name": "Group 3 copy 2",
+      "visible": false,
+      "opacity": 1.0,
+      "blend": "normal",
+      "hash": "7e607fa3eab3f57b07f83cd172e96a88b0f279f2e85129bdcd9e85ece4f03ed7"
+    },
+    {
+      "name": "Group 3 copy",
+      "visible": true,
+      "opacity": 1.0,
+      "blend": "normal",
+      "hash": "30e62328eb2c68c3790560a3113d418cecf29a40de42ba5a0d26631adff4cc3f"
+    },
+    {
+      "name": "Layer 12",
+      "visible": false,
+      "opacity": 1.0,
+      "blend": "normal",
+      "hash": "41f034380a90aa3b04b82b24644dfcc1e8e336381d6ee9028f34bb8866cd6bc3"
+    },
+    {
+      "name": "Layer 10 copy",
+      "visible": false,
+      "opacity": 1.0,
+      "blend": "normal",
+      "hash": "a063878ba4b6a46a208f4ddfe9d00d7b89c343a48a37ecf89b8956d354b5cdb3"
+    },
+    {
+      "name": "Layer 11",
+      "visible": false,
+      "opacity": 1.0,
+      "blend": "normal",
+      "hash": "32b71b5fd0ab38d891e6e5c56ea5aea0345471d4dbcc451a5edb4e4d35309abd"
+    },
+    {
+      "name": "Layer 1",
+      "visible": false,
+      "opacity": 1.0,
+      "blend": "normal",
+      "hash": "8ba07d23ec8b8a6c163d1fbf4cdc6a5a8b18d5cff03a1cb631680c9dce852007"
+    },
+    {
+      "name": "Layer 40",
+      "visible": true,
+      "opacity": 1.0,
+      "blend": "normal",
+      "hash": "551234fe405a356aa5f42ef9815b21abdcc62105e02d4f59bb3ce2af5e52a37e"
+    }
+  ]
+}

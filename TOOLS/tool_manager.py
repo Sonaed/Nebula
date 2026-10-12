@@ -85,6 +85,9 @@ class ToolManager:
     def set_fill(self) -> None:
         self._select_tool("fill")
 
+    def set_lasso_fill(self) -> None:
+        self._select_tool("lasso_fill")
+
     def set_gradient(self) -> None:
         self._select_tool("gradient")
 
@@ -155,10 +158,10 @@ class ToolManager:
             return None
         return self.fill_tool.fill(image, position, color)
 
-    def gradient(self, image: QImage, start, end, color) -> object:
+    def gradient(self, image: QImage, start, end, color, *, selection_mask=None) -> object:
         if self.current_tool != "gradient":
             return None
-        return self.gradient_tool.apply(image, start, end, color)
+        return self.gradient_tool.apply(image, start, end, color, selection_mask=selection_mask)
 
     def shape_path(self, start, end):
         return self.shape_tools.path(self.current_tool, start, end)

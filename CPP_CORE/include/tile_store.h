@@ -22,8 +22,15 @@ public:
     static bool applyBatches(const std::vector<StoreBatch>& batches);
     int writeImage(const QImage& image, int x, int y, int width, int height,
                    int* changedCoordinates, int pairCapacity);
+    // Import a straight-alpha RGBA layer into an empty sparse store.
+    bool importRgba(const QImage& image, int x, int y);
+    bool thumbnail(QImage& output) const;
     bool copyTile(int tileX, int tileY, QImage& output);
     bool copyResidentFrom(const NativeTileStore& source);
+    // Composite every resident tile from source into this store without
+    // round-tripping pixels through a UI adapter. Mode matches the standard
+    // CreativeCore/Qt blend mode numbering (0..11).
+    bool compositeFrom(const NativeTileStore& source, float opacity, int mode);
     bool materialize(QImage& output) const;
     long long writeTilePng(int tileX, int tileY, const QString& path) const;
     bool loadTilePng(int tileX, int tileY, const QString& path,
@@ -34,6 +41,9 @@ public:
     // Comme copyKeys, et écrit en parallèle la révision de chaque tuile résidente :
     // le rendu lit ainsi l'état de tout un calque en un seul appel.
     int copyKeyRevisions(int* coordinates, unsigned long long* revisions, int pairCapacity) const;
+    // Coordinates of resident tiles whose alpha channel is completely opaque.
+    // This keeps large-document coverage tests in native code.
+    int copyOpaqueKeys(int* coordinates, int pairCapacity) const;
     bool removeTile(int tileX, int tileY);
     void clear();
     void resize(int width, int height);

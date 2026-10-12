@@ -55,17 +55,6 @@ def _snap_to_line(point: QPointF, a: QPointF, b: QPointF) -> QPointF:
     return QPointF(a.x() + t * dx, a.y() + t * dy)
 
 
-def _line_intersection(p1: QPointF, p2: QPointF,
-                       p3: QPointF, p4: QPointF) -> QPointF | None:
-    """Return the intersection of line (p1–p2) and (p3–p4), or None if parallel."""
-    d1x, d1y = p2.x() - p1.x(), p2.y() - p1.y()
-    d2x, d2y = p4.x() - p3.x(), p4.y() - p3.y()
-    denom = d1x * d2y - d1y * d2x
-    if abs(denom) < 1e-10:
-        return None
-    t = ((p3.x() - p1.x()) * d2y - (p3.y() - p1.y()) * d2x) / denom
-    return QPointF(p1.x() + t * d1x, p1.y() + t * d1y)
-
 
 def _snap_to_ellipse(point: QPointF, center: QPointF,
                      rx: float, ry: float, angle: float) -> QPointF:
@@ -488,24 +477,6 @@ class AssistantManager:
 
     # ── handle drag (edit mode) ───────────────────────────────────────────────
 
-    def mouse_press_edit(self, image_pos: QPointF, to_image) -> bool:
-        """Try to start dragging a handle.  Returns True if handled."""
-        for a in self._assistants:
-            for i, h in enumerate(a.handles):
-                if _dist(image_pos, h) <= self.SNAP_RADIUS_PX:
-                    self._editing = a
-                    self._drag_handle_idx = i
-                    return True
-        return False
-
-    def mouse_move_edit(self, image_pos: QPointF) -> None:
-        if self._editing is not None and self._drag_handle_idx >= 0:
-            self._editing.handles[self._drag_handle_idx] = QPointF(image_pos)
-
-    def mouse_release_edit(self) -> None:
-        self._editing = None
-        self._drag_handle_idx = -1
-
     # ── overlay drawing ───────────────────────────────────────────────────────
 
     def draw_overlay(self, painter: QPainter, to_screen) -> None:
@@ -533,18 +504,6 @@ class AssistantManager:
                 "handles": [[h.x(), h.y()] for h in a.handles],
             })
         return result
-
-    def from_dict(self, data: list[dict]) -> None:
-        self.clear()
-        for d in data:
-            cls = _ASSISTANT_TYPES.get(d.get("kind", ""))
-            if cls is None:
-                continue
-            a = cls()
-            a.id = d.get("id", a.id)
-            a.active = d.get("active", True)
-            a.handles = [QPointF(x, y) for x, y in d.get("handles", [])]
-            self._assistants.append(a)
 
 
 __all__ = [

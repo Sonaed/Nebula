@@ -3,8 +3,6 @@ from PySide6.QtWidgets import (
     QWidget,
     QVBoxLayout,
     QHBoxLayout,
-    QLayout,
-    QPushButton,
     QLabel,
     QSlider,
     QListWidget,
@@ -17,8 +15,16 @@ from PySide6.QtWidgets import (
     QLineEdit,
 )
 
-from PySide6.QtCore import Qt, Signal, QPoint, QRectF, QTimer
-from PySide6.QtGui import QImage, QPainter, QPixmap
+from PySide6.QtCore import Qt, Signal, QPoint, QRectF, QSize, QTimer
+from PySide6.QtGui import QIcon, QImage, QPainter, QPixmap
+from pathlib import Path
+
+_ACTION_ICONS = Path(__file__).resolve().parents[1] / "icons" / "actions"
+
+
+def _action_icon(name: str) -> QIcon:
+    path = _ACTION_ICONS / f"{name}.svg"
+    return QIcon(str(path)) if path.is_file() else QIcon()
 
 from DOCUMENTS.document import Document
 from UI.widgets.layer_delegate import LayerItemDelegate, CLIP_INDENT
@@ -39,6 +45,7 @@ class LayerListWidget(QListWidget):
     lock_indicator_clicked = Signal(int, bool)
     rename_requested = Signal(int)
     mask_selected = Signal(int)
+    group_mask_selected = Signal(str)
     group_visibility_requested_at = Signal(str)
     layer_order_dropped = Signal(list)
     # object et non dict : les clés sont des entiers, Qt ne sait pas convertir ce dict en QVariantMap.
@@ -122,6 +129,12 @@ class LayerListWidget(QListWidget):
                 self.folder_toggle_requested.emit(group_id)
                 event.accept()
                 return
+            # Folder mask thumbnail (see LayerItemDelegate: left + 72 + depth).
+            mask_left = self.visualRect(index).left() + 2 + 72 + int(depth_data.get("depth", 0)) * 16
+            if depth_data.get("has_mask") and mask_left <= event.position().x() < mask_left + 38:
+                self.group_mask_selected.emit(group_id)
+                event.accept()
+                return
         # Les indicateurs α / ◈ peints à droite sont désormais cliquables :
         # viser le petit bouton du bas n'est plus le seul moyen.
         if index.isValid() and event.button() == Qt.MouseButton.LeftButton:
@@ -198,6 +211,7 @@ class LayersDock(QDockWidget):
     isolate_requested = Signal(int)
     lock_indicator_clicked = Signal(int, bool)
     mask_selected = Signal(int)
+    group_mask_selected = Signal(str)
     rename_requested = Signal(int)
     group_visibility_requested_at = Signal(str)
     # ── Nouveaux signaux ──────────────────────────────────────────────────────
@@ -218,6 +232,7 @@ class LayersDock(QDockWidget):
         )
         self._collapsed_groups: set[str] = set()
         self._mask_editing_layer_id: str | None = None
+        self._mask_editing_group_id: str | None = None
         # ── Cache miniatures : {layer_id: (cache_key, QPixmap)} ──────────────
         # cache_key = (tile_store generation hash, has_mask, mask_disabled)
         # Évite de matérialiser les TileStore à chaque refresh_layers()
@@ -272,37 +287,15 @@ class LayersDock(QDockWidget):
         # EN-TÊTE
         # =====================================================
 
+        # The tab already says "Calques": no second header.  The layer count
+        # sits discreetly at the end of the search row.
         header = QHBoxLayout()
-
-        title = QLabel(
-            "CALQUES"
-        )
-
-        title.setObjectName(
-            "panelTitle"
-        )
-
-        header.addWidget(
-            title
-        )
-
-        header.addStretch()
-
-        self.layer_count = QLabel(
-            "1"
-        )
-
-        self.layer_count.setObjectName(
-            "layerCount"
-        )
-
-        header.addWidget(
-            self.layer_count
-        )
-
-        layout.addLayout(
-            header
-        )
+        header.setSpacing(6)
+        self.layer_count = QLabel("1")
+        self.layer_count.setObjectName("layerCount")
+        self.layer_count.setToolTip("Nombre de calques")
+        # Already shown in the status bar; a bare digit beside the search box read as noise.
+        self.layer_count.setVisible(False)
 
         # Recherche : indispensable dès que la pile dépasse une vingtaine de calques.
         self.layer_search = QLineEdit()
@@ -310,7 +303,9 @@ class LayersDock(QDockWidget):
         self.layer_search.setClearButtonEnabled(True)
         self.layer_search.setObjectName("layerSearch")
         self.layer_search.textChanged.connect(self._on_search_changed)
-        layout.addWidget(self.layer_search)
+        header.addWidget(self.layer_search, 1)
+        header.addWidget(self.layer_count)
+        layout.addLayout(header)
 
         # =====================================================
         # LISTE
@@ -352,38 +347,36 @@ class LayersDock(QDockWidget):
         # Actions courantes : une seule barre, toujours à portée de main.
         primary_actions = QHBoxLayout()
         primary_actions.setSpacing(4)
-        def action_button(text: str, tooltip: str) -> QToolButton:
+        def action_button(icon: str, tooltip: str) -> QToolButton:
             button = QToolButton(content)
-            button.setText(text)
+            button.setIcon(_action_icon(icon))
+            button.setIconSize(QSize(16, 16))
             button.setToolTip(tooltip)
+            button.setAccessibleName(tooltip)
             button.setObjectName("layerAction")
-            button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)
+            button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonIconOnly)
             button.setFixedSize(28, 28)
             primary_actions.addWidget(button)
             return button
 
-        self.add_layer_button = action_button("＋", "Nouveau calque")
-        self.duplicate_layer_button = action_button("⧉", "Dupliquer le calque")
+        self.add_layer_button = action_button("plus", "Nouveau calque")
+        self.duplicate_layer_button = action_button("copy", "Dupliquer le calque")
         # Le masque est une action principale, pas une option dissimulée.
-        self.add_mask_button = action_button("◐", "Ajouter un masque de calque")
-        self.remove_mask_button = action_button("◌", "Supprimer le masque de calque")
-        self.remove_layer_button = action_button("⌫", "Supprimer le calque")
-        self.remove_layer_button.setObjectName("layerActionDanger")
+        self.add_mask_button = action_button("circle-half", "Ajouter un masque de calque")
+        self.remove_mask_button = action_button("circle-dashed", "Supprimer le masque de calque")
 
         # Organisation : les flèches et les options de groupe restent proches,
         # sans prendre la hauteur de cinq grands boutons.
-        def organize_button(text: str, tooltip: str) -> QToolButton:
-            button = QToolButton(content)
-            button.setText(text); button.setToolTip(tooltip)
-            button.setObjectName("layerAction")
-            button.setFixedSize(28, 28)
-            primary_actions.addWidget(button)
-            return button
-
-        self.group_layers_button = organize_button("G", "Grouper la sélection")
-        self.ungroup_layers_button = organize_button("↗", "Dégrouper")
-        self.lock_button = organize_button("▣", "Verrouiller le calque")
-        self.lock_alpha_button = organize_button("α", "Verrou alpha")
+        self.group_layers_button = action_button("folder-simple-plus", "Grouper la sélection")
+        self.ungroup_layers_button = action_button("folder-simple-minus", "Dégrouper")
+        self.lock_button = action_button("lock-simple-open", "Verrouiller le calque")
+        self.lock_button.setCheckable(True)
+        self.lock_alpha_button = action_button("checkerboard", "Verrou alpha")
+        self.lock_alpha_button.setCheckable(True)
+        primary_actions.addStretch(1)
+        # Destructive action last, set apart from the others.
+        self.remove_layer_button = action_button("trash", "Supprimer le calque")
+        self.remove_layer_button.setObjectName("layerActionDanger")
         self.group_layers_button.clicked.connect(self.group_selected_requested)
         self.ungroup_layers_button.clicked.connect(self.ungroup_selected_requested)
         layout.addLayout(primary_actions)
@@ -391,12 +384,31 @@ class LayersDock(QDockWidget):
         # Options moins fréquentes dans un menu explicite, au lieu de lignes
         # permanentes qui repoussent la liste de calques hors de la vue.
         self.layer_more_button = QToolButton(content)
-        self.layer_more_button.setText("⋯")
+        self.layer_more_button.setIcon(_action_icon("dots-three"))
+        self.layer_more_button.setIconSize(QSize(16, 16))
+        self.layer_more_button.setStyleSheet("QToolButton::menu-indicator { image: none; width: 0; }")
         self.layer_more_button.setToolTip("Options de calque")
         self.layer_more_button.setFixedSize(28, 28)
         self.layer_more_button.setObjectName("layerMore")
         self.layer_more_button.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
         more_menu = QMenu(self.layer_more_button)
+        # Four actions stay on the bar (new, group, mask, delete); the rest
+        # live here instead of nine look-alike icons.
+        for button in (self.duplicate_layer_button, self.remove_mask_button,
+                       self.ungroup_layers_button, self.lock_button, self.lock_alpha_button):
+            button.hide()
+        more_menu.addAction("Dupliquer le calque", self.duplicate_layer_button.click)
+        more_menu.addAction("Dégrouper", self.ungroup_layers_button.click)
+        more_menu.addSeparator()
+        self.lock_action = more_menu.addAction("Verrouiller le calque")
+        self.lock_action.setCheckable(True)
+        self.lock_action.triggered.connect(lambda _checked: self.lock_button.click())
+        self.lock_button.toggled.connect(self.lock_action.setChecked)
+        self.lock_alpha_action = more_menu.addAction("Verrouiller l'alpha")
+        self.lock_alpha_action.setCheckable(True)
+        self.lock_alpha_action.triggered.connect(lambda _checked: self.lock_alpha_button.click())
+        self.lock_alpha_button.toggled.connect(self.lock_alpha_action.setChecked)
+        more_menu.addSeparator()
         adjustment_menu = more_menu.addMenu("Ajouter un calque de réglage")
         clipping_action = more_menu.addAction("Activer / désactiver l'écrêtage du calque")
         curves_action = adjustment_menu.addAction("Courbes")
@@ -415,6 +427,7 @@ class LayersDock(QDockWidget):
         edit_adjustment_action = adjustment_menu.addAction("Modifier le réglage actif…")
         more_menu.addSeparator()
         mask_menu = more_menu.addMenu("Masque de calque")
+        mask_menu.addAction("Supprimer le masque", self.remove_mask_button.click)
         apply_mask_action = mask_menu.addAction("Appliquer le masque")
         disable_mask_action = mask_menu.addAction("Activer / désactiver le masque")
         invert_mask_action = mask_menu.addAction("Inverser le masque")
@@ -489,21 +502,24 @@ class LayersDock(QDockWidget):
         )
 
         opacity_row = QHBoxLayout()
-        opacity_row.addWidget(QLabel("OPACITÉ"))
+        opacity_caption = QLabel("Opacité")
+        opacity_caption.setObjectName("fieldCaption")
+        opacity_row.addWidget(opacity_caption)
         opacity_row.addStretch()
         opacity_row.addWidget(self.layer_opacity_value)
         layout.addLayout(opacity_row)
         layout.addWidget(self.layer_opacity_slider)
 
         blend_header = QHBoxLayout()
-        blend_header.addWidget(QLabel("MODE DE FUSION"))
+        blend_caption = QLabel("Fusion")
+        blend_caption.setObjectName("fieldCaption")
+        blend_header.addWidget(blend_caption)
         self.blend_mode_combo = QComboBox()
-        self.blend_mode_combo.addItems([
-            "Normal", "Darken", "Multiply", "Color Burn", "Lighten", "Screen",
-            "Color Dodge", "Overlay", "Soft Light", "Hard Light", "Difference",
-            "Exclusion", "Hue", "Saturation", "Color", "Luminosity",
-        ])
-        self.blend_mode_combo.currentIndexChanged.connect(lambda index: self.blend_mode_changed.emit(self.blend_mode_combo.itemText(index).lower().replace(" ", "_")))
+        from DOCUMENTS.blend_mode_catalog import BLEND_MODE_LABELS
+        for mode_id, label in BLEND_MODE_LABELS:
+            self.blend_mode_combo.addItem(label, mode_id)
+        self.blend_mode_combo.currentIndexChanged.connect(
+            lambda index: self.blend_mode_changed.emit(self.blend_mode_combo.itemData(index)))
         blend_header.addWidget(self.blend_mode_combo, 1)
         layout.addLayout(blend_header)
         self._document: Document | None = None
@@ -512,6 +528,7 @@ class LayersDock(QDockWidget):
         self.add_mask_button.clicked.connect(self.add_mask_requested)
         self.remove_mask_button.clicked.connect(self.remove_mask_requested)
         self.layer_list.mask_selected.connect(self.mask_selected)
+        self.layer_list.group_mask_selected.connect(self.group_mask_selected)
 
         # ── Connexion du bouton Dupliquer ─────────────────────────────────────
         self.duplicate_layer_button.clicked.connect(self.duplicate_layer_requested)
@@ -638,6 +655,18 @@ class LayersDock(QDockWidget):
             menu.addAction("Afficher / masquer le groupe").triggered.connect(
                 self.group_visibility_requested)
             menu.addAction("Dégrouper").triggered.connect(self.ungroup_selected_requested)
+            menu.addSeparator()
+            folder = item.data(Qt.ItemDataRole.UserRole + 5) or {}
+            mask_sub = menu.addMenu("Masque de dossier")
+            if folder.get("has_mask"):
+                mask_sub.addAction("Peindre le masque").triggered.connect(
+                    lambda: self.group_mask_selected.emit(group_id))
+                mask_sub.addAction("Supprimer le masque").triggered.connect(self.remove_mask_requested)
+                mask_sub.addAction("Réactiver le masque" if folder.get("mask_disabled")
+                                   else "Désactiver le masque").triggered.connect(self.disable_mask_requested)
+                mask_sub.addAction("Inverser le masque").triggered.connect(self.invert_mask_requested)
+            else:
+                mask_sub.addAction("Ajouter un masque").triggered.connect(self.add_mask_requested)
 
         if not menu.isEmpty():
             menu.exec(self.layer_list.mapToGlobal(pos))
@@ -671,6 +700,11 @@ class LayersDock(QDockWidget):
     @staticmethod
     def _tile_thumbnail(store, size: int = 36) -> QImage:
         """Thumbnail drawn from the occupied tiles only (no full-canvas image)."""
+        native_thumbnail = getattr(store, "thumbnail", None)
+        if native_thumbnail is not None:
+            image = native_thumbnail(size)
+            if image is not None:
+                return image
         width, height = max(1, store.width), max(1, store.height)
         scale = size / max(width, height)
         image = QImage(max(1, round(width * scale)), max(1, round(height * scale)),
@@ -725,6 +759,22 @@ class LayersDock(QDockWidget):
         px = QPixmap.fromImage(img)
         self._thumb_cache[layer.id + "_mask"] = (cache_key, px)
         return px
+
+    def _get_group_mask_thumb(self, group) -> QPixmap:
+        """Folder mask thumbnail, cached on the mask's content fingerprint."""
+        store = group.alpha_mask_store
+        # Tile revisions, not the mutation counter: history replays write the
+        # store natively without going through the counted handle.
+        revisions = store.resident_revisions() or {}
+        cache_key = ("group_mask", id(store), tuple(sorted(revisions.items())))
+        cached = self._thumb_cache.get(group.id + "_mask")
+        if cached is not None and cached[0] == cache_key:
+            return cached[1]
+        image = group.alpha_mask_grayscale().scaled(
+            36, 36, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
+        pixmap = QPixmap.fromImage(image)
+        self._thumb_cache[group.id + "_mask"] = (cache_key, pixmap)
+        return pixmap
 
     def invalidate_thumb_cache(self, layer_id: str | None = None) -> None:
         """Force le recalcul de la miniature au prochain refresh.
@@ -841,8 +891,14 @@ class LayersDock(QDockWidget):
             collapsed = group.id in self._collapsed_groups
             item = QListWidgetItem(group.name)
             item.setData(Qt.ItemDataRole.UserRole + 4, group.id)
+            has_mask = getattr(group, "alpha_mask_store", None) is not None
             item.setData(Qt.ItemDataRole.UserRole + 5, {"collapsed": collapsed, "visible": group.visible, "depth": depth,
-                                                        "parent_id": group.parent_id if group.parent_id in groups else None})
+                                                        "parent_id": group.parent_id if group.parent_id in groups else None,
+                                                        "has_mask": has_mask,
+                                                        "mask_disabled": bool(getattr(group, "mask_disabled", False)),
+                                                        "mask_selected": group.id == self._mask_editing_group_id})
+            if has_mask:
+                item.setData(Qt.ItemDataRole.UserRole + 3, self._get_group_mask_thumb(group))
             self.layer_list.addItem(item)
             if collapsed:
                 return
@@ -959,8 +1015,23 @@ class LayersDock(QDockWidget):
 
     def set_mask_editing_layer_id(self, layer_id: str | None) -> None:
         self._mask_editing_layer_id = layer_id
+        self._mask_editing_group_id = None
         if self._document is not None:
             self.refresh_layers(self._document)
+
+    def set_mask_editing_group_id(self, group_id: str | None) -> None:
+        self._mask_editing_group_id = group_id
+        self._mask_editing_layer_id = None
+        if self._document is not None:
+            self.refresh_layers(self._document)
+
+    def get_selected_group_id(self) -> str | None:
+        """Folder of the current row, when the current row is a folder."""
+        item = self.layer_list.currentItem()
+        if item is None or not item.isSelected():
+            return None
+        group_id = item.data(Qt.ItemDataRole.UserRole + 4)
+        return group_id if isinstance(group_id, str) else None
 
     def get_selected_layer_index(
         self
@@ -1069,16 +1140,13 @@ class LayersDock(QDockWidget):
         self.group_opacity_slider.setValue(round(group.opacity * 100) if group is not None else 100)
         self.group_opacity_slider.blockSignals(blocked_group)
         blocked = self.blend_mode_combo.blockSignals(True)
-        index = {
-            "normal": 0, "darken": 1, "multiply": 2, "color_burn": 3,
-            "lighten": 4, "screen": 5, "color_dodge": 6, "overlay": 7,
-            "soft_light": 8, "hard_light": 9, "difference": 10,
-            "exclusion": 11, "hue": 12, "saturation": 13, "color": 14,
-            "luminosity": 15,
-        }.get(layer.blend_mode, 0)
+        index = max(0, self.blend_mode_combo.findData(layer.blend_mode))
         self.blend_mode_combo.setCurrentIndex(index)
         self.blend_mode_combo.blockSignals(blocked)
-        self.lock_button.setText("▣" if layer.locked else "▢")
+        self.lock_button.setIcon(_action_icon("lock-simple" if layer.locked else "lock-simple-open"))
+        for button, state in ((self.lock_button, layer.locked), (self.lock_alpha_button, layer.lock_alpha)):
+            blocked_button = button.blockSignals(True)
+            button.setChecked(bool(state))
+            button.blockSignals(blocked_button)
         self.lock_button.setToolTip("Déverrouiller le calque" if layer.locked else "Verrouiller le calque")
-        self.lock_alpha_button.setText("α✓" if layer.lock_alpha else "α")
         self.lock_alpha_button.setToolTip("Retirer le verrou alpha" if layer.lock_alpha else "Verrou alpha")

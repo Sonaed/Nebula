@@ -1,0 +1,5 @@
+mode 0: before 437.041 ms after 67.374 ms speedup 6.49x (identical bytes)
+mode 2: before 570.172 ms after 94.895 ms speedup 6.01x (identical bytes)
+mode 5: before 607.523 ms after 96.872 ms speedup 6.27x (identical bytes)
+mode 7: before 426.855 ms after 96.911 ms speedup 4.40x (identical bytes)
+mode 14: before 802.227 ms after 203.780 ms speedup 3.94x (identical bytes)

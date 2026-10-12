@@ -11,6 +11,28 @@ Un petit Aperçu:
 
 Application de dessin PySide6/Qt 6 avec Canvas OpenGL et moteur de brush C++.
 
+
+## Atelier — évolution du 1er octobre 2026
+
+Accueil et interface graphite, formats de toile avec aperçu, barre de pinceau
+compacte et restauration fiable des panneaux. L’onglet **Historique** permet de
+revenir à une étape par clic ou au clavier. **Dégradé (G)** propose désormais
+linéaire, radial et angulaire, deux couleurs, inversion, répétition et opacité,
+avec sélection progressive et annulation du geste.
+
+La préparation CPU du rendu GPU limite l’occlusion aux tuiles visibles et
+réutilise les index natifs inchangés. Le développement RAW/photo reste dans Nova.
+Voir le [compte rendu et les aperçus](docs/NEXT_STEP_2026-10-01.md) pour les
+mesures, les tests et les limites de qualification.
+
+## Dessin et fusion — 5 octobre 2026
+
+26 modes de fusion, import/export PSD sans substitution pour les dix nouveaux
+modes, hachures rapides préservées et aperçu de visibilité sur les grands
+documents. Le moteur de fusion gagne ×3,9 à ×6,5 sur les piles mesurées.
+Le rendu exact des grands calques reste plus lent que l'aperçu : voir les
+[mesures sur le PSD fourni et les limites](docs/PERFORMANCE_DRAWING_BLEND_2026-10-05.md).
+
 ## Outils
 
 - `B` : pinceau
@@ -18,7 +40,7 @@ Application de dessin PySide6/Qt 6 avec Canvas OpenGL et moteur de brush C++.
 - `I` : pipette composite
 - `S` : smudge C++
 - `F` : pot de peinture contigu
-- `G` : dégradé linéaire interactif
+- `G` : dégradé linéaire, radial ou angulaire interactif
 - `L` : ligne avec le brush actif
 - `R` : rectangle avec le brush actif
 - `O` : ellipse avec le brush actif
@@ -125,6 +147,21 @@ La correspondance fonctionnelle Atlas/Nebula, les limites d’import et les
 stubs Atlas non repris sont décrits dans
 [`docs/ATLAS_TO_NEBULA_MIGRATION.md`](docs/ATLAS_TO_NEBULA_MIGRATION.md).
 
+## Nebula 26.4.0 — dessin raster professionnel
+
+Nebula 26.4.0 fait progresser l’atelier vers un usage de dessin et de peinture
+raster exigeant : moteur de pinceau unifié, tracé sous-pixel lissé, gomme fidèle
+à la pointe, courbe de pression, dynamiques de stylet, textures ancrées à la
+toile et import de pinceaux Photoshop `.abr`. La symétrie radiale propose 2 à
+12 copies et un centre librement positionnable.
+
+Sur les documents lourds, le compositeur de calques et les opérations par tuiles
+ont été renforcés : bascule de visibilité immédiate, fusion native de calques,
+sélections sparse et historique robuste. Les modes de fusion sont étendus à 26
+modes et l’interface se concentre sur la toile, les pinceaux, les calques et
+l’historique. Les détails et mesures sont dans le
+[changelog 26.4.0](docs/CHANGELOG_26.4.0.md).
+
 ## Nebula 26.3.1 — qualification et fiabilisation
 
 La 26.3.1 supprime les anciennes structures C++ non reliées au moteur,
@@ -135,5 +172,11 @@ Nebula ne charge aucun plugin : les ressources et extensions restent sous la
 responsabilité d’Existence.
 
 La progression vers la version stable est suivie dans
-[`ROADMAP_v1.0.md`](ROADMAP_v1.0.md). L'audit v0.3 reste conservé comme
-référence historique dans [`ROADMAP_v0.3.md`](ROADMAP_v0.3.md).
+[`ROADMAP_v1.0.md`](docs/archive/ROADMAP_v1.0.md). L'audit v0.3 reste conservé comme
+référence historique dans [`ROADMAP_v0.3.md`](docs/archive/ROADMAP_v0.3.md).
+
+Les mesures CPU 8K et les corrections d’historique/sélection du 3 octobre sont
+détaillées dans [le rapport de qualification](docs/PERFORMANCE_EDITOR_2026-10-03.md).
+
+La [qualification du PSD réel de 714 Mo](docs/PERFORMANCE_PSD_CREATURE_2026-10-04.md)
+détaille les optimisations de chargement, miniatures et cache du 4 octobre.

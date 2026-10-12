@@ -1,0 +1,80 @@
+{
+  "fixture": {
+    "width": 8000,
+    "height": 6000,
+    "layers": 12,
+    "repeats": 3,
+    "output": "docs/benchmarks/editor-after-2026-10-03.json"
+  },
+  "platform": "Linux-7.2.8-1-garuda-x86_64-with-glibc2.44",
+  "python": "3.14.7",
+  "backend": "CPU Qt offscreen; timings in ms",
+  "results_ms": {
+    "move_median": 2.253,
+    "move_p95": 3.668,
+    "stroke_release": 26.441,
+    "stroke_undo": 7.863,
+    "stroke_redo": 4.499,
+    "rectangle": {
+      "edit": 146.213,
+      "undo": 7.248,
+      "redo": 10.607
+    },
+    "lasso": {
+      "edit": 265.742,
+      "undo": 10.96,
+      "redo": 13.283
+    },
+    "feather_20": {
+      "edit": 321.932,
+      "undo": 11.773,
+      "redo": 11.245
+    },
+    "invert": {
+      "edit": 274.19,
+      "undo": 42.946,
+      "redo": 52.525
+    },
+    "select_all": {
+      "edit": 213.778,
+      "undo": 16.043,
+      "redo": 15.518
+    },
+    "deselect": {
+      "edit": 134.058,
+      "undo": 91.622,
+      "redo": 39.077
+    },
+    "magic_wand": {
+      "edit": 1562.26,
+      "undo": 37.181,
+      "redo": 54.759
+    },
+    "magic_wand_merged": {
+      "edit": 1758.1,
+      "undo": 60.771,
+      "redo": 39.843
+    },
+    "outline": 119.441,
+    "add_layer": {
+      "edit": 0.586,
+      "undo": 0.278,
+      "redo": 0.271
+    },
+    "duplicate_layer": {
+      "edit": 105.268,
+      "undo": 1.547,
+      "redo": 28.88
+    },
+    "move_layer": {
+      "edit": 0.675,
+      "undo": 0.286,
+      "redo": 0.26
+    },
+    "merge_down": {
+      "edit": 547.294,
+      "undo": 58.301,
+      "redo": 33.14
+    }
+  }
+}

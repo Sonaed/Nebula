@@ -337,8 +337,10 @@ class LayerGroupTests(unittest.TestCase):
         self.assertIsNotNone(group)
         self.assertIsNone(document.group_layers([0, 3], "Invalid"))
 
-        # Ungrouped layers cannot be moved into the middle of a group.
-        self.assertFalse(manager.move_layer_up(0))
+        # Cross the complete folder without inserting into its middle.
+        self.assertTrue(manager.move_layer_up(0))
+        self.assertEqual([layer.name for layer in document.layers], ["B", "C", "A", "D"])
+        self.assertTrue(manager.move_layer_down(2))
         self.assertEqual([layer.name for layer in document.layers], ["A", "B", "C", "D"])
 
         # The layer order is bottom to top: first reorder a member, then move the block.
@@ -346,14 +348,14 @@ class LayerGroupTests(unittest.TestCase):
         self.assertEqual([layer.name for layer in document.layers], ["A", "C", "B", "D"])
         self.assertEqual(group.layer_ids, [layer.id for layer in document.layers[1:3]])
         self.assertTrue(manager.move_layer_up(2))
-        self.assertEqual([layer.name for layer in document.layers], ["C", "B", "A", "D"])
-        self.assertEqual(group.layer_ids, [layer.id for layer in document.layers[:2]])
+        self.assertEqual([layer.name for layer in document.layers], ["A", "D", "C", "B"])
+        self.assertEqual(group.layer_ids, [layer.id for layer in document.layers[2:]])
 
-        duplicate = manager.duplicate_layer(0)
+        duplicate = manager.duplicate_layer(2)
         self.assertIsNotNone(duplicate)
         self.assertIs(document.group_for_layer(duplicate.id), group)
-        self.assertEqual(group.layer_ids, [layer.id for layer in document.layers[:3]])
-        self.assertTrue(manager.remove_layer(1))
+        self.assertEqual(group.layer_ids, [layer.id for layer in document.layers[2:]])
+        self.assertTrue(manager.remove_layer(document.layers.index(duplicate)))
         self.assertNotIn(duplicate.id, group.layer_ids)
         self.assertTrue(set(group.layer_ids).issubset(
             {entry.id for entry in document.layers}
@@ -395,11 +397,11 @@ class LayerGroupTests(unittest.TestCase):
         manager = LayerManager(document)
         group = document.group_layers([1, 2], "BC")
         self.assertTrue(manager.move_layer_down(1))
-        self.assertEqual([layer.name for layer in document.layers], ["A", "D", "B", "C"])
-        self.assertEqual(group.layer_ids, [layer.id for layer in document.layers[2:]])
-        self.assertTrue(manager.remove_layer(2))
-        self.assertIs(document.group_for_layer(document.layers[2].id), group)
-        self.assertTrue(manager.remove_layer(2))
+        self.assertEqual([layer.name for layer in document.layers], ["B", "C", "A", "D"])
+        self.assertEqual(group.layer_ids, [layer.id for layer in document.layers[:2]])
+        self.assertTrue(manager.remove_layer(0))
+        self.assertIs(document.group_for_layer(document.layers[0].id), group)
+        self.assertTrue(manager.remove_layer(0))
         self.assertEqual(document.layer_groups, [])
 
     def test_native_layer_removal_preserves_active_layer_and_group_members(self):
@@ -475,8 +477,10 @@ class LayerGroupTests(unittest.TestCase):
         upper.image.fill(QColor("blue"))
         before_layers = list(document.layers)
         before_pixel = lower.image.pixelColor(0, 0)
-        with patch("DOCUMENTS.layer_manager.composite_layer_in_place",
-                   return_value=None):
+        # Simulate an older/missing native batch path as well as the legacy
+        # tile compositor: a merge must never silently fall back to QPainter.
+        with patch.object(lower.tile_store, "composite_from_store", return_value=None), \
+             patch("DOCUMENTS.layer_manager.composite_layer_in_place", return_value=None):
             with self.assertRaisesRegex(RuntimeError, "CreativeCore is required"):
                 LayerManager(document).merge_down(1)
         self.assertEqual(document.layers, before_layers)
@@ -505,11 +509,11 @@ class LayerGroupTests(unittest.TestCase):
         self.assertEqual([layer.name for layer in document.layers], ["A", "C", "B", "D"])
         self.assertEqual(document.active_layer_index, 2)
         self.assertTrue(manager.move_layer_up(2))
-        self.assertEqual([layer.name for layer in document.layers], ["C", "B", "A", "D"])
+        self.assertEqual([layer.name for layer in document.layers], ["A", "D", "C", "B"])
+        self.assertEqual(document.active_layer_index, 3)
+        self.assertTrue(manager.move_layer_down(2))
+        self.assertEqual([layer.name for layer in document.layers], ["A", "C", "B", "D"])
         self.assertEqual(document.active_layer_index, 1)
-        self.assertTrue(manager.move_layer_down(1))
-        self.assertEqual([layer.name for layer in document.layers], ["B", "C", "A", "D"])
-        self.assertEqual(document.active_layer_index, 0)
 
     def test_layer_reordering_requires_native_engine(self):
         document = Document(8, 8)

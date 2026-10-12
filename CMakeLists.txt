@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 3.20)
 
 project(
     CreativeSystemCore
-    VERSION 26.3.1
+    VERSION 26.4.0
     LANGUAGES CXX
 )
 
@@ -149,6 +149,8 @@ target_link_libraries(
         Qt6::Gui
 )
 
+add_executable(CreativeCoreStackCompositorTests CPP_TEST/test_stack_compositor.cpp CPP_TEST/legacy_stack_reference.cpp)
+target_link_libraries(CreativeCoreStackCompositorTests PRIVATE CreativeCoreBridge)
 add_executable(CreativeCoreProjectionTests CPP_TEST/test_projection_engine.cpp)
 target_link_libraries(CreativeCoreProjectionTests PRIVATE CreativeCoreBridge)
 add_executable(CreativeCoreSimdTests CPP_TEST/test_simd_runtime.cpp)
@@ -184,6 +186,7 @@ add_test(
     NAME CreativeCoreUnitTests
     COMMAND CreativeCoreUnitTests
 )
+add_test(NAME CreativeCoreStackCompositorTests COMMAND CreativeCoreStackCompositorTests)
 add_test(NAME CreativeCoreProjectionTests COMMAND CreativeCoreProjectionTests)
 add_test(NAME CreativeCoreSimdTests COMMAND CreativeCoreSimdTests)
 add_test(NAME CreativeCoreTileStoreTests COMMAND CreativeCoreTileStoreTests)
@@ -197,5 +200,18 @@ add_test(NAME CreativeCoreAsyncBrushTests COMMAND CreativeCoreAsyncBrushTests)
 add_test(NAME CreativeCoreFilterTests COMMAND CreativeCoreFilterTests)
 add_test(NAME CreativeCoreFilterLayerTests COMMAND CreativeCoreFilterLayerTests)
 add_test(NAME CreativeCorePsdKernelTests COMMAND CreativeCorePsdKernelTests)
+
+# These executables use assert() as their test oracle. Release builds must
+# execute the checks too; otherwise CTest can report success without testing.
+get_property(_nebula_targets DIRECTORY PROPERTY BUILDSYSTEM_TARGETS)
+foreach(_nebula_target IN LISTS _nebula_targets)
+    if(_nebula_target MATCHES "Tests$")
+        if(MSVC)
+            target_compile_options(${_nebula_target} PRIVATE /UNDEBUG)
+        else()
+            target_compile_options(${_nebula_target} PRIVATE -UNDEBUG)
+        endif()
+    endif()
+endforeach()
 
 endif()

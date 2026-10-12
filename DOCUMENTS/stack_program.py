@@ -19,10 +19,7 @@ from DOCUMENTS.adjustments import stack_table
 
 RASTER, GROUP_BEGIN, GROUP_END, ADJUST = 0, 1, 2, 3
 
-_MODE_IDS = {"normal": 0, "darken": 1, "multiply": 2, "color_burn": 3, "lighten": 4,
-             "screen": 5, "color_dodge": 6, "overlay": 7, "soft_light": 8, "hard_light": 9,
-             "difference": 10, "exclusion": 11, "hue": 12, "saturation": 13, "color": 14,
-             "luminosity": 15}
+from DOCUMENTS.blend_mode_catalog import BLEND_MODE_IDS as _MODE_IDS
 _PARAMETER_KEYS = ("opacity", "opposite_mix", "intensity", "gamma", "mix_normal",
                    "pivot", "clamp", "softness", "hue_shift", "saturation_boost", "offset")
 _PARAMETER_DEFAULTS = (1.0, 0.0, 1.0, 1.0, 0.0, 0.5, 1.0, 0.5, 0.0, 1.0, 0.0)

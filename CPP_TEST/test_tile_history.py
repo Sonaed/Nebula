@@ -342,6 +342,23 @@ class TileHistoryTests(unittest.TestCase):
         self.assertEqual((restored.width, restored.height, restored.dpi), (128, 96, 144))
         self.assertEqual(restored.get_active_layer().image.pixelColor(4, 5), QColor("magenta"))
 
+    def test_snapshot_budget_rotates_oldest_heavy_steps(self) -> None:
+        document = Document(128, 96)
+        history = TileHistory(max_steps=64, max_snapshot_bytes=8 * 1024 * 1024)
+        layer = document.get_active_layer()
+        # Native tile payloads are 64×64 RGBA; repeated full-tile edits must
+        # obey the byte budget independently of the action-count limit.
+        history.max_snapshot_bytes = 32 * 1024
+        for index in range(6):
+            area = QRect(0, 0, 64, 64)
+            history.begin(document, dirty_only=True)
+            history.capture_before(layer, area)
+            layer.image.fill(QColor(index * 30, 20, 40, 255))
+            history.mark_dirty(layer, area)
+            self.assertTrue(history.commit(document))
+        self.assertLessEqual(history.resident_snapshot_bytes, history.max_snapshot_bytes)
+        self.assertLess(len(history.steps), 6)
+
     def test_stroke_stores_only_touched_tiles_and_round_trips(self) -> None:
         document = Document(400, 300)
         layer = document.get_active_layer()
@@ -540,7 +557,7 @@ class TileHistoryTests(unittest.TestCase):
         self.assertTrue(history.commit(document))
         self.assertEqual(
             set(history.steps[0].tiles),
-            {(SELECTION_TILE_ID, 2, 1)},
+            {(SELECTION_TILE_ID, 0, 0)},
         )
         self.assertTrue(history.undo(document))
         self.assertEqual(document.selection.image.pixelColor(150, 70).alpha(), 0)

@@ -56,7 +56,7 @@ class FillToolTests(unittest.TestCase):
         image = QImage(2, 2, QImage.Format.Format_ARGB32)
         image.fill(QColor("white"))
         tool = FillTool()
-        with patch("TOOLS.fill_tool.native_flood_fill", return_value=None):
+        with patch("TOOLS.fill_tool.native_fill_ex", return_value=None):
             with self.assertRaisesRegex(RuntimeError, "CreativeCore is required"):
                 tool.fill(image, QPoint(0, 0), QColor("red"))
 

@@ -3,80 +3,84 @@ from __future__ import annotations
 from PySide6.QtCore import QSettings, Qt, Signal
 from PySide6.QtGui import QKeySequence
 from PySide6.QtWidgets import (
-    QCheckBox, QComboBox, QDialog, QDoubleSpinBox, QFormLayout, QHBoxLayout,
-    QLabel, QLineEdit, QListWidget, QPushButton, QSpinBox, QStackedWidget,
-    QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget, QKeySequenceEdit,
+    QCheckBox,
+    QComboBox,
+    QDialog,
+    QFormLayout,
+    QHBoxLayout,
+    QLabel,
+    QLineEdit,
+    QListWidget,
+    QPushButton,
+    QSpinBox,
+    QStackedWidget,
+    QTableWidget,
+    QTableWidgetItem,
+    QVBoxLayout,
+    QWidget,
+    QKeySequenceEdit,
     QFileDialog,
 )
 
 
 class PreferencesDialog(QDialog):
     preference_changed = Signal(str, object)
+    # Seven pages instead of twelve, and only settings that are actually
+    # applied somewhere: placebo options (language, tooltips, colour
+    # management, CPU fallback, recovery copies…) were removed — a release
+    # must not offer switches that do nothing.
     CATEGORIES = (
-        "General", "Interface", "Canvas", "Input", "Tablet", "Brush",
-        "Performance", "CPU", "Files", "Autosave", "Color Management",
-        "Shortcuts",
+        "Général", "Interface", "Toile", "Stylet et pinceau",
+        "Performances", "Fichiers", "Raccourcis",
     )
 
     # Each setting is stored immediately, so closing the dialog never loses edits.
     OPTIONS = {
-        "General": [
-            ("check", "general/restore_session", "Restore the last workspace on launch", True),
-            ("check", "general/confirm_exit", "Confirm before closing with unsaved changes", True),
-            ("choice", "general/language", "Language", ["System", "English", "Français"], "System"),
+        "Général": [
+            ("check", "general/restore_session", "Restaurer l'agencement des panneaux au démarrage", True),
         ],
         "Interface": [
-            ("check", "interface/compact", "Compact professional density", True),
-            ("check", "interface/tooltips", "Show tooltips", True),
-            ("choice", "interface/icon_size", "Toolbar icon size", ["20 px", "24 px", "28 px"], "24 px"),
+            ("check", "interface/compact", "Densité compacte (texte plus petit)", False),
+            ("choice", "interface/icon_size", "Taille des icônes d'outils", ["20 px", "24 px", "28 px"], "24 px"),
+            ("check", "interface/show_diagnostics", "Afficher les diagnostics mémoire dans la barre d'état", False),
         ],
-        "Canvas": [
-            ("choice", "canvas/zoom_behavior", "Zoom behavior", ["At cursor", "At canvas center"], "At cursor"),
-            ("choice", "canvas/background", "Canvas background", ["Checkerboard", "Dark", "Light"], "Checkerboard"),
-            ("check", "canvas/antialias", "Enable canvas antialiasing", True),
+        "Toile": [
+            ("choice", "canvas/zoom_behavior", "Zoom", ["At cursor", "At canvas center"], "At cursor",
+             {"At cursor": "Sous le curseur", "At canvas center": "Au centre de la toile"}),
+            ("choice", "canvas/background", "Fond autour du document", ["Checkerboard", "Dark", "Light"], "Checkerboard",
+             {"Checkerboard": "Damier", "Dark": "Sombre", "Light": "Clair"}),
+            ("check", "canvas/antialias", "Lisser le rendu de la toile", True),
         ],
-        "Input": [
-            ("check", "input/stabilization", "Enable brush stroke stabilization", True),
-            ("number", "input/stabilization_amount", "Stabilization amount", 0, 100, 20),
-            ("check", "input/right_click_color_picker", "Right click temporarily picks color", True),
+        "Stylet et pinceau": [
+            ("check", "tablet/pressure", "Utiliser la pression du stylet", True),
+            ("check", "tablet/pressure_size", "La pression contrôle la taille", True),
+            ("check", "tablet/pressure_opacity", "La pression contrôle l'opacité", True),
+            ("check", "tablet/ignore_mouse_after_tablet", "Ignorer les clics souris générés par le stylet", True),
+            ("check", "input/stabilization", "Activer le stabilisateur de trait", True),
+            ("number", "input/stabilization_amount", "Force du stabilisateur (%)", 0, 100, 20),
+            ("check", "input/right_click_palette", "Clic droit : palette rapide (sinon pipette ; Alt+clic reste la pipette)", True),
+            ("number", "brush/spacing", "Espacement par défaut (%)", 1, 500, 10),
+            ("check", "brush/remember_per_tool", "Mémoriser les réglages par outil", True),
+            ("check", "brush/show_cursor_preview", "Afficher le contour du pinceau", True),
         ],
-        "Tablet": [
-            ("check", "tablet/pressure", "Enable tablet pressure", True),
-            ("check", "tablet/pressure_size", "Pressure controls brush size", True),
-            ("check", "tablet/pressure_opacity", "Pressure controls opacity", True),
-            ("check", "tablet/ignore_mouse_after_tablet", "Ignore synthetic mouse events", True),
+        "Performances": [
+            ("choice", "performance/memory_profile", "Profil mémoire", ["Prudent", "Équilibré", "Performance", "Manuel"], "Équilibré"),
+            ("number", "performance/memory_limit_mb", "Limite mémoire de Nebula (Mo)", 256, 65536, 2048),
+            ("number", "performance/undo_steps", "Nombre d'annulations", 1, 1000, 100),
+            ("number", "performance/undo_memory_limit_mb", "Mémoire de l'historique (Mo)", 8, 8192, 512),
+            ("path", "performance/scratch_directory", "Dossier d'échange des tuiles", ""),
+            ("check", "performance/use_gpu", "Utiliser la toile GPU si disponible", True),
+            ("choice", "cpu/threads", "Threads de calcul", ["Automatic", "1", "2", "4", "8"], "Automatic",
+             {"Automatic": "Automatique"}),
+            ("number", "cpu/cache_mb", "Cache d'image (Mo)", 64, 65536, 1024),
         ],
-        "Brush": [
-            ("number", "brush/spacing", "Default brush spacing (%)", 1, 500, 10),
-            ("check", "brush/remember_per_tool", "Remember settings per tool", True),
-            ("check", "brush/show_cursor_preview", "Show brush cursor preview", True),
-        ],
-        "Performance": [
-            ("choice", "performance/memory_profile", "Memory profile", ["Prudent", "Équilibré", "Performance", "Manuel"], "Équilibré"),
-            ("number", "performance/memory_limit_mb", "Nebula memory limit (MB)", 256, 65536, 2048),
-            ("number", "performance/undo_steps", "Undo history steps", 1, 1000, 100),
-            ("path", "performance/scratch_directory", "Tile scratch directory", ""),
-            ("check", "performance/use_gpu", "Use GPU canvas when available", True),
-        ],
-        "CPU": [
-            ("choice", "cpu/threads", "Worker threads", ["Automatic", "1", "2", "4", "8"], "Automatic"),
-            ("number", "cpu/cache_mb", "Image cache limit (MB)", 64, 65536, 1024),
-            ("check", "cpu/allow_fallback", "Allow CPU rendering fallback", True),
-        ],
-        "Files": [
-            ("choice", "files/default_format", "Default document format", [".nebula", ".nbl", ".png", ".tif"], ".nebula"),
-            ("check", "files/remember_directory", "Remember last open/save directory", True),
-            ("check", "files/compress_documents", "Compress document archives", True),
-        ],
-        "Autosave": [
-            ("check", "autosave/enabled", "Enable autosave", True),
-            ("number", "autosave/interval_minutes", "Autosave interval (minutes)", 1, 120, 5),
-            ("number", "autosave/keep_copies", "Recovery copies to keep", 1, 100, 10),
-        ],
-        "Color Management": [
-            ("choice", "color/working_space", "Working color space", ["sRGB", "Display P3", "Adobe RGB"], "sRGB"),
-            ("choice", "color/rendering_intent", "Rendering intent", ["Perceptual", "Relative colorimetric", "Saturation", "Absolute colorimetric"], "Perceptual"),
-            ("check", "color/embed_profile", "Embed profile in exported images", True),
+        "Fichiers": [
+            ("choice", "files/default_format", "Format de document par défaut",
+             [".nebula", ".nbl", ".psd", ".psb", ".png", ".tif"], ".nebula"),
+            ("check", "files/remember_directory", "Se souvenir du dernier dossier", True),
+            ("check", "files/compress_documents", "Compresser les documents", True),
+            ("check", "autosave/enabled", "Sauvegarde automatique", True),
+            ("number", "autosave/interval_minutes", "Intervalle de sauvegarde (minutes)", 1, 120, 5),
         ],
     }
 
@@ -84,7 +88,7 @@ class PreferencesDialog(QDialog):
         super().__init__(parent)
         self.canvas, self.actions = canvas, actions
         self.settings = QSettings("CreativeSystem", "CreativeSystem")
-        self.setWindowTitle("CreativeSystem Preferences")
+        self.setWindowTitle("Préférences — Nebula")
         self.resize(780, 560)
         root = QHBoxLayout(self)
         root.setContentsMargins(8, 8, 8, 8)
@@ -95,7 +99,7 @@ class PreferencesDialog(QDialog):
         root.addWidget(self.navigation)
         root.addWidget(self.pages, 1)
         for name in self.CATEGORIES:
-            self.pages.addWidget(self._shortcuts_page() if name == "Shortcuts" else self._standard_page(name))
+            self.pages.addWidget(self._shortcuts_page() if name == "Raccourcis" else self._standard_page(name))
         self.navigation.currentRowChanged.connect(self.pages.setCurrentIndex)
         self.navigation.setCurrentRow(0)
 
@@ -116,12 +120,17 @@ class PreferencesDialog(QDialog):
                 control.toggled.connect(lambda value, setting=key: self._store(setting, value))
                 form.addRow(control)
             elif kind == "choice":
-                choices, default = args
+                choices, default = args[0], args[1]
+                # Stored values stay stable (existing settings keep working);
+                # only what the user reads is translated.
+                display = args[2] if len(args) > 2 else {}
                 control = QComboBox()
-                control.addItems(choices)
+                for choice in choices:
+                    control.addItem(display.get(choice, choice), choice)
                 value = str(self.settings.value(key, default))
-                control.setCurrentText(value if value in choices else default)
-                control.currentTextChanged.connect(lambda value, setting=key: self._store(setting, value))
+                control.setCurrentIndex(max(0, choices.index(value if value in choices else default)))
+                control.currentIndexChanged.connect(
+                    lambda index, setting=key, box=control: self._store(setting, box.itemData(index)))
                 form.addRow(label, control)
             elif kind == "path":
                 default = args[0]
@@ -129,7 +138,7 @@ class PreferencesDialog(QDialog):
                 row_layout = QHBoxLayout(row)
                 row_layout.setContentsMargins(0, 0, 0, 0)
                 control = QLineEdit(str(self.settings.value(key, default)))
-                browse = QPushButton("Browse…")
+                browse = QPushButton("Parcourir…")
                 browse.clicked.connect(lambda _=False, edit=control, setting=key: self._choose_directory(setting, edit))
                 control.editingFinished.connect(lambda edit=control, setting=key: self._store(setting, edit.text()))
                 row_layout.addWidget(control, 1)
@@ -143,8 +152,9 @@ class PreferencesDialog(QDialog):
                 control.valueChanged.connect(lambda value, setting=key: self._store(setting, value))
                 form.addRow(label, control)
         layout.addLayout(form)
-        if name == "Performance":
-            fixed_tiles = QLabel("Prudent: 35% RAM · Équilibré: 60% · Performance: 75% · Manuel garde la limite en MiB.\nTile size: 64 × 64 px (fixed for document and undo compatibility)")
+        if name == "Performances":
+            fixed_tiles = QLabel("Prudent : 35 % de la RAM · Équilibré : 60 % · Performance : 75 % · "
+                                 "Manuel conserve la limite indiquée.")
             fixed_tiles.setObjectName("mutedLabel")
             layout.addWidget(fixed_tiles)
         layout.addStretch()
@@ -155,17 +165,17 @@ class PreferencesDialog(QDialog):
         self.preference_changed.emit(key, value)
 
     def _choose_directory(self, key: str, control: QLineEdit) -> None:
-        selected = QFileDialog.getExistingDirectory(self, "Choose tile scratch directory", control.text())
+        selected = QFileDialog.getExistingDirectory(self, "Dossier d'échange des tuiles", control.text())
         if selected:
             control.setText(selected)
             self._store(key, selected)
 
     def _shortcuts_page(self) -> QWidget:
         page = QWidget(); layout = QVBoxLayout(page)
-        title = QLabel("KEYBOARD SHORTCUTS"); title.setObjectName("dockTitle"); layout.addWidget(title)
-        search = QLineEdit(); search.setPlaceholderText("Search actions…"); layout.addWidget(search)
+        title = QLabel("RACCOURCIS CLAVIER"); title.setObjectName("dockTitle"); layout.addWidget(title)
+        search = QLineEdit(); search.setPlaceholderText("Rechercher une commande…"); layout.addWidget(search)
         self.shortcut_status = QLabel(" "); layout.addWidget(self.shortcut_status)
-        table = QTableWidget(0, 2); table.setHorizontalHeaderLabels(["Action", "Shortcut"])
+        table = QTableWidget(0, 2); table.setHorizontalHeaderLabels(["Commande", "Raccourci"])
         table.horizontalHeader().setStretchLastSection(True)
         defaults = {}
         for action_id, action in sorted(self.actions.items()):
@@ -177,7 +187,7 @@ class PreferencesDialog(QDialog):
             editor.keySequenceChanged.connect(lambda seq, a=action, key=action_id, edit=editor: self._set_shortcut(key, a, seq, edit))
         search.textChanged.connect(lambda text: self._filter(table, text))
         layout.addWidget(table, 1)
-        reset = QPushButton("Restore default shortcuts")
+        reset = QPushButton("Rétablir les raccourcis par défaut")
         reset.clicked.connect(lambda: self._restore_defaults(table, defaults))
         layout.addWidget(reset); return page
 

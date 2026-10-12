@@ -12,7 +12,7 @@ import ctypes.util
 import math
 import struct
 
-from PySide6.QtCore import QPoint, QRect
+from PySide6.QtCore import QPoint, QPointF, QRect
 from PySide6.QtGui import QColor, QImage, QOpenGLContext, QPainter
 from PySide6.QtOpenGL import (
     QOpenGLBuffer,
@@ -190,7 +190,7 @@ class GPUInstancedStrokeRenderer:
         self.layer = layer
         self.base_image = image.copy()
         self.settings = dict(settings)
-        self.start_point = QPoint(position)
+        self.start_point = QPointF(position)
         self.start_pressure = max(0.0, min(1.0, float(pressure)))
         rgb = settings.get("color", [0, 0, 0, 255])
         self.color = QColor(*(list(rgb)[:4]))
@@ -267,7 +267,7 @@ class GPUInstancedStrokeRenderer:
                         start_pressure: float, end_pressure: float,
                         include_replay: bool = True) -> None:
         if include_replay:
-            self.replay_segments.append((QPoint(start), QPoint(end), float(start_pressure), float(end_pressure)))
+            self.replay_segments.append((QPointF(start), QPointF(end), float(start_pressure), float(end_pressure)))
         dx, dy = end.x() - start.x(), end.y() - start.y()
         distance = math.hypot(dx, dy)
         size0, size1 = self._effective_size(start_pressure), self._effective_size(end_pressure)

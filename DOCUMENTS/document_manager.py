@@ -27,15 +27,6 @@ class DocumentManager:
 
         return document
 
-    def set_active_document(
-        self,
-        document: Document,
-    ) -> None:
-
-        if document in self.documents:
-
-            self.active_document = document
-
     def close_document(
         self,
         document: Document,
@@ -59,9 +50,3 @@ class DocumentManager:
             else:
 
                 self.active_document = None
-
-    def get_active_document(
-        self
-    ) -> Document | None:
-
-        return self.active_document

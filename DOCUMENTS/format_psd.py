@@ -28,13 +28,7 @@ PSD_BLEND_MODES = {
     "hMix": "hard_mix", "dkCl": "darker_color", "lgCl": "lighter_color",
     "fsub": "subtract", "fdiv": "divide", "pass": "passthrough",
 }
-PSD_BLEND_FALLBACKS = {
-    "linear_dodge": "screen", "vivid_light": "hard_light",
-    "linear_light": "hard_light", "pin_light": "hard_light",
-    "linear_burn": "multiply", "hard_mix": "hard_light",
-    "darker_color": "darken", "lighter_color": "lighten",
-    "subtract": "difference", "divide": "normal", "passthrough": "normal",
-}
+PSD_BLEND_FALLBACKS = {"passthrough": "normal"}
 
 
 class PSDImportCancelled(RuntimeError):
@@ -241,10 +235,8 @@ class PSDFormat:
                     if child.parent_id is None:
                         child.parent_id = group.id
                 groups.append(group)
-                if source.mask is not None and not source.mask.disabled and (
-                        source.mask.data is not None and source.mask.data.size
-                        and int(source.mask.data.min()) < 255 or source.mask.default_color < 255):
-                    warnings.append(f"{source.name} : masque de dossier ignoré")
+                if source.mask is not None:
+                    PSDFormat._import_group_mask(document, group, source, warnings)
                 if source.clipping:
                     warnings.append(f"{source.name} : dossier écrêté, écrêtage ignoré")
                 leaf_ids.extend(members)
@@ -421,6 +413,20 @@ class PSDFormat:
         """Write straight-alpha RGBA pixels; returns the written document bounds."""
         import numpy as np
         height, width = rgba.shape[:2]
+        dx0, dy0 = max(left, 0), max(top, 0)
+        dx1, dy1 = min(left + width, document.width), min(top + height, document.height)
+        if dx1 <= dx0 or dy1 <= dy0:
+            return (0, 0, 0, 0)
+        # One native call handles offsets, clipping, channel conversion and
+        # transparent-tile rejection without scanning huge arrays in Python.
+        pixels = np.ascontiguousarray(rgba, dtype=np.uint8)
+        image = QImage(pixels.data, width, height, pixels.strides[0], QImage.Format.Format_RGBA8888)
+        imported = layer.tile_store.import_rgba(image, int(left), int(top))
+        if imported is not None:
+            if not imported:
+                raise RuntimeError("CreativeCore a refusé l'import des pixels PSD")
+            layer.discard_image_cache()
+            return (dx0, dy0, dx1, dy1)
         if left == 0 and top == 0 and (width, height) == (document.width, document.height):
             # The native writer already splits full-canvas images into owned
             # tiles. Avoid hundreds of thousands of Python/QImage wrappers.
@@ -464,6 +470,21 @@ class PSDFormat:
                                    (tx0, ty, tx1, ty), document)
         layer.discard_image_cache()
         return (dx0, dy0, dx1, dy1)
+
+    @staticmethod
+    def _import_group_mask(document, group, source, warnings) -> None:
+        """Photoshop folder mask -> Nebula folder mask (same encoding as layers)."""
+        try:
+            source.decode_pixels()        # a folder's only channel data is its mask
+            group.ensure_alpha_mask(document.width, document.height)
+            PSDFormat._write_mask(group, source, document, (0, 0, document.width, document.height))
+            if not group.alpha_mask_store.occupied_keys:
+                group.set_alpha_mask(None)    # reveals everything: no mask needed
+        except Exception as error:  # noqa: BLE001 - keep the folder, drop the mask
+            group.set_alpha_mask(None)
+            warnings.append(f"{source.name} : masque de dossier illisible ({error})")
+        finally:
+            source.release_pixels()
 
     @staticmethod
     def _write_mask(layer, source, document, content) -> None:
@@ -615,7 +636,9 @@ class PSDFormat:
         with tempfile.TemporaryFile() as channels_file:
             for kind, layer in ordered:
                 if kind != "layer":
-                    PSDFormat._write_group_marker(stream, layer, kind == "group_start")
+                    for channel in PSDFormat._write_group_marker(
+                            stream, layer, kind == "group_start", version, document):
+                        channels_file.write(channel)
                     continue
                 layer.commit_image_cache(release=True)
                 image = layer.tile_store.materialize().convertToFormat(QImage.Format.Format_RGBA8888)
@@ -674,17 +697,34 @@ class PSDFormat:
         return result
 
     @staticmethod
-    def _write_group_marker(stream, group, opening: bool) -> None:
+    def _write_group_marker(stream, group, opening: bool, version: int = 1,
+                            document=None) -> list[bytes]:
+        """Write a folder start/end record; return its channel data (the mask)."""
         name = str(getattr(group, "name", "Groupe") if opening else "</Layer group>")
-        stream.write(struct.pack(">iiiiH", 0, 0, 0, 0, 0))
+        channels: list[bytes] = []
+        mask = group.alpha_mask_coverage() if (
+            opening and document is not None
+            and getattr(group, "alpha_mask_store", None) is not None) else None
+        if mask is not None:
+            channels.append(PSDFormat._zip_channel(mask, 3))
+            del mask
+        stream.write(struct.pack(">iiiiH", 0, 0, 0, 0, len(channels)))
+        for payload in channels:
+            stream.write(struct.pack(">hQ" if version == 2 else ">hI", -2, len(payload)))
         mode = PSDFormat._psd_blend_key(str(getattr(group, "blend_mode", "normal"))) if opening else b"norm"
         stream.write(b"8BIM" + mode)
         opacity = round(max(0.0, min(1.0, float(getattr(group, "opacity", 1.0)))) * 255) if opening else 255
         visible = bool(getattr(group, "visible", True)) if opening else True
         stream.write(bytes((opacity, 0, 0 if visible else 0x02, 0)))
-        extra = PSDFormat._layer_extra_data(name, 0, 0, False, 1 if opening else 3)
+        if channels:
+            extra = PSDFormat._layer_extra_data(
+                name, document.width, document.height, True, 1,
+                mask_disabled=bool(getattr(group, "mask_disabled", False)))
+        else:
+            extra = PSDFormat._layer_extra_data(name, 0, 0, False, 1 if opening else 3)
         stream.write(struct.pack(">I", len(extra)))
         stream.write(extra)
+        return channels
 
     @staticmethod
     def _write_layer_record(stream, layer, image: QImage, channel_ids: tuple[int, ...],
@@ -706,7 +746,8 @@ class PSDFormat:
 
     @staticmethod
     def _layer_extra_data(name: str, width: int, height: int, has_mask: bool = False,
-                          section_type: int | None = None, adjustment=None) -> bytes:
+                          section_type: int | None = None, adjustment=None,
+                          mask_disabled: bool = False) -> bytes:
         # Mask descriptor, blending ranges, then Pascal name + Unicode luni name.
         latin = name.encode("macroman", "replace")[:255]
         pascal = bytes((len(latin),)) + latin
@@ -719,7 +760,8 @@ class PSDFormat:
         # a following adjustment tag is not mistaken for padding.
         luni = b"8BIMluni" + struct.pack(">I", len(luni_payload) + len(luni_padding))
         luni += luni_payload + luni_padding
-        mask = (struct.pack(">IiiiiBBH", 20, 0, 0, height, width, 255, 0, 0)
+        mask = (struct.pack(">IiiiiBBH", 20, 0, 0, height, width, 255,
+                            0x02 if mask_disabled else 0, 0)
                 if has_mask else struct.pack(">I", 0))
         section = b"" if section_type is None else b"8BIMlsct" + struct.pack(">I", 4) + struct.pack(">I", section_type)
         adjustment_block = PSDFormat._curve_adjustment_block(adjustment)
@@ -748,43 +790,6 @@ class PSDFormat:
                 payload += struct.pack(">HH", output, value)
         block = b"8BIMcurv" + struct.pack(">I", len(payload)) + bytes(payload)
         return block + (b"\0" if len(payload) % 2 else b"")
-
-    @staticmethod
-    def _channel_rows(image: QImage, include_alpha: bool = False) -> list[list[bytes]]:
-        rgba = image.convertToFormat(QImage.Format.Format_RGBA8888)
-        raw = bytes(rgba.constBits())
-        channels = (0, 1, 2, 3) if include_alpha else (0, 1, 2)
-        stride, width = rgba.bytesPerLine(), rgba.width()
-        return [[raw[row * stride + channel:row * stride + channel + width * 4:4]
-                 for row in range(rgba.height())] for channel in channels]
-
-    @staticmethod
-    def _packbits(row: bytes) -> bytes:
-        """Encode one Photoshop PackBits scanline."""
-        result = bytearray()
-        index = 0
-        while index < len(row):
-            run = 1
-            while index + run < len(row) and row[index + run] == row[index] and run < 128:
-                run += 1
-            if run >= 3:
-                result.append((257 - run) & 0xFF)
-                result.append(row[index])
-                index += run
-                continue
-            start = index
-            index += run
-            while index < len(row):
-                repeat = 1
-                while index + repeat < len(row) and row[index + repeat] == row[index] and repeat < 128:
-                    repeat += 1
-                if repeat >= 3 or index - start >= 128:
-                    break
-                index += repeat
-            literal = row[start:index]
-            result.append(len(literal) - 1)
-            result.extend(literal)
-        return bytes(result)
 
     @staticmethod
     def _zip_channel(image: QImage, channel: int) -> bytes:

@@ -1182,11 +1182,46 @@ def read_composite_regions(source, regions) -> tuple[tuple[int, int], dict[tuple
             raise PSDError("PSD sans composite intégré")
         stream = _Stream(psd._mapped_source, psd.version == 2)
         result = {}
-        for rect in regions:
+        # Neighbouring viewport tiles share the same compressed scanlines.
+        # Decode each horizontal run once, with bounded staging memory, rather
+        # than rebuilding the row table and unpacking a whole row per tile.
+        rows = {}
+        singles = []
+        for requested in regions:
+            rect = tuple(int(v) for v in requested)
+            x, y, w, h = rect
+            if x >= 0 and y >= 0 and w > 0 and h > 0 and x + w <= psd.width and y + h <= psd.height:
+                rows.setdefault((y, h), []).append(rect)
+            else:
+                singles.append([rect])
+        runs = singles
+        for row in rows.values():
+            run = []
+            right = 0
+            for rect in sorted(row):
+                x, y, w, h = rect
+                if run and (x > right or (max(right, x + w) - run[0][0]) * h > 4 * 1024 * 1024):
+                    runs.append(run)
+                    run = []
+                if not run:
+                    right = x + w
+                else:
+                    right = max(right, x + w)
+                run.append(rect)
+            if run:
+                runs.append(run)
+        for run in runs:
+            x, y, w, h = run[0]
+            right = max(rect[0] + rect[2] for rect in run)
             stream.o = psd._composite_offset
-            result[tuple(rect)] = _read_composite_region(
+            pixels = _read_composite_region(
                 stream, psd.width, psd.height, _composite_channel_count(psd), psd.depth,
-                psd.color_mode, rect)
+                psd.color_mode, (x, y, right - x, h))
+            if len(run) == 1:
+                result[run[0]] = pixels
+            else:
+                for rect in run:
+                    result[rect] = pixels[:, rect[0] - x:rect[0] - x + rect[2]].copy()
         return (psd.width, psd.height), result
 
 

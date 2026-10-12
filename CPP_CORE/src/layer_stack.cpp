@@ -16,45 +16,32 @@ bool moveLayerStack(const std::vector<int>& groupIds, int activeIndex,
 
     order.resize(groupIds.size());
     std::iota(order.begin(), order.end(), 0);
-    const int group = groupIds[activeIndex];
+    auto block = [&](int at, int& first, int& last) {
+        first = last = at;
+        const int group = groupIds[at];
+        if (group < 0) return true;
+        for (int i = 0; i < count; ++i) {
+            if (groupIds[i] == group) { first = std::min(first, i); last = std::max(last, i); }
+        }
+        for (int i = first; i <= last; ++i) if (groupIds[i] != group) return false;
+        return true;
+    };
+    int first, last;
+    if (!block(activeIndex, first, last)) return false;
     const int adjacent = activeIndex + direction;
-    if (group < 0) {
-        if (adjacent < 0 || adjacent >= count || groupIds[adjacent] >= 0)
-            return false;
+    if (adjacent >= first && adjacent <= last) {
         std::swap(order[activeIndex], order[adjacent]);
     } else {
-        int first = count;
-        int last = -1;
-        for (int index = 0; index < count; ++index) {
-            if (groupIds[index] != group) continue;
-            first = std::min(first, index);
-            last = index;
-        }
-        if (last < first) return false;
-        for (int index = first; index <= last; ++index)
-            if (groupIds[index] != group) return false;
-
-        if (direction > 0) {
-            if (activeIndex < last) {
-                std::swap(order[activeIndex], order[activeIndex + 1]);
-            } else if (first > 0) {
-                std::rotate(order.begin() + first - 1,
-                            order.begin() + first,
-                            order.begin() + last + 1);
-            } else {
-                return false;
-            }
-        } else {
-            if (activeIndex > first) {
-                std::swap(order[activeIndex], order[activeIndex - 1]);
-            } else if (last + 1 < count) {
-                std::rotate(order.begin() + first,
-                            order.begin() + last + 1,
-                            order.begin() + last + 2);
-            } else {
-                return false;
-            }
-        }
+        const int neighbour = direction > 0 ? last + 1 : first - 1;
+        if (neighbour < 0 || neighbour >= count) return false;
+        int otherFirst, otherLast;
+        if (!block(neighbour, otherFirst, otherLast)) return false;
+        // Crossing a folder boundary swaps complete adjacent blocks. Never
+        // split the neighbouring folder or reverse the requested direction.
+        if (direction > 0)
+            std::rotate(order.begin() + first, order.begin() + last + 1, order.begin() + otherLast + 1);
+        else
+            std::rotate(order.begin() + otherFirst, order.begin() + first, order.begin() + last + 1);
     }
 
     const auto selected = std::find(order.begin(), order.end(), activeIndex);

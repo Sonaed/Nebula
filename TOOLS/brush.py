@@ -47,6 +47,10 @@ class Brush:
         # =====================================================
 
         self.smoothing: float = 0.0
+        # ``none`` is a real mode, rather than just a zero-valued slider:
+        # changing the global smoothing amount must not unexpectedly turn a
+        # deliberately disabled stabilizer back on.
+        self.smoothing_mode: str = "basic"
 
         self.smoother = BrushSmoothing(
             strength=self.smoothing,
@@ -140,15 +144,14 @@ class Brush:
             strength,
         )
 
-        self.smoother.set_strength(
-            self.smoothing,
-        )
+        self.smoother.set_strength(self.smoothing if self.smoothing_mode != "none" else 0.0)
 
-    def reset_smoothing(
-        self
-    ) -> None:
-
-        self.smoother.reset()
+    def set_smoothing_mode(self, mode: str) -> None:
+        """Select the stabilizer response while retaining the user's amount."""
+        mode = str(mode).lower()
+        self.smoothing_mode = mode if mode in {"none", "basic", "weighted", "stabilize"} else "basic"
+        self.smoother.set_mode("basic" if self.smoothing_mode == "none" else self.smoothing_mode)
+        self.smoother.set_strength(self.smoothing if self.smoothing_mode != "none" else 0.0)
 
     # =========================================================
     # SYNCHRONISATION DU MOTEUR
@@ -177,40 +180,6 @@ class Brush:
     # =========================================================
     # TAILLE
     # =========================================================
-
-    def get_size(
-        self,
-        pressure: float | None = None,
-    ) -> float:
-
-        if pressure is None:
-            pressure = self.pressure
-
-        pressure = self.clamp(
-            pressure,
-        )
-
-        factor = (
-            (1.0 - self.pressure_size)
-            + pressure
-            * self.pressure_size
-        )
-
-        size = (
-            self.size
-            * factor
-        )
-
-        minimum = (
-            self.size
-            * self.minimum_size
-        )
-
-        return max(
-            0.1,
-            size,
-            minimum,
-        )
 
     # =========================================================
     # OPACITÉ

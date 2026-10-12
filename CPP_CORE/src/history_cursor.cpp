@@ -54,12 +54,16 @@ int HistoryCursor::append(int& truncatedForward, int& discardedOldest)
     discardedOldest = 0;
     if (transactionOpen_) return 0;
     truncatedForward = std::max(0, stepCount_ - index_);
+    // A pixel-only edit must never inherit structural state from an abandoned
+    // redo branch. Truncate first, then append a fresh empty state slot.
+    beforeStates_.resize(static_cast<std::size_t>(index_));
+    afterStates_.resize(static_cast<std::size_t>(index_));
+    beforeStates_.emplace_back();
+    afterStates_.emplace_back();
     stepCount_ = index_;
     ++stepCount_;
     index_ = stepCount_;
     discardedOldest = discardOldest(std::max(0, stepCount_ - maximumSteps_));
-    beforeStates_.resize(static_cast<std::size_t>(stepCount_));
-    afterStates_.resize(static_cast<std::size_t>(stepCount_));
     return index_;
 }
 

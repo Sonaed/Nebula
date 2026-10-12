@@ -25,7 +25,6 @@ from PySide6.QtCore import Qt, QSettings, QTimer
 from CANVAS.canvas import Canvas
 
 from UI.ui import CreativeSystemUI
-from UI.dialogs.adjustment_layer_dialog import AdjustmentLayerDialog
 
 from DOCUMENTS.layer_manager import LayerManager
 
@@ -180,6 +179,7 @@ class CreativeSystem(QMainWindow):
         self.update_window_title()
 
         self.recovery_manager = RecoveryManager()
+        self.setAcceptDrops(True)
         self._psd_import_scheduler: PSDImportScheduler | None = None
         self._psd_import_future = None
         self._psd_proxy_tiles: set[tuple[int, int]] = set()
@@ -275,6 +275,7 @@ class CreativeSystem(QMainWindow):
         # HOME PAGE
         # -----------------------------------------------------
 
+        self.ui.home_preset_requested.connect(self.new_file)
         self.ui.home_new_requested.connect(
             self.new_file
         )
@@ -406,6 +407,7 @@ class CreativeSystem(QMainWindow):
         self.ui.actions["select_all"].triggered.connect(self.select_all)
         self.ui.actions["deselect"].triggered.connect(self.deselect)
         self.ui.actions["invert_selection"].triggered.connect(self.invert_selection)
+        self.ui.actions["quick_mask"].triggered.connect(self.toggle_quick_mask)
         self.ui.actions["feather_selection"].triggered.connect(lambda: self.edit_selection("feather"))
         self.ui.actions["expand_selection"].triggered.connect(lambda: self.edit_selection("expand"))
         self.ui.actions["contract_selection"].triggered.connect(lambda: self.edit_selection("contract"))
@@ -549,6 +551,7 @@ class CreativeSystem(QMainWindow):
         self.ui.layers_dock.disable_mask_requested.connect(self.toggle_active_layer_mask_disabled)
         self.ui.layers_dock.invert_mask_requested.connect(self.invert_active_layer_mask)
         self.ui.layers_dock.mask_selected.connect(self.edit_layer_mask_at)
+        self.ui.layers_dock.group_mask_selected.connect(self.edit_group_mask)
         self.ui.layers_dock.add_adjustment_requested.connect(self.add_adjustment_layer)
         self.ui.layers_dock.edit_adjustment_requested.connect(self.edit_adjustment_layer)
         self.ui.layers_dock.visibility_requested.connect(self.toggle_layer_visibility_at)
@@ -612,8 +615,18 @@ class CreativeSystem(QMainWindow):
         self.ui.actions["flip_canvas_horizontal"].triggered.connect(self.canvas.flip_canvas_view_horizontal)
         self.ui.actions["flip_canvas_vertical"].triggered.connect(self.canvas.flip_canvas_view_vertical)
         self.ui.actions["canvas_only"].triggered.connect(self.toggle_canvas_only)
+        self.ui.actions["wrap_around"].toggled.connect(
+            lambda on: (self.canvas.set_wrap_around(on), self.canvas.frame_wrap_tiles()))
         self.ui.actions["symmetry_horizontal"].triggered.connect(self.canvas.toggle_horizontal_symmetry)
         self.ui.actions["symmetry_vertical"].triggered.connect(self.canvas.toggle_vertical_symmetry)
+        for copies in (1, 2, 4, 6, 8, 12):
+            self.ui.actions[f"symmetry_radial_{copies}"].triggered.connect(
+                lambda _checked=False, value=copies: self.canvas.set_radial_symmetry(value))
+        self.canvas.radial_symmetry_changed.connect(self._sync_radial_symmetry_actions)
+        self._sync_radial_symmetry_actions(self.canvas.radial_symmetry_count)
+        self.ui.actions["place_radial_center"].toggled.connect(self.canvas.set_radial_center_placement_mode)
+        self.canvas.radial_center_placement_changed.connect(
+            lambda enabled: self._sync_checkable_action("place_radial_center", enabled))
         self.ui.actions["hand"].triggered.connect(self.canvas.tools.set_hand)
         self.ui.actions["zoom_view"].triggered.connect(self.canvas.tools.set_zoom_view)
         self.ui.actions["rotate_view"].triggered.connect(self.canvas.tools.set_rotate_view)
@@ -853,6 +866,81 @@ class CreativeSystem(QMainWindow):
         self._with_selection_history(self.canvas.document.selection.clear)
         self.canvas.update()
 
+    # ── Masque rapide ─────────────────────────────────────────────────────
+    # Photoshop's Quick Mask, done with a temporary layer so every brush,
+    # the bucket, the lasso fill and gradients can paint a selection.  What
+    # is painted (any opacity) becomes selected when the mode is left.
+    QUICK_MASK_COLOR = (230, 40, 60, 255)
+
+    def toggle_quick_mask(self, checked: bool | None = None) -> None:
+        if getattr(self, "_quick_mask_layer_id", None):
+            self._leave_quick_mask()
+        else:
+            self._enter_quick_mask()
+        action = self.ui.actions.get("quick_mask")
+        if action is not None:
+            action.setChecked(bool(getattr(self, "_quick_mask_layer_id", None)))
+
+    def _quick_mask_layer(self):
+        layer_id = getattr(self, "_quick_mask_layer_id", None)
+        document = getattr(self.canvas, "document", None)
+        if not layer_id or document is None:
+            return None
+        return next((layer for layer in document.layers if layer.id == layer_id), None)
+
+    def _enter_quick_mask(self) -> None:
+        document = getattr(self.canvas, "document", None)
+        if document is None or self.layer_manager is None:
+            return
+        selection = document.selection
+        layer = self._with_layer_history(lambda: self.layer_manager.add_layer("Masque rapide"),
+                                         structure_only=True)
+        if layer is None:
+            return
+        from PySide6.QtGui import QPainter
+        image = QImage(document.width, document.height, QImage.Format.Format_ARGB32_Premultiplied)
+        image.fill(Qt.GlobalColor.transparent)
+        if not selection.is_empty():
+            painter = QPainter(image)
+            painter.fillRect(image.rect(), QColor(*self.QUICK_MASK_COLOR))
+            painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_DestinationIn)
+            painter.drawImage(0, 0, selection.image)
+            painter.end()
+        layer.image = image.convertToFormat(QImage.Format.Format_ARGB32)
+        layer.opacity = 0.55
+        self._quick_mask_layer_id = layer.id
+        self._quick_mask_saved_color = list(self.canvas.brush_settings.get("color"))
+        self.canvas.set_brush_setting("color", list(self.QUICK_MASK_COLOR))
+        # The old selection would clip the painting of the new one.
+        self._with_selection_history(selection.clear)
+        self.refresh_layers()
+        self.canvas.sync_gpu_layer()
+        self.canvas.update()
+        self.statusBar().showMessage(
+            "Masque rapide : peignez la zone à sélectionner (gomme pour retirer) — Q pour valider", 0)
+
+    def _leave_quick_mask(self) -> None:
+        layer = self._quick_mask_layer()
+        self._quick_mask_layer_id = None
+        saved = getattr(self, "_quick_mask_saved_color", None)
+        if saved:
+            self.canvas.set_brush_setting("color", saved)
+        self.statusBar().clearMessage()
+        if layer is None:
+            return
+        document = self.canvas.document
+        mask = layer.image.convertToFormat(QImage.Format.Format_ARGB32)
+        self._with_selection_history(lambda: document.selection.select_alpha(mask))
+        index = document.layers.index(layer)
+
+        def prepare(history):
+            history.capture_layer_before(layer)
+        self._with_layer_history(lambda: self.layer_manager.remove_layer(index),
+                                 structure_only=True, prepare=prepare)
+        self.refresh_layers()
+        self.canvas.prune_gpu_layers()
+        self.canvas.update()
+
     def invert_selection(self) -> None:
         self._with_selection_history(self.canvas.document.selection.invert)
         self.canvas.update()
@@ -906,13 +994,14 @@ class CreativeSystem(QMainWindow):
     # =========================================================
 
     def new_file(
-        self
+        self, preset: str | None = None
     ) -> None:
 
         pixel_art = getattr(self, "pixel_art", None)
         dialog = DocumentDialog(
             self,
             pixel_art=bool(pixel_art is not None and pixel_art.enabled),
+            preset=preset if isinstance(preset, str) else None,
         )
 
         if not dialog.exec():
@@ -1271,6 +1360,21 @@ class CreativeSystem(QMainWindow):
         QMessageBox.information(
             self, "Export Photoshop", "Le fichier a été exporté. Limites connues :\n\n" + shown)
 
+    # Drag & drop onto the window: Photoshop brushes are imported, every
+    # other supported file is opened as a document.
+    def dragEnterEvent(self, event) -> None:
+        if event.mimeData().hasUrls() and any(url.isLocalFile() for url in event.mimeData().urls()):
+            event.acceptProposedAction()
+
+    def dropEvent(self, event) -> None:
+        paths = [url.toLocalFile() for url in event.mimeData().urls() if url.isLocalFile()]
+        for path in paths:
+            if path.lower().endswith(".abr"):
+                self.ui.brush_presets_dock.import_abr_file(path)
+            else:
+                self.open_file(path)
+        event.acceptProposedAction()
+
     def open_file(self, file_path: str | None = None) -> None:
 
         preferences = QSettings("CreativeSystem", "CreativeSystem")
@@ -1283,7 +1387,13 @@ class CreativeSystem(QMainWindow):
                 start_directory,
                 "Nebula document (*.nebula *.nbl);;"
                 "Legacy projects (*.csd *.atlas *.psd *.psb);;"
-                "Images (*.png *.jpg *.jpeg *.bmp)"
+                "Formats compatibles Nebula (*.nebula *.nbl *.psd *.psb *.png *.jpg *.jpeg *.bmp *.tif *.tiff *.svg *.pdf);;"
+                "Documents Nebula (*.nebula *.nbl);;"
+                "Photoshop (*.psd *.psb);;"
+                "Images raster (*.png *.jpg *.jpeg *.bmp *.tif *.tiff);;"
+                "Images vectorielles (*.svg);;"
+                "PDF (*.pdf);;"
+                "Tous les fichiers (*)"
             )
 
         if not file_path:
@@ -1401,7 +1511,39 @@ class CreativeSystem(QMainWindow):
 
     def close_document(
         self
-    ) -> None:
+    ) -> bool:
+        """Close the active document only after a requested save has completed.
+
+        ``save_file`` is synchronous for every current writer, so a true return
+        value means all bytes have been accepted before sparse tiles are released.
+        A PSD import owns background workers; closing while it runs is made an
+        explicit cancel-or-keep decision instead of disposing its target document.
+        """
+        scheduler = getattr(self, "_psd_import_scheduler", None)
+        if scheduler is not None:
+            choice = QMessageBox.question(
+                self, "Import Photoshop en cours",
+                "L’import Photoshop est encore en cours. Voulez-vous l’annuler puis fermer le document ?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+                QMessageBox.StandardButton.Cancel,
+            )
+            if choice != QMessageBox.StandardButton.Yes:
+                return False
+            scheduler.cancel()
+            scheduler.shutdown(wait=True)
+            self._psd_import_scheduler = None
+            self._psd_overview_future = None
+            self._psd_tile_future = None
+            progress = getattr(self, "_psd_import_progress", None)
+            if progress is not None:
+                progress.close()
+            self._psd_import_progress = None
+
+        history = self.canvas.tile_history
+        dirty = history._pending is not None or history.index != self._last_saved_history_index
+        if not dirty:
+            self._dispose_current_document()
+            return True
 
         result = QMessageBox.question(
             self,
@@ -1414,13 +1556,14 @@ class CreativeSystem(QMainWindow):
         )
 
         if result == QMessageBox.StandardButton.Cancel:
-            return
+            return False
 
         if result == QMessageBox.StandardButton.Save:
-            self.save_file()
-            return
+            if not self.save_file():
+                return False
 
         self._dispose_current_document()
+        return True
 
     def _dispose_current_document(self) -> None:
         """Release sparse/native pixels before returning from a discarded document.
@@ -1679,13 +1822,11 @@ class CreativeSystem(QMainWindow):
 
     def save_file(
         self
-    ) -> None:
+    ) -> bool:
 
         if self.current_file is None:
 
-            self.save_file_as()
-
-            return
+            return self.save_file_as()
 
         extension = (
             Path(self.current_file)
@@ -1702,8 +1843,7 @@ class CreativeSystem(QMainWindow):
 
         elif extension in (".csd", ".atlas"):
             # Legacy sources are read-only: Save must never overwrite their format.
-            self.save_file_as()
-            return
+            return self.save_file_as()
 
         elif extension in (".psd", ".psb"):
             from DOCUMENTS.format_psd import PSDFormat
@@ -1726,17 +1866,19 @@ class CreativeSystem(QMainWindow):
                 "Erreur",
                 "Impossible d'enregistrer le fichier."
             )
+            return False
         elif extension in (".psd", ".psb"):
             report_export = getattr(self, "_report_psd_export", None)
             if callable(report_export):
                 report_export(self.canvas.document)
-        elif extension in (".nebula", ".nbl"):
+        self._last_saved_history_index = self.canvas.tile_history.index
+        if extension in (".nebula", ".nbl"):
             self.recovery_manager.clear()
-            self._last_saved_history_index = self.canvas.tile_history.index
+        return True
 
     def save_file_as(
         self
-    ) -> None:
+    ) -> bool:
 
         preferences = QSettings("CreativeSystem", "CreativeSystem")
         start_directory = preferences.value("files/last_directory", "", str)
@@ -1765,7 +1907,7 @@ class CreativeSystem(QMainWindow):
         )
 
         if not file_path:
-            return
+            return False
 
         extension_by_filter = {
             native_filter: ".nebula", "Photoshop document (*.psd)": ".psd",
@@ -1798,7 +1940,7 @@ class CreativeSystem(QMainWindow):
                 "Les fichiers CSD/Atlas sont conservés en lecture seule. "
                 "Enregistre en .nebula ou .nbl.",
             )
-            return
+            return False
 
         elif extension in (".psd", ".psb"):
             success = PSDFormat.save(self.canvas.document, file_path)
@@ -1821,7 +1963,7 @@ class CreativeSystem(QMainWindow):
                 "Impossible d'enregistrer le fichier."
             )
 
-            return
+            return False
 
         if extension in (".psd", ".psb"):
             report_export = getattr(self, "_report_psd_export", None)
@@ -1830,13 +1972,13 @@ class CreativeSystem(QMainWindow):
 
         self.current_file = file_path
         self._remember_recent_document(file_path)
-        if extension in (".nebula", ".nbl"):
-            self._last_saved_history_index = self.canvas.tile_history.index
+        self._last_saved_history_index = self.canvas.tile_history.index
 
         if extension in (".nebula", ".nbl"):
             self.recovery_manager.clear()
 
         self.update_window_title()
+        return True
 
     @staticmethod
     def _remember_file_directory(file_path: str) -> None:
@@ -1938,6 +2080,7 @@ class CreativeSystem(QMainWindow):
         """Make the clicked mask thumbnail the active painting target."""
         if self.canvas.edit_layer_alpha_mask(index):
             layer = self.canvas.document.layers[index]
+            self.ui.layers_dock.set_mask_editing_group_id(None)
             self.ui.layers_dock.set_mask_editing_layer_id(layer.id)
             self.statusBar().showMessage(
                 "Masque actif — noir masque, blanc révèle.", 4000
@@ -2155,7 +2298,9 @@ class CreativeSystem(QMainWindow):
             self.canvas.cancel_history_action()
             return
         self.canvas.commit_history_action()
-        self.canvas._projection_tile_signatures.clear()
+        affected = [candidate for candidate in self.canvas.document.layers
+                    if candidate.id in group.layer_ids]
+        self.canvas.invalidate_projection_for_layers(affected)
         self.refresh_layers()
         self.canvas.update()
 
@@ -2168,12 +2313,54 @@ class CreativeSystem(QMainWindow):
             self.canvas.cancel_history_action()
             return
         self.canvas.commit_history_action()
+        affected = [candidate for candidate in self.canvas.document.layers
+                    if candidate.id in group.layer_ids]
+        self.canvas.invalidate_projection_for_layers(affected)
+        self.refresh_layers()
+        self.canvas.update()
+
+    # ── folder masks ────────────────────────────────────────────────────
+    def _mask_target_group(self):
+        """The folder the mask actions apply to, if any.
+
+        A selected folder row wins; otherwise the folder whose mask is being
+        painted.  Layer rows keep targeting the layer's own mask.
+        """
+        document = self.canvas.document
+        group_id = self.ui.layers_dock.get_selected_group_id()
+        if group_id is None:
+            group_id = self.canvas.editing_mask_group_id
+        return next((g for g in document.layer_groups if g.id == group_id), None)
+
+    def _after_group_mask_change(self) -> None:
         self.canvas._projection_tile_signatures.clear()
         self.refresh_layers()
         self.canvas.update()
 
+    def add_group_mask(self, group) -> None:
+        self.canvas.begin_history_action(structure_only=True, label="Masque de dossier")
+        if not self.layer_manager.add_group_mask(group.id):
+            self.canvas.cancel_history_action()
+            return
+        self.canvas.commit_history_action()
+        self.edit_group_mask(group.id)
+        self._after_group_mask_change()
+
+    def edit_group_mask(self, group_id: str) -> None:
+        """Make a folder mask the painting target."""
+        if self.canvas.edit_group_alpha_mask(group_id):
+            self.ui.layers_dock.set_mask_editing_group_id(group_id)
+            self.statusBar().showMessage(
+                "Masque du dossier actif — noir masque, blanc révèle.", 4000)
+            self.refresh_layers()
+
     def add_active_layer_mask(self) -> None:
         """Attach a sparse, fully opaque editable mask to the active layer."""
+        group = self._mask_target_group()
+        if group is not None and self.ui.layers_dock.get_selected_group_id() is not None:
+            if group.alpha_mask_store is None:
+                self.add_group_mask(group)
+            return
         index = self.canvas.document.active_layer_index
         if index < 0:
             return
@@ -2188,6 +2375,21 @@ class CreativeSystem(QMainWindow):
 
     def remove_active_layer_mask(self) -> None:
         """Remove the active layer mask as one structural undoable action."""
+        group = self._mask_target_group()
+        if group is not None:
+            if group.alpha_mask_store is None:
+                return
+            history = self.canvas.tile_history
+            self.canvas.begin_history_action(structure_only=True, label="Supprimer le masque de dossier")
+            history.capture_group_mask_before(group)
+            if not self.layer_manager.remove_group_mask(group.id):
+                self.canvas.cancel_history_action()
+                return
+            self.canvas.edit_layer_pixels()
+            self.ui.layers_dock.set_mask_editing_group_id(None)
+            self.canvas.commit_history_action()
+            self._after_group_mask_change()
+            return
         index = self.canvas.document.active_layer_index
         if index < 0:
             return
@@ -2206,6 +2408,11 @@ class CreativeSystem(QMainWindow):
 
     def apply_active_layer_mask(self) -> None:
         """Merge the mask into the layer pixels and remove it (destructive, undoable)."""
+        if self._mask_target_group() is not None:
+            # Same as Photoshop: a folder mask cannot be merged into pixels.
+            self.statusBar().showMessage(
+                "Un masque de dossier ne peut pas être appliqué — fusionnez d'abord le dossier.", 5000)
+            return
         index = self.canvas.document.active_layer_index
         if index < 0:
             return
@@ -2226,6 +2433,11 @@ class CreativeSystem(QMainWindow):
 
     def toggle_active_layer_mask_disabled(self) -> None:
         """Enable or disable the active layer mask without removing it."""
+        group = self._mask_target_group()
+        if group is not None:
+            if self.layer_manager.toggle_group_mask_disabled(group.id):
+                self._after_group_mask_change()
+            return
         index = self.canvas.document.active_layer_index
         if index < 0:
             return
@@ -2237,6 +2449,21 @@ class CreativeSystem(QMainWindow):
 
     def invert_active_layer_mask(self) -> None:
         """Invert all pixels in the active layer mask (destructive, undoable)."""
+        group = self._mask_target_group()
+        if group is not None:
+            if group.alpha_mask_store is None:
+                return
+            history = self.canvas.tile_history
+            self.canvas.begin_history_action(structure_only=True, label="Inverser le masque de dossier")
+            # Absent tiles become black too, so capture the whole tile grid.
+            history.capture_group_mask_before(group, whole_grid=True)
+            if not self.layer_manager.invert_group_mask(group.id):
+                self.canvas.cancel_history_action()
+                return
+            self.canvas.commit_history_action()
+            self.canvas.reload_alpha_mask_edit_buffer()
+            self._after_group_mask_change()
+            return
         index = self.canvas.document.active_layer_index
         if index < 0:
             return
@@ -2449,7 +2676,8 @@ class CreativeSystem(QMainWindow):
             lambda: self.layer_manager.toggle_visibility(index), changed=True,
             dirty_only=True,
         )
-
+        self.canvas.invalidate_projection_for_layers((self.canvas.document.layers[index],))
+        self.canvas.update()
         self.refresh_layers()
 
     def toggle_layer_visibility_at(self, index: int) -> None:
@@ -2475,6 +2703,9 @@ class CreativeSystem(QMainWindow):
                 lambda: self.layer_manager.toggle_visibility(index), changed=True,
                 dirty_only=True,
             )
+        affected = (document.layers[item] for item in (selected if index in selected and len(selected) > 1 else [index]))
+        self.canvas.invalidate_projection_for_layers(affected)
+        self.canvas.update()
         self.refresh_layers()
 
     # =========================================================
@@ -2694,6 +2925,10 @@ class CreativeSystem(QMainWindow):
     def _sync_symmetry_actions(self, horizontal: bool, vertical: bool) -> None:
         self._sync_checkable_action("symmetry_horizontal", horizontal)
         self._sync_checkable_action("symmetry_vertical", vertical)
+
+    def _sync_radial_symmetry_actions(self, copies: int) -> None:
+        for value in (1, 2, 4, 6, 8, 12):
+            self._sync_checkable_action(f"symmetry_radial_{value}", value == copies)
 
     # =========================================================
     # TITRE

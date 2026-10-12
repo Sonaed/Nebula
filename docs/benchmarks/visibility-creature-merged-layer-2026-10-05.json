@@ -1,0 +1,89 @@
+{
+  "source": "/run/media/deanos/Stockage/one_million_creature.psd",
+  "scope": "CPU offscreen; no GPU frame-rate claim",
+  "import_seconds": 10.0531,
+  "report": {
+    "layers": 43,
+    "groups": 3,
+    "adjustments": 0,
+    "clipped_layers": 2,
+    "masks": 0,
+    "warnings": []
+  },
+  "thumbnail_seconds": 0.0932,
+  "set_document_seconds": 0.0001,
+  "fit_seconds": 9.5417,
+  "fit_ready": true,
+  "visibility_layer": "Group 3 copy",
+  "visibility": [
+    {
+      "visible": false,
+      "dispatch_seconds": 0.2594,
+      "preview_available": true,
+      "preview_hash": "7fb0aeaa9eb5ea474174415b0cf5770c0a23ea025a89ccce6eb4f0ce85412f8d",
+      "first_projection_slice_seconds": 0.1954,
+      "profiled": false,
+      "exact_seconds": 9.0631,
+      "exact_ready": true,
+      "preview_retired": true
+    },
+    {
+      "visible": true,
+      "dispatch_seconds": 0.1124,
+      "preview_available": true,
+      "preview_hash": "b339803d750ca1af8dd402a26927de2530b9b0e558b8d89794d5f4750c7472d0",
+      "first_projection_slice_seconds": 0.2012,
+      "profiled": false,
+      "exact_seconds": 10.0099,
+      "exact_ready": true,
+      "preview_retired": true
+    }
+  ],
+  "visibility_feedback_changes": true,
+  "zoom_seconds": 0.0306,
+  "zoom_ready": true,
+  "pan_seconds": 0.0166,
+  "pan_ready": true,
+  "idle_seconds": 0.0001,
+  "performance": {
+    "input_to_paint": {
+      "samples": 0,
+      "average_ms": 0.0,
+      "p95_ms": 0.0,
+      "max_ms": 0.0
+    },
+    "native_brush_segment": {
+      "samples": 0,
+      "average_ms": 0.0,
+      "p95_ms": 0.0,
+      "max_ms": 0.0
+    },
+    "projection_cache": {
+      "visible_hits": 516,
+      "visible_misses": 28825,
+      "prefetch_hits": 141,
+      "prefetch_misses": 51,
+      "visibility_invalidated_tiles": 19210,
+      "visibility_deferred_tiles": 0
+    },
+    "tile_cache": {
+      "visible": 266,
+      "recent": 4096,
+      "prefetch": 96,
+      "cold": 0,
+      "requests": 28876,
+      "ready": 28876,
+      "retained_frames": 61,
+      "pan": [
+        -300.0,
+        -180.0
+      ],
+      "zoom": 1.0
+    },
+    "budget_ms": {
+      "target": 8.0,
+      "warning": 16.0,
+      "unacceptable": 40.0
+    }
+  }
+}

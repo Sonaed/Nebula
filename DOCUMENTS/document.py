@@ -62,6 +62,9 @@ class Document:
         self.reference_images: list[ReferenceImage] = []
         self.text_objects: list[EditableText] = []
         self.blend_presets: dict[str, dict] = {}
+        # Versioned resources are authored by Existence/StarDust scripts and
+        # travel with the Nebula document as data, never executable plugins.
+        self.resource_manifest: dict[str, dict] = {}
 
         self.add_layer(
             "Arrière-plan"
@@ -162,13 +165,17 @@ class Document:
         if selected is False:
             return None
         group_name = str(name).strip() or "Groupe"
-        if self._native_state.create_group(selected, group_name) is None:
+        native_index = self._native_state.create_group(selected, group_name)
+        if native_index is None:
             raise RuntimeError("CreativeCore a refusé la création du groupe")
         members = [self.layers[index].id for index in selected]
         # CreativeCore accepts an exact root-group selection as a wrapping
         # operation.  Keep the Qt mirror hierarchical as well.
         child = wrapping
         group = LayerGroup(name=group_name, layer_ids=members)
+        if not hasattr(self, '_native_group_indices'):
+            self._native_group_indices = {}
+        self._native_group_indices[group.id] = native_index
         self.layer_groups.append(group)
         if child is not None:
             child.parent_id = group.id
@@ -178,14 +185,13 @@ class Document:
     def ungroup_layers(self, group_id: str) -> bool:
         for index, group in enumerate(self.layer_groups):
             if group.id == group_id:
-                if not self._native_state.remove_group(index):
-                    raise RuntimeError("CreativeCore a refusé la suppression du groupe")
                 group.invalidate()
                 del self.layer_groups[index]
                 for child in self.layer_groups:
                     if child.parent_id == group_id:
-                        child.parent_id = None
+                        child.parent_id = group.parent_id
                         child.invalidate()
+                self.sync_native_state()
                 return True
         return False
 
@@ -272,7 +278,13 @@ class Document:
             if not self.layer_groups[index].layer_ids:
                 removed = self.layer_groups[index]
                 try:
-                    self._native_state.remove_group(index)
+                    indices = getattr(self, '_native_group_indices', {})
+                    native_index = indices.get(removed.id, index)
+                    if self._native_state.remove_group(native_index):
+                        indices.pop(removed.id, None)
+                        for group_id, value in list(indices.items()):
+                            if value > native_index:
+                                indices[group_id] = value - 1
                 except Exception:
                     pass
                 for child in self.layer_groups:
@@ -317,7 +329,13 @@ class Document:
                 removed = self.layer_groups[index]
                 # Le miroir natif des groupes n'est qu'indicatif : un refus n'est pas fatal.
                 try:
-                    self._native_state.remove_group(index)
+                    indices = getattr(self, '_native_group_indices', {})
+                    native_index = indices.get(removed.id, index)
+                    if self._native_state.remove_group(native_index):
+                        indices.pop(removed.id, None)
+                        for group_id, value in list(indices.items()):
+                            if value > native_index:
+                                indices[group_id] = value - 1
                 except Exception:
                     pass
                 for child in self.layer_groups:
@@ -331,7 +349,7 @@ class Document:
         for index, group in enumerate(self.layer_groups):
             if group.id == group_id:
                 result = self._native_state.set_group_property(
-                    index, 0, float(bool(visible)))
+                    getattr(self, '_native_group_indices', {}).get(group.id, index), 0, float(bool(visible)))
                 if result is None:
                     raise RuntimeError("CreativeCore a refusé la visibilité du groupe")
                 group.visible = bool(result)
@@ -342,7 +360,8 @@ class Document:
     def set_group_opacity(self, group_id: str, opacity: float) -> bool:
         for index, group in enumerate(self.layer_groups):
             if group.id == group_id:
-                result = self._native_state.set_group_property(index, 1, float(opacity))
+                result = self._native_state.set_group_property(
+                    getattr(self, '_native_group_indices', {}).get(group.id, index), 1, float(opacity))
                 if result is None:
                     raise RuntimeError("CreativeCore a refusé l’opacité du groupe")
                 group.opacity = float(result)
@@ -352,9 +371,6 @@ class Document:
 
     def group_for_layer(self, layer_id: str) -> LayerGroup | None:
         return next((group for group in self.layer_groups if layer_id in group.layer_ids), None)
-
-    def has_layer_groups(self) -> bool:
-        return bool(self.layer_groups)
 
     def get_active_layer(
         self
@@ -411,12 +427,24 @@ class Document:
                     min(self.active_layer_index, len(self.layers) - 1)):
                 raise RuntimeError("CreativeCore a refusé la restauration du calque actif")
         self._native_state.reset_groups()
-        for group in self.layer_groups:
+        self._native_group_indices = {}
+        by_id = {group.id: group for group in self.layer_groups}
+        def depth(group):
+            level, seen = 0, set()
+            while group.parent_id in by_id:
+                if group.parent_id in seen:
+                    raise ValueError('Cyclic layer folders')
+                seen.add(group.parent_id)
+                group = by_id[group.parent_id]
+                level += 1
+            return level
+        for group in sorted(self.layer_groups, key=depth, reverse=True):
             indices = [index for index, layer in enumerate(self.layers)
                        if layer.id in group.layer_ids]
             native_index = self._native_state.create_group(indices, group.name)
             if native_index is None:
                 raise RuntimeError("CreativeCore a refusé la restauration des groupes")
+            self._native_group_indices[group.id] = native_index
             if not group.visible:
                 if self._native_state.set_group_property(native_index, 0, 0.0) is None:
                     raise RuntimeError("CreativeCore a refusé la visibilité du groupe")

@@ -12,13 +12,7 @@ from DOCUMENTS.blend_presets import BLEND_PARAMS
 
 PREVIEW_SIZE = 256
 
-_MODE_ID = {
-    "normal": 0, "darken": 1, "multiply": 2, "color_burn": 3,
-    "lighten": 4, "screen": 5, "color_dodge": 6, "overlay": 7,
-    "soft_light": 8, "hard_light": 9, "difference": 10,
-    "exclusion": 11, "hue": 12, "saturation": 13,
-    "color": 14, "luminosity": 15,
-}
+from DOCUMENTS.blend_mode_catalog import BLEND_MODE_IDS as _MODE_ID
 
 _VERTEX_SHADER = """#version 330 core
 in vec2 position;
@@ -86,6 +80,29 @@ vec3 blend(vec3 b, vec3 s) {
     }
     if (MODE_ID==10) return abs(b-s-offset_value);
     if (MODE_ID==11) return b+s-2.0*b*s;
+    if (MODE_ID==16) return min(vec3(1.0),b+s);
+    if (MODE_ID==17) return max(vec3(0.0),b+s-1.0);
+    if (MODE_ID==18) {
+        vec3 result;
+        for (int i=0;i<3;++i) {
+            if (s[i]<0.5)
+                result[i]=b[i]>=1.0 ? 1.0 : (s[i]<=0.0 ? 0.0 : max(0.0,1.0-(1.0-b[i])/(2.0*s[i])));
+            else
+                result[i]=b[i]<=0.0 ? 0.0 : (s[i]>=1.0 ? 1.0 : min(1.0,b[i]/(2.0*(1.0-s[i]))));
+        }
+        return result;
+    }
+    if (MODE_ID==19) return clamp(b+2.0*s-1.0,0.0,1.0);
+    if (MODE_ID==20) return mix(min(b,2.0*s),max(b,2.0*s-1.0),step(vec3(0.5),s));
+    if (MODE_ID==21) return step(vec3(1.0),b+s);
+    if (MODE_ID==22) return dot(s,vec3(1.0))<dot(b,vec3(1.0)) ? s : b;
+    if (MODE_ID==23) return dot(s,vec3(1.0))>dot(b,vec3(1.0)) ? s : b;
+    if (MODE_ID==24) return max(vec3(0.0),b-s);
+    if (MODE_ID==25) {
+        vec3 result;
+        for (int i=0;i<3;++i) result[i]=s[i]<=0.0 ? 1.0 : min(1.0,b[i]/s[i]);
+        return result;
+    }
     vec3 hb=rgb2hsl(b), hs=rgb2hsl(s);
     hs.x=fract(hs.x+hue_shift/360.0);
     hs.y=clamp(hs.y*saturation_boost,0.0,1.0);
@@ -98,6 +115,20 @@ vec3 blend(vec3 b, vec3 s) {
 void main() {
     vec4 b=texture(backdropTex,uv), s=texture(sourceTex,uv);
     float a=clamp(s.a*opacity,0.0,1.0);
+    // Added modes have no opposite partner; use the native compositor's
+    // normalized main/normal weights and straight-alpha source-over formula.
+    if (MODE_ID>=16) {
+        float mainWeight=clamp(intensity,0.0,1.0)*(1.0-clamp(opposite_mix,0.0,1.0))*(1.0-clamp(mix_normal,0.0,1.0));
+        float normalWeight=1.0-clamp(intensity,0.0,1.0)*(1.0-clamp(mix_normal,0.0,1.0));
+        float total=mainWeight+normalWeight;
+        if (total<=0.0) {fragColor=b;return;}
+        vec3 effect=(blend(b.rgb,s.rgb)*mainWeight+s.rgb*normalWeight)/total;
+        float outAlpha=a+b.a*(1.0-a);
+        vec3 premul=s.rgb*a*(1.0-b.a)+effect*a*b.a+b.rgb*b.a*(1.0-a);
+        fragColor=vec4(outAlpha>0.00000001 ? premul/outAlpha : vec3(0.0),outAlpha);
+        return;
+    }
+
     vec3 effect=mix(s.rgb,blend(b.rgb,s.rgb),clamp(intensity,0.0,1.0));
     // Opposite blend is represented by a complementary preview mix where defined.
     vec3 opposite=1.0-blend(1.0-b.rgb,1.0-s.rgb);
@@ -177,10 +208,12 @@ class BlendPreviewWidget(QOpenGLWidget):
         self._schedule_preview()
 
     def _uniform_for_key(self, key: str) -> str | None:
-        return next(
-            (item["uniform"] for item in BLEND_PARAMS.get(self.mode, ()) if item["key"] == key),
-            None,
-        )
+        # Defaults must be uploaded even for controls this mode does not expose:
+        # freshly linked GLSL uniforms start at zero, not at the native defaults.
+        if key not in _PARAMETER_DEFAULTS:
+            return None
+        return {"gamma": "gamma_value", "clamp": "clamp_value",
+                "offset": "offset_value"}.get(key, key)
 
     def _schedule_preview(self) -> None:
         # Coalesce rapid input to at most one frame per interval. Restarting

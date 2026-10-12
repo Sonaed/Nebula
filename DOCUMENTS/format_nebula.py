@@ -70,6 +70,40 @@ def _image_tile(image: QImage, rect: QRect) -> bytes:
     return bytes(tile.constBits())
 
 
+def _repair_lost_group_nesting(groups) -> int:
+    """Restore folder nesting that an older version dropped when saving.
+
+    An undo bug rebuilt folders without their parent, so files saved after it
+    list sub-folders as overlapping top-level folders and could not be opened.
+    The nesting is implied by membership: a top-level folder whose layers all
+    belong to another folder goes inside the smallest such folder.  Returns
+    how many folders were re-nested.
+    """
+    repaired = 0
+    members = {group.id: set(group.layer_ids) for group in groups}
+    for position, group in enumerate(groups):
+        if group.parent_id is not None:
+            continue
+        mine = members[group.id]
+        overlapping = [other for other in groups if other is not group
+                       and other.parent_id is None and mine & members[other.id]]
+        if not overlapping:
+            continue
+        # Smallest container; for identical membership the later folder is
+        # the outer one (sub-folders are written before their parents).
+        containers = [other for other in groups if other is not group and mine <= members[other.id]
+                      and (len(members[other.id]) > len(mine) or groups.index(other) > position)]
+        if not containers:
+            continue
+        parent = min(containers, key=lambda other: (len(members[other.id]), groups.index(other)))
+        group.parent_id = parent.id
+        repaired += 1
+    if repaired:
+        logging.getLogger(__name__).warning(
+            "Nebula : imbrication de %d dossier(s) restaurée à l'ouverture", repaired)
+    return repaired
+
+
 class NebulaFormat:
     """Read/write the native `.nebula` / `.nbl` versioned binary format."""
 
@@ -290,12 +324,15 @@ class NebulaFormat:
                 "locked": layer.locked, "lock_alpha": layer.lock_alpha,
                 "clipping": layer.clipping, "tiles": tile_ids,
                 "mask_tiles": mask_tile_ids,
+                "mask_linked": bool(getattr(layer, "mask_linked", True)),
+                "vector_mask": _json_value(getattr(layer, "vector_mask", [])),
                 "layer_kind": str(getattr(layer, "layer_kind", "raster")),
                 "adjustment": _json_value(getattr(layer, "adjustment", None)),
                 "layer_effects": _json_value(getattr(layer, "layer_effects", [])),
                 "psd_effects": _json_value(getattr(layer, "psd_effects", [])),
                 "retouch_operations": _json_value(getattr(layer, "retouch_operations", [])),
                 "transform_state": _json_value(getattr(layer, "transform_state", None)),
+                "transform_operations": _json_value(getattr(layer, "transform_operations", [])),
             })
 
         selection = None
@@ -411,6 +448,7 @@ class NebulaFormat:
             "layers": layers,
             "layer_groups": groups,
             "blend_presets": _json_value(document.blend_presets),
+            "resource_manifest": _json_value(getattr(document, "resource_manifest", {})),
             "selection_tiles": selection,
             "saved_selections": saved_selections,
             "references": references,
@@ -506,6 +544,11 @@ class NebulaFormat:
             operations = entry.get("retouch_operations", [])
             if not isinstance(operations, list) or len(operations) > 100000:
                 raise ValueError("Journal de retouche Nebula invalide")
+            transforms = entry.get("transform_operations", [])
+            if not isinstance(transforms, list) or len(transforms) > 100000:
+                raise ValueError("Journal de transformations Nebula invalide")
+            if not isinstance(entry.get("vector_mask", []), list):
+                raise ValueError("Masque vectoriel Nebula invalide")
         if not isinstance(chunks, list) or len(chunks) != chunk_count or chunk_count > MAX_CHUNKS:
             raise ValueError("Table de tuiles Nebula invalide")
         references = metadata.get("references", [])
@@ -556,6 +599,12 @@ class NebulaFormat:
             raise ValueError("Couleur de fond Nebula invalide")
         if not isinstance(metadata.get("blend_presets", {}), dict):
             raise ValueError("Presets de fusion Nebula invalides")
+        resources = metadata.get("resource_manifest", {})
+        if (not isinstance(resources, dict) or len(resources) > 1024
+                or any(not isinstance(name, str) or not name.strip() or len(name) > 128
+                       or not isinstance(value, dict) or not isinstance(value.get("version"), str)
+                       for name, value in resources.items())):
+            raise ValueError("Manifeste de ressources Nebula invalide")
         saved_selections = metadata.get("saved_selections", [])
         if (not isinstance(saved_selections, list) or len(saved_selections) > 256
                 or any(not isinstance(item, dict)
@@ -626,6 +675,9 @@ class NebulaFormat:
                 layer.psd_effects = list(entry.get("psd_effects", []))
                 layer.retouch_operations = list(entry.get("retouch_operations", []))
                 layer.transform_state = entry.get("transform_state")
+                layer.transform_operations = list(entry.get("transform_operations", []))
+                layer.mask_linked = bool(entry.get("mask_linked", True))
+                layer.vector_mask = list(entry.get("vector_mask", []))
             document.active_layer_index = max(0, min(
                 int(metadata.get("active_layer", 0)), len(document.layers) - 1))
             document.blend_presets = metadata.get("blend_presets", {})
@@ -729,6 +781,7 @@ class NebulaFormat:
                 entry["name"]: image.convertToFormat(QImage.Format.Format_ARGB32)
                 for entry, image in zip(metadata.get("saved_selections", []), saved_selection_images)
             }
+            document.resource_manifest = dict(metadata.get("resource_manifest", {}))
             for item in metadata.get("texts", []):
                 color = item.get("color", [0, 0, 0, 255])
                 font = QFont()
@@ -742,6 +795,7 @@ class NebulaFormat:
             groups_by_id = {group.id: group for group in document.layer_groups}
             if len(groups_by_id) != len(document.layer_groups):
                 raise ValueError("Identifiants de groupes Nebula dupliqués")
+            _repair_lost_group_nesting(document.layer_groups)
             for group in document.layer_groups:
                 if group.parent_id is not None:
                     parent = groups_by_id.get(group.parent_id)

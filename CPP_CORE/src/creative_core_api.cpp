@@ -25,6 +25,8 @@
 #include <QJsonValue>
 #include <QSet>
 #include <QLinearGradient>
+#include <QRadialGradient>
+#include <QConicalGradient>
 #include <QPainter>
 #include <QPainterPath>
 #include <QFont>
@@ -724,6 +726,30 @@ int cs_tile_store_set_many(CreativeTileStoreHandle handle,
     return 1;
 }
 
+int cs_tile_store_thumbnail(CreativeTileStoreHandle handle, uint8_t* output,
+                            int width, int height, int stride)
+{
+    if (!handle || !output || width <= 0 || height <= 0 ||
+        static_cast<int64_t>(stride) < static_cast<int64_t>(width) * 4) return 0;
+    try {
+        QImage target(output, width, height, stride, QImage::Format_ARGB32_Premultiplied);
+        return static_cast<NativeTileStore*>(handle)->thumbnail(target) ? 1 : 0;
+    } catch (...) { return 0; }
+}
+
+int cs_tile_store_import_rgba(CreativeTileStoreHandle handle, const uint8_t* pixels,
+                              int width, int height, int stride, int x, int y)
+{
+    if (!handle || !pixels || width <= 0 || height <= 0 ||
+        static_cast<int64_t>(stride) < static_cast<int64_t>(width) * 4) return 0;
+    try {
+        const QImage source(pixels, width, height, stride, QImage::Format_RGBA8888);
+        return static_cast<NativeTileStore*>(handle)->importRgba(source, x, y) ? 1 : 0;
+    } catch (...) {
+        return 0;
+    }
+}
+
 int cs_tile_store_write_image(CreativeTileStoreHandle handle, const uint8_t* pixels,
                               int width, int height, int stride, int imageFormat,
                               int x, int y, int dirtyWidth, int dirtyHeight,
@@ -760,6 +786,16 @@ int cs_tile_store_copy_store(CreativeTileStoreHandle destination,
     }
 }
 
+int cs_tile_store_composite_from(CreativeTileStoreHandle destination,
+                                 CreativeTileStoreHandle source, float opacity, int mode)
+{
+    if (!destination || !source) return 0;
+    try {
+        return static_cast<NativeTileStore*>(destination)->compositeFrom(
+            *static_cast<NativeTileStore*>(source), opacity, mode) ? 1 : 0;
+    } catch (...) { return 0; }
+}
+
 int cs_tile_store_materialize(CreativeTileStoreHandle handle, uint8_t* output,
                               int width, int height, int stride, int imageFormat)
 {
@@ -790,6 +826,13 @@ int cs_tile_store_copy_key_revisions(CreativeTileStoreHandle handle, int* xyPair
     static_assert(sizeof(unsigned long long) == sizeof(uint64_t), "revision width");
     return static_cast<NativeTileStore*>(handle)->copyKeyRevisions(
         xyPairs, reinterpret_cast<unsigned long long*>(revisions), pairCapacity);
+}
+
+int cs_tile_store_copy_opaque_keys(CreativeTileStoreHandle handle, int* xyPairs,
+                                   int pairCapacity)
+{
+    return handle ? static_cast<NativeTileStore*>(handle)->copyOpaqueKeys(
+        xyPairs, pairCapacity) : -1;
 }
 
 int cs_tile_store_remove(CreativeTileStoreHandle handle, int tileX, int tileY)
@@ -996,6 +1039,130 @@ int cs_apply_linear_gradient(uint8_t* pixels, int width, int height, int stride,
     painter.setCompositionMode(QPainter::CompositionMode_SourceOver);
     painter.fillRect(image.rect(), gradient);
     painter.end();
+    return 1;
+}
+
+int cs_apply_gradient(uint8_t* pixels, int width, int height, int stride,
+                       int imageFormat, double startX, double startY,
+                       double endX, double endY, int geometry, int spread,
+                       int reverse, double opacity,
+                       int startRed, int startGreen, int startBlue, int startAlpha,
+                       int endRed, int endGreen, int endBlue, int endAlpha,
+                       const uint8_t* selection, int selectionWidth,
+                       int selectionHeight, int selectionStride, int selectionFormat)
+{
+    const auto supportedFormat = [](int format) {
+        return format == QImage::Format_ARGB32 || format == QImage::Format_RGBA8888;
+    };
+    if (!pixels || width <= 0 || height <= 0 || int64_t(stride) < int64_t(width) * 4 ||
+        !supportedFormat(imageFormat) || geometry < 0 || geometry > 2 ||
+        spread < 0 || spread > 2 || !std::isfinite(startX) || !std::isfinite(startY) ||
+        !std::isfinite(endX) || !std::isfinite(endY) || !std::isfinite(opacity) ||
+        opacity < 0.0 || opacity > 1.0 ||
+        (selection && (selectionWidth != width || selectionHeight != height ||
+                       int64_t(selectionStride) < int64_t(width) * 4 ||
+                       !supportedFormat(selectionFormat)))) return 0;
+    if (opacity == 0.0) return 1;
+
+    const QPointF start(startX, startY);
+    QPointF end(endX, endY);
+    if (start == end) end.setX(end.x() + 1.0);
+    const double dx = end.x() - start.x(), dy = end.y() - start.y();
+    const double radius = std::hypot(dx, dy);
+    if (!std::isfinite(radius) || radius <= 0.0) return 0;
+    std::unique_ptr<QGradient> gradient;
+    if (geometry == 1) {
+        gradient = std::make_unique<QRadialGradient>(start, radius);
+    } else if (geometry == 2) {
+        constexpr double radiansToDegrees = 57.2957795130823208768;
+        gradient = std::make_unique<QConicalGradient>(
+            start, -std::atan2(dy, dx) * radiansToDegrees);
+    } else {
+        gradient = std::make_unique<QLinearGradient>(start, end);
+    }
+    const auto color = [](int r, int g, int b, int a) {
+        return QColor(std::clamp(r, 0, 255), std::clamp(g, 0, 255),
+                      std::clamp(b, 0, 255), std::clamp(a, 0, 255));
+    };
+    const QColor first = color(startRed, startGreen, startBlue, startAlpha);
+    const QColor last = color(endRed, endGreen, endBlue, endAlpha);
+    gradient->setColorAt(0.0, reverse ? last : first);
+    gradient->setColorAt(1.0, reverse ? first : last);
+    gradient->setSpread(spread == 1 ? QGradient::RepeatSpread :
+                        spread == 2 ? QGradient::ReflectSpread : QGradient::PadSpread);
+    QImage image(pixels, width, height, stride, static_cast<QImage::Format>(imageFormat));
+    if (image.isNull()) return 0;
+
+    if (!selection) {
+        QPainter painter(&image);
+        painter.setOpacity(opacity);
+        painter.fillRect(image.rect(), *gradient);
+        return 1;
+    }
+
+    const QImage mask(selection, selectionWidth, selectionHeight, selectionStride,
+                      static_cast<QImage::Format>(selectionFormat));
+    if (mask.isNull()) return 0;
+    // Discover the selected rectangle natively. Outside pixels are never
+    // read back or rewritten, including fully transparent hidden RGB values.
+    int left = width, top = height, right = -1, bottom = -1;
+    for (int y = 0; y < height; ++y) {
+        for (int x = 0; x < width; ++x) {
+            if (!qAlpha(mask.pixel(x, y))) continue;
+            left = std::min(left, x); right = std::max(right, x);
+            top = std::min(top, y); bottom = std::max(bottom, y);
+        }
+    }
+    if (right < left || bottom < top) return 1;
+    constexpr int tileSize = 128;
+    QImage tile(std::min(tileSize, right - left + 1),
+                std::min(tileSize, bottom - top + 1), QImage::Format_ARGB32_Premultiplied);
+    if (tile.isNull()) return 0;
+    QPainter target(&image);
+    target.setOpacity(opacity);
+    for (int y = top; y <= bottom; y += tileSize) {
+        for (int x = left; x <= right; x += tileSize) {
+            const int tileWidth = std::min(tileSize, right - x + 1);
+            const int tileHeight = std::min(tileSize, bottom - y + 1);
+            tile.fill(Qt::transparent);
+            {
+                QPainter renderer(&tile);
+                renderer.translate(-x, -y);
+                renderer.fillRect(QRect(x, y, tileWidth, tileHeight), *gradient);
+            }
+            bool allSelected = true;
+            for (int ty = 0; ty < tileHeight; ++ty) {
+                auto* row = reinterpret_cast<QRgb*>(tile.scanLine(ty));
+                for (int tx = 0; tx < tileWidth; ++tx) {
+                    const int coverage = qAlpha(mask.pixel(x + tx, y + ty));
+                    allSelected = allSelected && coverage != 0;
+                    const QRgb pixel = row[tx];
+                    row[tx] = qRgba((qRed(pixel) * coverage + 127) / 255,
+                                   (qGreen(pixel) * coverage + 127) / 255,
+                                   (qBlue(pixel) * coverage + 127) / 255,
+                                   (qAlpha(pixel) * coverage + 127) / 255);
+                }
+            }
+            if (allSelected) {
+                target.drawImage(QPoint(x, y), tile, QRect(0, 0, tileWidth, tileHeight));
+            } else {
+                // Qt may normalize hidden RGB even under transparent source
+                // pixels. Restrict writes to selected spans to retain every
+                // unselected destination byte, including holes in the mask.
+                for (int ty = 0; ty < tileHeight; ++ty) {
+                    int tx = 0;
+                    while (tx < tileWidth) {
+                        while (tx < tileWidth && !qAlpha(mask.pixel(x + tx, y + ty))) ++tx;
+                        const int begin = tx;
+                        while (tx < tileWidth && qAlpha(mask.pixel(x + tx, y + ty))) ++tx;
+                        if (tx > begin)
+                            target.drawImage(QPoint(x + begin, y + ty), tile,
+                                             QRect(begin, ty, tx - begin, 1));
+                    }
+                }
+            }
+        }
+    }
     return 1;
 }
 
@@ -1233,7 +1400,7 @@ int cs_composite_layers_advanced(uint8_t* target, int width, int height,
     for (int i = 0; i < layerCount; ++i) {
         const auto& layer = layers[i];
         if (!layer.visible) continue;
-        if (!layer.pixels || layer.stride < width * 4 || layer.mode < 0 || layer.mode > 15 ||
+        if (!layer.pixels || layer.stride < width * 4 || layer.mode < 0 || layer.mode > 25 ||
             !std::isfinite(layer.opacity)) return 0;
         for (float value : layer.parameters)
             if (!std::isfinite(value)) return 0;
@@ -1833,7 +2000,8 @@ void setVelocitySetting(CreativeBrushHandle handle, float value, int channel)
     BrushSettings settings = engine->settings();
     if (channel == 0) settings.velocitySize = value;
     else if (channel == 1) settings.velocityOpacity = value;
-    else settings.velocityFlow = value;
+    else if (channel == 2) settings.velocityFlow = value;
+    else settings.velocitySpacing = value;
     engine->setSettings(settings);
 }
 }
@@ -1852,6 +2020,32 @@ void setOrientationSetting(CreativeBrushHandle handle, float value, int channel)
 }
 }
 
+namespace
+{
+void setTiltDynamicsSetting(CreativeBrushHandle handle, float value, int channel)
+{
+    BrushEngine* engine = getEngine(handle);
+    if (!engine) return;
+    BrushSettings settings = engine->settings();
+    if (channel == 0) settings.tiltSize = value;
+    else settings.tiltOpacity = value;
+    engine->setSettings(settings);
+}
+}
+
+namespace
+{
+void setRandomDynamicsSetting(CreativeBrushHandle handle, float value, int channel)
+{
+    BrushEngine* engine = getEngine(handle);
+    if (!engine) return;
+    BrushSettings settings = engine->settings();
+    if (channel == 0) settings.randomSize = value;
+    else settings.randomOpacity = value;
+    engine->setSettings(settings);
+}
+}
+
 void cs_brush_set_direction_follow(CreativeBrushHandle handle, float value)
 { setOrientationSetting(handle, value, 0); }
 
@@ -1861,6 +2055,18 @@ void cs_brush_set_tilt_follow(CreativeBrushHandle handle, float value)
 void cs_brush_set_tilt_elongation(CreativeBrushHandle handle, float value)
 { setOrientationSetting(handle, value, 2); }
 
+void cs_brush_set_tilt_size(CreativeBrushHandle handle, float value)
+{ setTiltDynamicsSetting(handle, value, 0); }
+
+void cs_brush_set_tilt_opacity(CreativeBrushHandle handle, float value)
+{ setTiltDynamicsSetting(handle, value, 1); }
+
+void cs_brush_set_random_size(CreativeBrushHandle handle, float value)
+{ setRandomDynamicsSetting(handle, value, 0); }
+
+void cs_brush_set_random_opacity(CreativeBrushHandle handle, float value)
+{ setRandomDynamicsSetting(handle, value, 1); }
+
 void cs_brush_set_velocity_size(CreativeBrushHandle handle, float value)
 { setVelocitySetting(handle, value, 0); }
 
@@ -1869,6 +2075,9 @@ void cs_brush_set_velocity_opacity(CreativeBrushHandle handle, float value)
 
 void cs_brush_set_velocity_flow(CreativeBrushHandle handle, float value)
 { setVelocitySetting(handle, value, 2); }
+
+void cs_brush_set_velocity_spacing(CreativeBrushHandle handle, float value)
+{ setVelocitySetting(handle, value, 3); }
 
 void
 cs_brush_set_texture_strength(
@@ -2054,6 +2263,16 @@ cs_brush_set_texture_affect_opacity(
     );
 }
 
+void cs_brush_set_texture_canvas_space(CreativeBrushHandle handle, int enabled)
+{
+    BrushEngine* engine = getEngine(handle);
+    if (!engine)
+        return;
+    BrushSettings settings = engine->settings();
+    settings.textureCanvasSpace = enabled != 0;
+    engine->setSettings(settings);
+}
+
 int cs_brush_set_texture_path(CreativeBrushHandle handle, const char* path)
 {
     BrushEngine* engine = getEngine(handle);
@@ -2113,6 +2332,54 @@ int cs_brush_set_bitmap_tip_png(CreativeBrushHandle handle,
 void cs_brush_clear_bitmap_tip(CreativeBrushHandle handle)
 {
     if (BrushEngine* engine = getEngine(handle)) engine->clearBitmapTip();
+}
+
+namespace {
+template <typename Apply>
+void updateDualSetting(CreativeBrushHandle handle, Apply apply)
+{
+    BrushEngine* engine = getEngine(handle);
+    if (!engine)
+        return;
+    BrushSettings settings = engine->settings();
+    apply(settings);
+    engine->setSettings(settings);
+}
+}
+
+void cs_brush_set_dual_brush(CreativeBrushHandle handle, int enabled)
+{ updateDualSetting(handle, [&](BrushSettings& s) { s.dualBrush = enabled != 0; }); }
+void cs_brush_set_dual_size_ratio(CreativeBrushHandle handle, float ratio)
+{ updateDualSetting(handle, [&](BrushSettings& s) { s.dualSizeRatio = std::clamp(ratio, 0.05f, 10.0f); }); }
+void cs_brush_set_dual_spacing(CreativeBrushHandle handle, float spacing)
+{ updateDualSetting(handle, [&](BrushSettings& s) { s.dualSpacing = std::clamp(spacing, 0.01f, 10.0f); }); }
+void cs_brush_set_dual_scatter(CreativeBrushHandle handle, float scatter)
+{ updateDualSetting(handle, [&](BrushSettings& s) { s.dualScatter = std::clamp(scatter, 0.0f, 10.0f); }); }
+void cs_brush_set_dual_count(CreativeBrushHandle handle, float count)
+{ updateDualSetting(handle, [&](BrushSettings& s) { s.dualCount = std::clamp(static_cast<int>(std::lround(count)), 1, 16); }); }
+void cs_brush_set_wrap_around(CreativeBrushHandle handle, int enabled)
+{ updateDualSetting(handle, [&](BrushSettings& s) { s.wrapAround = enabled != 0; }); }
+void cs_brush_set_dual_mode(CreativeBrushHandle handle, float mode)
+{ updateDualSetting(handle, [&](BrushSettings& s) { s.dualMode = std::clamp(static_cast<int>(std::lround(mode)), 0, 7); }); }
+void cs_brush_set_dual_hardness(CreativeBrushHandle handle, float hardness)
+{ updateDualSetting(handle, [&](BrushSettings& s) { s.dualHardness = std::clamp(hardness, 0.0f, 1.0f); }); }
+
+int cs_brush_set_dual_tip_png(CreativeBrushHandle handle, const uint8_t* data, uint64_t byteCount)
+{
+    BrushEngine* engine = getEngine(handle);
+    if (!engine || !data || !byteCount || byteCount > 32ull * 1024 * 1024) return 0;
+    QByteArray encoded(reinterpret_cast<const char*>(data), static_cast<qsizetype>(byteCount));
+    QBuffer buffer(&encoded);
+    if (!buffer.open(QIODevice::ReadOnly)) return 0;
+    QImageReader reader(&buffer, "PNG");
+    const QSize dimensions = reader.size();
+    if (!dimensions.isValid() || dimensions.width() > 4096 || dimensions.height() > 4096) return 0;
+    return engine->setDualTip(reader.read()) ? 1 : 0;
+}
+
+void cs_brush_clear_dual_tip(CreativeBrushHandle handle)
+{
+    if (BrushEngine* engine = getEngine(handle)) engine->clearDualTip();
 }
 
 void
@@ -2670,6 +2937,174 @@ bool withinTolerance(QRgb pixel, QRgb target, int tolerance)
         std::abs(qAlpha(pixel) - qAlpha(target)),
     }) <= tolerance;
 }
+}
+
+namespace
+{
+// Two-pass chamfer (3-4) distance to the nearest pixel where `seed` is set,
+// in 1/3-pixel units.  Used for gap closing and growing.
+std::vector<int> chamferDistance(const std::vector<uint8_t>& seed, int width, int height)
+{
+    constexpr int kFar = 1 << 28;
+    std::vector<int> d(size_t(width) * height, kFar);
+    for (size_t i = 0; i < d.size(); ++i)
+        if (seed[i]) d[i] = 0;
+    auto at = [&](int x, int y) -> int& { return d[size_t(y) * width + x]; };
+    for (int y = 0; y < height; ++y)
+        for (int x = 0; x < width; ++x) {
+            int v = at(x, y);
+            if (x > 0) v = std::min(v, at(x - 1, y) + 3);
+            if (y > 0) {
+                v = std::min(v, at(x, y - 1) + 3);
+                if (x > 0) v = std::min(v, at(x - 1, y - 1) + 4);
+                if (x + 1 < width) v = std::min(v, at(x + 1, y - 1) + 4);
+            }
+            at(x, y) = v;
+        }
+    for (int y = height - 1; y >= 0; --y)
+        for (int x = width - 1; x >= 0; --x) {
+            int v = at(x, y);
+            if (x + 1 < width) v = std::min(v, at(x + 1, y) + 3);
+            if (y + 1 < height) {
+                v = std::min(v, at(x, y + 1) + 3);
+                if (x + 1 < width) v = std::min(v, at(x + 1, y + 1) + 4);
+                if (x > 0) v = std::min(v, at(x - 1, y + 1) + 4);
+            }
+            at(x, y) = v;
+        }
+    return d;
+}
+
+QRgb readPixel(const uint8_t* base, int bytesPerLine, int format, int x, int y)
+{
+    const uint8_t* p = base + size_t(y) * bytesPerLine + size_t(x) * 4;
+    if (format == QImage::Format_RGBA8888)
+        return qRgba(p[0], p[1], p[2], p[3]);
+    return *reinterpret_cast<const QRgb*>(p);
+}
+}
+
+int cs_fill_ex(
+    uint8_t* target, int width, int height, int targetBytesPerLine, int targetFormat,
+    const uint8_t* reference, int referenceBytesPerLine, int referenceFormat,
+    int startX, int startY, int tolerance, int gap, int grow,
+    uint8_t red, uint8_t green, uint8_t blue, uint8_t alpha, int apply,
+    int* outX, int* outY, int* outWidth, int* outHeight)
+{
+    const auto okFormat = [](int f) { return f == QImage::Format_ARGB32 || f == QImage::Format_RGBA8888; };
+    if (!target || width <= 0 || height <= 0 || !okFormat(targetFormat) ||
+        targetBytesPerLine < width * 4 || startX < 0 || startX >= width || startY < 0 || startY >= height ||
+        !outX || !outY || !outWidth || !outHeight)
+        return 0;
+    if (!reference) {
+        reference = target;
+        referenceBytesPerLine = targetBytesPerLine;
+        referenceFormat = targetFormat;
+    }
+    if (!okFormat(referenceFormat) || referenceBytesPerLine < width * 4)
+        return 0;
+    try {
+        tolerance = std::clamp(tolerance, 0, 255);
+        gap = std::clamp(gap, 0, 64);
+        grow = std::clamp(grow, 0, 64);
+        *outX = *outY = *outWidth = *outHeight = 0;
+        const size_t count = size_t(width) * height;
+        const QRgb seedColour = readPixel(reference, referenceBytesPerLine, referenceFormat, startX, startY);
+        std::vector<uint8_t> passable(count), barrier(count);
+        for (int y = 0; y < height; ++y)
+            for (int x = 0; x < width; ++x) {
+                const QRgb p = readPixel(reference, referenceBytesPerLine, referenceFormat, x, y);
+                const bool same = (qAlpha(p) == 0 && qAlpha(seedColour) == 0) || withinTolerance(p, seedColour, tolerance);
+                passable[size_t(y) * width + x] = same;
+                barrier[size_t(y) * width + x] = !same;
+            }
+        // Gap closing: the flood may not enter pixels closer than `gap` to
+        // the line art, so a gap narrower than 2·gap is sealed.
+        std::vector<uint8_t> allowed = passable;
+        if (gap > 0) {
+            const std::vector<int> toLine = chamferDistance(barrier, width, height);
+            const int limit = gap * 3;
+            if (toLine[size_t(startY) * width + startX] > limit)
+                for (size_t i = 0; i < count; ++i)
+                    allowed[i] = passable[i] && toLine[i] > limit;
+        }
+        std::vector<uint8_t> region(count, 0);
+        std::vector<int> stack;
+        stack.reserve(4096);
+        stack.push_back(startY * width + startX);
+        while (!stack.empty()) {
+            const int index = stack.back();
+            stack.pop_back();
+            if (region[index] || !allowed[index])
+                continue;
+            region[index] = 1;
+            const int x = index % width, y = index / width;
+            if (x > 0) stack.push_back(index - 1);
+            if (x + 1 < width) stack.push_back(index + 1);
+            if (y > 0) stack.push_back(index - width);
+            if (y + 1 < height) stack.push_back(index + width);
+        }
+        // Give back the margin kept from the lines, but only through
+        // passable pixels and only `gap` steps: it reaches the line edges
+        // without flowing through the sealed gaps.
+        if (gap > 0) {
+            std::vector<int> frontier;
+            for (size_t i = 0; i < count; ++i)
+                if (region[i]) frontier.push_back(static_cast<int>(i));
+            for (int step = 0; step < gap + 1 && !frontier.empty(); ++step) {
+                std::vector<int> next;
+                for (const int index : frontier) {
+                    const int x = index % width, y = index / width;
+                    const int neighbours[4] = {x > 0 ? index - 1 : -1, x + 1 < width ? index + 1 : -1,
+                                               y > 0 ? index - width : -1, y + 1 < height ? index + width : -1};
+                    for (const int n : neighbours)
+                        if (n >= 0 && !region[n] && passable[n]) {
+                            region[n] = 1;
+                            next.push_back(n);
+                        }
+                }
+                frontier.swap(next);
+            }
+        }
+        if (grow > 0) {
+            const std::vector<int> toRegion = chamferDistance(region, width, height);
+            for (size_t i = 0; i < count; ++i)
+                if (toRegion[i] <= grow * 3) region[i] = 1;
+        }
+        int minX = width, minY = height, maxX = -1, maxY = -1;
+        const float sa = alpha / 255.0f;
+        for (int y = 0; y < height; ++y) {
+            uint8_t* row = target + size_t(y) * targetBytesPerLine;
+            for (int x = 0; x < width; ++x) {
+                if (!region[size_t(y) * width + x])
+                    continue;
+                minX = std::min(minX, x); maxX = std::max(maxX, x);
+                minY = std::min(minY, y); maxY = std::max(maxY, y);
+                if (!apply)
+                    continue;
+                const QRgb d = readPixel(target, targetBytesPerLine, targetFormat, x, y);
+                const float da = qAlpha(d) / 255.0f;
+                const float oa = sa + da * (1.0f - sa);
+                auto mix = [&](int s, int dc) {
+                    return oa <= 0.0f ? 0 : static_cast<int>(std::lround((s * sa + dc * da * (1.0f - sa)) / oa));
+                };
+                const int r = mix(red, qRed(d)), g = mix(green, qGreen(d)), b = mix(blue, qBlue(d));
+                const int a = static_cast<int>(std::lround(oa * 255.0f));
+                uint8_t* p = row + size_t(x) * 4;
+                if (targetFormat == QImage::Format_RGBA8888) {
+                    p[0] = uint8_t(r); p[1] = uint8_t(g); p[2] = uint8_t(b); p[3] = uint8_t(a);
+                } else {
+                    *reinterpret_cast<QRgb*>(p) = qRgba(r, g, b, a);
+                }
+            }
+        }
+        if (maxX >= minX) {
+            *outX = minX; *outY = minY; *outWidth = maxX - minX + 1; *outHeight = maxY - minY + 1;
+        }
+        return 1;
+    } catch (...) {
+        return 0;
+    }
 }
 
 int cs_fill(

@@ -17,19 +17,6 @@ from TOOLS.brush_settings_state import DEFAULT_BRUSH_SETTINGS
 from UI.theme.palette import COLORS
 
 
-def _make_swatch_icon(color: QColor, size: int = 18) -> QIcon:
-    """Génère une icône carré plein de la couleur donnée."""
-    px = QPixmap(size, size)
-    px.fill(Qt.GlobalColor.transparent)
-    painter = QPainter(px)
-    painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-    # fond avec la couleur
-    painter.setBrush(color)
-    painter.setPen(QColor(COLORS["border"]))
-    painter.drawRoundedRect(1, 1, size - 2, size - 2, 3, 3)
-    painter.end()
-    return QIcon(px)
-
 
 class ColorSwatchButton(QPushButton):
     """Bouton swatch couleur : montre uniquement la couleur + tooltip."""
@@ -66,15 +53,16 @@ class BrushPanelDock(QDockWidget):
     """Dense editor for the canonical CreativeCore brush state."""
 
     SECTION_NAMES = {
-        "Base": "Brush Tip & Shape",
-        "Pression": "Dynamics",
+        "Base": "Pointe et forme",
+        "Pression": "Dynamique",
         "Texture": "Texture",
-        "Couleur": "Color Dynamics",
-        "Peinture / Wet": "Paint · Wet / Smudge",
+        "Couleur": "Variations de couleur",
+        "Peinture / Wet": "Peinture humide",
+        "Double pointe": "Double pointe",
     }
 
     def __init__(self, canvas, parent=None) -> None:
-        super().__init__("Brush", parent)
+        super().__init__("Pinceau", parent)
         self.canvas = canvas
         self.controls: dict[str, QWidget] = {}
         self.setObjectName("BrushPanelDock")
@@ -85,7 +73,7 @@ class BrushPanelDock(QDockWidget):
             | QDockWidget.DockWidgetFeature.DockWidgetFloatable
             | QDockWidget.DockWidgetFeature.DockWidgetClosable
         )
-        install_dock_title(self, "Brush")
+        install_dock_title(self, "Pinceau")
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QScrollArea.Shape.NoFrame)
@@ -106,7 +94,7 @@ class BrushPanelDock(QDockWidget):
         self.preview.set_settings(values)
         self.root.addWidget(self.preview)
 
-        self.preset_label = QLabel(self.canvas.get_cpp_brush_preset_name() or "Custom Brush")
+        self.preset_label = QLabel(self.canvas.get_cpp_brush_preset_name() or "Pinceau personnalisé")
         self.preset_label.setObjectName("dockTitle")
         self.root.addWidget(self.preset_label)
 
@@ -133,11 +121,28 @@ class BrushPanelDock(QDockWidget):
             if group_name == "Couleur":
                 section.addWidget(self._color_swatch_row(values))
 
+            if group_name == "Double pointe":
+                from UI.docks.brush_settings_dialog import DUAL_MODES
+                mode_row = QHBoxLayout()
+                mode_label = QLabel("Mode de fusion")
+                mode_label.setObjectName("parameterLabel")
+                dual_mode = QComboBox()
+                dual_mode.addItems(DUAL_MODES)
+                dual_mode.setCurrentIndex(int(values.get("dualMode", 0)))
+                dual_mode.currentIndexChanged.connect(
+                    lambda index: self.canvas.set_brush_setting("dualMode", float(index)))
+                self.controls["dualMode"] = dual_mode
+                mode_row.addWidget(mode_label)
+                mode_row.addWidget(dual_mode, 1)
+                mode_widget = QWidget()
+                mode_widget.setLayout(mode_row)
+                section.addWidget(mode_widget)
+
             if group_name == "Peinture / Wet":
                 blend = QComboBox()
                 blend.addItems([
-                    "Normal", "Multiply", "Screen", "Overlay",
-                    "Darken", "Lighten",
+                    "Normal", "Produit", "Écran", "Incrustation",
+                    "Obscurcir", "Éclaircir",
                 ])
                 blend.setCurrentIndex(int(values["blendMode"]))
                 blend.currentIndexChanged.connect(
@@ -152,27 +157,20 @@ class BrushPanelDock(QDockWidget):
                 smooth_lbl.setObjectName("parameterLabel")
                 smooth_row.addWidget(smooth_lbl)
                 smooth_combo = QComboBox()
-                smooth_combo.addItems(["Désactivé", "Basic (inertie)", "Pondéré (corde)", "Stabilise (FIFO)"])
+                smooth_combo.addItems(["Désactivé", "Inertie", "Corde", "Moyenne glissante"])
                 smooth_combo.setToolTip(
-                    "Basic: inertie simple\n"
-                    "Pondéré: le curseur tire le pinceau comme une corde\n"
-                    "Stabilise: moyenne glissante des N derniers points"
+                    "Inertie : le trait suit le stylet avec un léger retard\n"
+                    "Corde : le stylet tire le pinceau au bout d'une corde\n"
+                    "Moyenne glissante : lisse sur les derniers points"
                 )
                 # Map index → mode string
                 _SMOOTH_MODES = ["none", "basic", "weighted", "stabilize"]
 
                 def _on_smooth(idx: int, _modes=_SMOOTH_MODES) -> None:
-                    mode = _modes[idx]
-                    # Persist the selection with the preset state.  The
-                    # native smoothing amount remains governed by the normal
-                    # Stabilisation control; this value selects its method.
+                    # The Canvas owns the application of this persistent
+                    # choice, so loading a preset has precisely the same
+                    # behaviour as changing it here.
                     self.canvas.set_brush_setting("smoothMode", idx)
-                    if hasattr(self.canvas, "brush_smoother"):
-                        if mode == "none":
-                            self.canvas.brush_smoother.set_mode("basic")
-                            self.canvas.brush_smoother.strength = 0.0
-                        else:
-                            self.canvas.brush_smoother.set_mode(mode)
 
                 smooth_combo.currentIndexChanged.connect(_on_smooth)
                 self.controls["smoothMode"] = smooth_combo
@@ -191,8 +189,14 @@ class BrushPanelDock(QDockWidget):
 
     def _add_numeric(self, layout, field, values, unit: str = "") -> None:
         key, label, minimum, maximum, step = field
+        percent = not unit and ((minimum >= -1.0 and maximum <= 1.0 and step <= 0.01)
+                                or key in ("spacing", "scatter", "dualSizeRatio",
+                                           "dualSpacing", "dualScatter"))
+        if not unit and key in ("angle", "rotationJitter"):
+            unit = " °"
         control = NumericSlider(
-            label, minimum, maximum, float(values[key]), step, unit, default=float(values[key])
+            label, minimum, maximum, float(values[key]), step, " %" if percent else unit,
+            default=float(values[key]), display_scale=100.0 if percent else 1.0,
         )
         control.valueChanged.connect(
             lambda value, setting=key: self.canvas.set_brush_setting(setting, value)
@@ -208,18 +212,18 @@ class BrushPanelDock(QDockWidget):
         row = QHBoxLayout()
         row.setSpacing(6)
 
-        fg_lbl = QLabel("FG")
+        fg_lbl = QLabel("Couleur")
         fg_lbl.setObjectName("parameterLabel")
         fg_lbl.setFixedWidth(20)
         row.addWidget(fg_lbl)
 
-        fg_swatch = ColorSwatchButton("Foreground")
+        fg_swatch = ColorSwatchButton("Couleur principale")
         fg_swatch.set_color(QColor(*values["color"]))
         self.controls["color"] = fg_swatch
 
         def _choose_fg() -> None:
             rgba = self.canvas.get_cpp_brush_settings()["color"]
-            color = QColorDialog.getColor(QColor(*rgba), self, "Couleur foreground")
+            color = QColorDialog.getColor(QColor(*rgba), self, "Couleur principale")
             if color.isValid():
                 self.canvas.set_brush_setting(
                     "color", [color.red(), color.green(), color.blue(), color.alpha()]
@@ -231,17 +235,17 @@ class BrushPanelDock(QDockWidget):
 
         row.addSpacing(12)
 
-        gr_lbl = QLabel("Grad")
+        gr_lbl = QLabel("Dégradé")
         gr_lbl.setObjectName("parameterLabel")
         row.addWidget(gr_lbl)
 
-        gr_swatch = ColorSwatchButton("Gradient color")
+        gr_swatch = ColorSwatchButton("Couleur de dégradé")
         gr_swatch.set_color(QColor(*values["gradientColor"]))
         self.controls["gradientColor"] = gr_swatch
 
         def _choose_gr() -> None:
             rgba = self.canvas.get_cpp_brush_settings()["gradientColor"]
-            color = QColorDialog.getColor(QColor(*rgba), self, "Couleur gradient")
+            color = QColorDialog.getColor(QColor(*rgba), self, "Couleur de dégradé")
             if color.isValid():
                 self.canvas.set_brush_setting(
                     "gradientColor", [color.red(), color.green(), color.blue(), color.alpha()]
@@ -263,7 +267,7 @@ class BrushPanelDock(QDockWidget):
     def sync_from_canvas(self, *_args) -> None:
         values = self.canvas.get_cpp_brush_settings()
         self.preview.set_settings(values)
-        self.preset_label.setText(self.canvas.get_cpp_brush_preset_name() or "Custom Brush")
+        self.preset_label.setText(self.canvas.get_cpp_brush_preset_name() or "Pinceau personnalisé")
         for key, control in self.controls.items():
             # Presets are intentionally forwards/backwards compatible.  A
             # control added by a newer Nebula build must not make opening an

@@ -201,6 +201,10 @@ int cs_tile_store_set(CreativeTileStoreHandle handle, int tile_x, int tile_y,
                       int image_format);
 int cs_tile_store_set_many(CreativeTileStoreHandle handle,
                            const CsTileWrite* writes, int count);
+int cs_tile_store_import_rgba(CreativeTileStoreHandle handle, const uint8_t* pixels,
+                              int width, int height, int stride, int x, int y);
+int cs_tile_store_thumbnail(CreativeTileStoreHandle handle, uint8_t* output,
+                            int width, int height, int stride);
 int cs_tile_store_write_image(CreativeTileStoreHandle handle, const uint8_t* pixels,
                               int width, int height, int stride, int image_format,
                               int x, int y, int dirty_width, int dirty_height,
@@ -210,6 +214,9 @@ int cs_tile_store_copy(CreativeTileStoreHandle handle, int tile_x, int tile_y,
                        int image_format);
 int cs_tile_store_copy_store(CreativeTileStoreHandle destination,
                              CreativeTileStoreHandle source);
+// Composite resident source tiles directly into destination (standard modes 0..11).
+int cs_tile_store_composite_from(CreativeTileStoreHandle destination,
+                                 CreativeTileStoreHandle source, float opacity, int mode);
 int cs_tile_store_materialize(CreativeTileStoreHandle handle, uint8_t* output,
                               int width, int height, int stride, int image_format);
 int cs_tile_store_info(CreativeTileStoreHandle handle, int tile_x, int tile_y,
@@ -219,6 +226,8 @@ int cs_tile_store_copy_keys(CreativeTileStoreHandle handle, int* xy_pairs,
 // Idem avec la révision de chaque tuile résidente (revisions : uint64_t[pair_capacity]).
 int cs_tile_store_copy_key_revisions(CreativeTileStoreHandle handle, int* xy_pairs,
                                      uint64_t* revisions, int pair_capacity);
+int cs_tile_store_copy_opaque_keys(CreativeTileStoreHandle handle, int* xy_pairs,
+                                   int pair_capacity);
 int cs_tile_store_remove(CreativeTileStoreHandle handle, int tile_x, int tile_y);
 int64_t cs_tile_store_write_png(CreativeTileStoreHandle handle, int tile_x,
                                 int tile_y, const char* path);
@@ -354,6 +363,19 @@ int cs_apply_linear_gradient(uint8_t* pixels, int width, int height, int stride,
                              int image_format, float start_x, float start_y,
                              float end_x, float end_y,
                              int red, int green, int blue, int alpha);
+
+// Two-stop raster gradient. Geometry: 0 linear, 1 radial, 2 conical.
+// Spread: 0 pad, 1 repeat, 2 reflect. Selection is optional and uses alpha
+// coverage; its dimensions must match the destination. Scratch storage is
+// bounded to one 128px tile, including for feathered selections.
+int cs_apply_gradient(uint8_t* pixels, int width, int height, int stride,
+                       int image_format, double start_x, double start_y,
+                       double end_x, double end_y, int geometry, int spread,
+                       int reverse, double opacity,
+                       int start_red, int start_green, int start_blue, int start_alpha,
+                       int end_red, int end_green, int end_blue, int end_alpha,
+                       const uint8_t* selection, int selection_width,
+                       int selection_height, int selection_stride, int selection_format);
 
 // Return a permutation mapping output stack indices to input indices.
 // direction is +1 for move-up and -1 for move-down; returns 1 on a move.
@@ -500,14 +522,21 @@ cs_brush_set_rotation_jitter(
  *                    « Angle Jitter: Direction » dans Photoshop.
  * tilt_follow      : le dab suit l'azimut de l'inclinaison du stylet (0..1).
  * tilt_elongation  : le dab s'aplatit avec l'inclinaison (0..1).
+ * tilt_size        : l'inclinaison module le diamètre (0..1).
+ * tilt_opacity     : l'inclinaison module l'opacité (0..1).
  */
 void cs_brush_set_direction_follow(CreativeBrushHandle handle, float value);
 void cs_brush_set_tilt_follow(CreativeBrushHandle handle, float value);
 void cs_brush_set_tilt_elongation(CreativeBrushHandle handle, float value);
+void cs_brush_set_tilt_size(CreativeBrushHandle handle, float value);
+void cs_brush_set_tilt_opacity(CreativeBrushHandle handle, float value);
+void cs_brush_set_random_size(CreativeBrushHandle handle, float value);
+void cs_brush_set_random_opacity(CreativeBrushHandle handle, float value);
 
 void cs_brush_set_velocity_size(CreativeBrushHandle handle, float value);
 void cs_brush_set_velocity_opacity(CreativeBrushHandle handle, float value);
 void cs_brush_set_velocity_flow(CreativeBrushHandle handle, float value);
+void cs_brush_set_velocity_spacing(CreativeBrushHandle handle, float value);
 
 void
 cs_brush_set_texture_strength(
@@ -557,6 +586,8 @@ cs_brush_set_texture_affect_opacity(
     int enabled
 );
 
+void cs_brush_set_texture_canvas_space(CreativeBrushHandle handle, int enabled);
+
 // Loads and decodes a grayscale brush texture in the native brush engine.
 // Returns 1 on success; invalid or oversized images leave the current texture
 // unchanged. The UI may pass the chosen file path but never decodes the pixels.
@@ -566,6 +597,18 @@ int cs_brush_set_bitmap_tip_path(CreativeBrushHandle handle, const char* path);
 int cs_brush_set_bitmap_tip_png(CreativeBrushHandle handle,
                                 const uint8_t* data, uint64_t byte_count);
 void cs_brush_clear_bitmap_tip(CreativeBrushHandle handle);
+
+// Dual brush (second tip). Sizes are relative to the main tip diameter.
+void cs_brush_set_dual_brush(CreativeBrushHandle handle, int enabled);
+void cs_brush_set_dual_size_ratio(CreativeBrushHandle handle, float ratio);
+void cs_brush_set_dual_spacing(CreativeBrushHandle handle, float spacing);
+void cs_brush_set_dual_scatter(CreativeBrushHandle handle, float scatter);
+void cs_brush_set_dual_count(CreativeBrushHandle handle, float count);
+void cs_brush_set_dual_hardness(CreativeBrushHandle handle, float hardness);
+void cs_brush_set_dual_mode(CreativeBrushHandle handle, float mode);
+void cs_brush_set_wrap_around(CreativeBrushHandle handle, int enabled);
+int cs_brush_set_dual_tip_png(CreativeBrushHandle handle, const uint8_t* data, uint64_t byteCount);
+void cs_brush_clear_dual_tip(CreativeBrushHandle handle);
 
 void
 cs_brush_set_dirty_color(
@@ -785,6 +828,18 @@ int cs_fill(
 int cs_fill_bounds(
     const uint8_t* pixels, int width, int height, int bytesPerLine, int imageFormat,
     int startX, int startY, int tolerance,
+    int* outX, int* outY, int* outWidth, int* outHeight
+);
+
+// Colouring fill: region detected on `reference` (another layer or the
+// visible composite; may equal `target`), gaps in the line art up to `gap`
+// pixels closed without leaking, then grown by `grow` pixels under the lines.
+// With apply == 0 only the bounds are computed (history planning).
+int cs_fill_ex(
+    uint8_t* target, int width, int height, int targetBytesPerLine, int targetFormat,
+    const uint8_t* reference, int referenceBytesPerLine, int referenceFormat,
+    int startX, int startY, int tolerance, int gap, int grow,
+    uint8_t red, uint8_t green, uint8_t blue, uint8_t alpha, int apply,
     int* outX, int* outY, int* outWidth, int* outHeight
 );
 

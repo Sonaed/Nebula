@@ -175,11 +175,5 @@ class ShortcutSheet(QDialog):
         browser.setHtml("".join(html))
 
 
-class Separator(QFrame):
-    def __init__(self):
-        super().__init__()
-        self.setFrameShape(QFrame.Shape.VLine)
-        self.setObjectName("optionsSeparator")
-
 
 __all__ = ["CommandPalette", "ShortcutSheet", "collect_actions"]

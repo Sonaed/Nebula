@@ -12,6 +12,8 @@
 #include <QColor>
 #include <QImage>
 #include <QPointF>
+#include <cstdint>
+#include <memory>
 #include <vector>
 
 class BrushEngine
@@ -113,31 +115,78 @@ private:
     float m_lastStrokeAngle = 0.0f;
 
     /*
-     * Tampon de trace (stroke buffer).
+     * Tampon de trace (stroke buffer) — modèle Photoshop/Krita.
      *
-     * Modèle Photoshop : les dabs accumulent leur couverture dans un masque
-     * propre au trait via a = a + flow·(1-a), qui sature naturellement à 1.
-     * Ce masque est ensuite composité UNE SEULE FOIS à l'opacité cible.
+     * Chaque pixel touché par le trait conserve :
+     *   - sa couverture cumulée (flottante) ;
+     *   - sa valeur AVANT le trait.
+     * Le pixel final est TOUJOURS recomposé depuis la valeur d'origine :
+     *   out = origine OVER (couleur, couverture)
+     * Repasser sur une zone ne peut donc jamais dépasser l'opacité du trait.
      *
-     * Sans lui, chaque dab est composité indépendamment et repasser sur une
-     * zone fait tendre l'alpha vers 1 au lieu de plafonner à `opacity` :
-     * `flow` et `opacity` deviennent alors mathématiquement interchangeables.
+     * L'ancienne version recomposait la couverture cumulée sur le pixel DÉJÀ
+     * peint après chaque dab : à 40 % d'opacité, un trait qui se chevauche
+     * montait à ~100 %.
+     *
+     * Stockage creux par tuiles de 64 px : seule la zone réellement peinte
+     * est allouée (un document 8K ne réserve plus 256 Mo de masque).
      */
-    std::vector<float> m_strokeMask;      // couverture cumulée [0..1]
-    int m_strokeMaskWidth = 0;
-    int m_strokeMaskHeight = 0;
-    bool m_strokeMaskActive = false;
-    float m_strokeOpacity = 1.0f;
+    static constexpr int kStrokeTileSize = 64;
+    struct StrokeTile {
+        float coverage[kStrokeTileSize * kStrokeTileSize];
+        float dual[kStrokeTileSize * kStrokeTileSize];
+        uint32_t original[kStrokeTileSize * kStrokeTileSize];
+    };
+    // Une copie du moteur (worker asynchrone, clones de symétrie) repart
+    // toujours d'un tampon vide : les tuiles ne sont jamais partagées.
+    struct StrokeTileStore {
+        std::vector<std::unique_ptr<StrokeTile>> tiles;
+        StrokeTileStore() = default;
+        StrokeTileStore(const StrokeTileStore&) {}
+        StrokeTileStore& operator=(const StrokeTileStore&) { tiles.clear(); return *this; }
+        StrokeTileStore(StrokeTileStore&&) noexcept = default;
+        StrokeTileStore& operator=(StrokeTileStore&&) noexcept = default;
+    };
+    StrokeTileStore m_strokeTiles;
+    int m_strokeTilesX = 0;
+    int m_strokeTilesY = 0;
+    int m_strokeImageWidth = 0;
+    int m_strokeImageHeight = 0;
+    QImage::Format m_strokeFormat = QImage::Format_Invalid;
+    bool m_strokeBufferActive = false;
+    bool m_strokeErase = false;
     QColor m_strokeColor;
-    int m_strokeDirtyLeft = 0;
-    int m_strokeDirtyTop = 0;
-    int m_strokeDirtyRight = -1;
-    int m_strokeDirtyBottom = -1;
 
-    void beginStrokeMask(int width, int height, float opacity, const QColor& color);
-    void accumulateStrokeMask(const QImage& dab, int offsetX, int offsetY, float flow);
-    void flushStrokeMask(QImage& image);
+    void resetStrokeBuffer();
+    void ensureStrokeBuffer(const QImage& image, const QColor& color, bool erase);
+    StrokeTile* strokeTile(const QImage& image, int tileX, int tileY);
+    void depositDab(QImage& image, const QImage& dab, int offsetX, int offsetY,
+                    float flow, float opacityCap);
+    // Gomme directe (sans tampon) : utilise la vraie forme du dab.
+    void eraseDabDirect(QImage& image, const QImage& dab, int offsetX, int offsetY, float strength);
+    // Dual brush: stamps the second tip along [from, to] into the stroke
+    // buffer's dual mask and re-composites the touched pixels.
+    void stampDualAlong(QImage& image, const QPointF& from, const QPointF& to, float mainSize);
+    void compositeBufferPixel(QImage& image, StrokeTile* tile, int index, int px, int py,
+                              QImage::Format storedFormat);
+    bool dualActive() const;
+    QImage m_dualTip;
+    double m_dualRemainder = 0.0;
+public:
+    bool setDualTip(const QImage& image);
+    void clearDualTip();
+private:
+    // Per-pixel wet paint: drags the real canvas from the previous dab,
+    // mixes in reservoir pigment, dilutes, and respects transparency.
+    void wetDab(QImage& image, const QImage& dab, int offsetX, int offsetY,
+                const QColor& pigment, float strength, int dragX, int dragY,
+                float smear, float pigmentRate, float pigmentAlpha);
+    QPointF m_previousDab;
+    bool m_hasPreviousDab = false;
 
+    // Advanced at every stroke start so two strokes never replay the same
+    // jitter/scatter sequence (identical strokes looked stamped).
+    unsigned int m_strokeCounter = 0;
     unsigned int m_randomState =
         12345;
 

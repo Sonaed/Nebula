@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import json
 import shutil
 import zipfile
@@ -39,6 +40,33 @@ class BrushPresetManager:
     DEFAULT_FAVORITES = {"Pencil HB", "Ink Pen", "Round Soft", "Oil Round", "Airbrush Soft", "Eraser Soft"}
     LEGACY_PRESETS = {"Pencil", "Ink", "Paint", "Round Soft Flow", "Flat Hard", "Flat Soft", "Airbrush"}
 
+    # Factory presets ship with French names.  The English names (and the
+    # pre-26 legacy names) stay valid aliases for scripts and old files.
+    FRENCH_NAMES = {
+        "Pencil HB": "Crayon HB", "Pencil 2B": "Crayon 2B", "Pencil 4H": "Crayon 4H",
+        "Mechanical Pencil": "Porte-mine", "Blue Sketch": "Esquisse légère",
+        "Col Erase": "Crayon effaçable", "Ink Brush": "Pinceau encre", "Fineliner": "Feutre fin",
+        "Marker": "Marqueur", "G-Pen": "Plume G", "Ink Pen": "Stylo encre",
+        "Oil Round": "Huile ronde", "Oil Flat": "Huile plate", "Watercolor": "Aquarelle",
+        "Gouache": "Gouache", "Blender": "Mélangeur", "Round Hard": "Rond dur",
+        "Round Soft": "Rond doux", "Airbrush Soft": "Aérographe doux",
+        "Airbrush Hard": "Aérographe dur", "Spray": "Bombe", "Glow": "Lueur", "Chalk": "Craie",
+        "Conte": "Conté", "Dry Brush": "Brosse sèche", "Stipple": "Pointillé",
+        "Charcoal": "Fusain", "Eraser Soft": "Gomme douce", "Eraser Hard": "Gomme dure",
+        "Eraser Pencil": "Gomme crayon", "Eraser Airbrush": "Gomme aérographe",
+        "Smudge": "Estompe", "Pixel": "Pixel", "Concept Block": "Aplat",
+    }
+    ENGLISH_NAMES = {french: english for english, french in FRENCH_NAMES.items()}
+    ALIASES = {**FRENCH_NAMES, "Pencil": "Crayon HB", "Ink": "Stylo encre", "Paint": "Huile ronde",
+               "Airbrush": "Aérographe doux", "Round Soft Flow": "Rond doux",
+               "Flat Hard": "Rond dur", "Flat Soft": "Rond doux"}
+
+    @classmethod
+    def canonical(cls, name: str) -> str:
+        """Current name of a preset, resolving English and legacy aliases."""
+        name = str(name).strip()
+        return cls.ALIASES.get(name, name)
+
     def __init__(self, directory: str | Path | None = None, create_builtins: bool = True):
         self.last_error = ""
         configured_root = os.environ.get("CREATIVE_SYSTEM_DATA_HOME", "").strip()
@@ -57,6 +85,8 @@ class BrushPresetManager:
             self.directory = Path(tempfile.gettempdir()) / "CreativeSystem" / "brush_presets"
             self.directory.mkdir(parents=True, exist_ok=True)
 
+        if create_builtins and self._builtins_current():
+            create_builtins = False
         if create_builtins:
             try:
                 self.create_builtin_presets()
@@ -66,6 +96,7 @@ class BrushPresetManager:
                 self.directory = Path(tempfile.gettempdir()) / "CreativeSystem" / "brush_presets"
                 self.directory.mkdir(parents=True, exist_ok=True)
                 self.create_builtin_presets()
+            self._remember_builtins()
 
     # ========================================================
     # PATHS
@@ -73,7 +104,7 @@ class BrushPresetManager:
 
     def preset_path(self, name: str) -> Path:
         safe_name = (
-            name.strip()
+            self.canonical(name)
             .replace("/", "_")
             .replace("\\", "_")
         )
@@ -159,11 +190,38 @@ class BrushPresetManager:
     # LOAD
     # ========================================================
 
+    # Several managers are created at start-up (canvas, docks, resources):
+    # install/migrate the factory presets once per library state, and parse
+    # each JSON file once per modification instead of on every lookup.
+    _BUILTIN_STAMPS: dict[str, int] = {}
+    _LOAD_CACHE: dict[str, tuple[tuple[int, int, int], dict]] = {}
+
+    def _directory_stamp(self) -> int:
+        try:
+            return self.directory.stat().st_mtime_ns
+        except OSError:
+            return -1
+
+    def _builtins_current(self) -> bool:
+        return self._BUILTIN_STAMPS.get(str(self.directory)) == self._directory_stamp()
+
+    def _remember_builtins(self) -> None:
+        self._BUILTIN_STAMPS[str(self.directory)] = self._directory_stamp()
+
     def load(self, name: str) -> dict | None:
         path = self.preset_path(name)
 
-        if not path.exists():
+        try:
+            stat = path.stat()
+        except OSError:
             return None
+        key = str(path)
+        # Inode included: every save is an atomic replace (new inode), so a
+        # coarse-mtime filesystem cannot serve a stale preset.
+        signature = (stat.st_mtime_ns, stat.st_size, stat.st_ino)
+        cached = self._LOAD_CACHE.get(key)
+        if cached is not None and cached[0] == signature:
+            return copy.deepcopy(cached[1])
 
         try:
             data = json.loads(
@@ -176,6 +234,8 @@ class BrushPresetManager:
             json.JSONDecodeError,
         ):
             return None
+        if isinstance(data, dict):
+            self._LOAD_CACHE[key] = (signature, copy.deepcopy(data))
 
         return data
 
@@ -237,7 +297,7 @@ class BrushPresetManager:
     def metadata(self, name: str) -> dict:
         data = self.load(name) or {}
         return {
-            "name": name,
+            "name": self.canonical(name),
             "category": str(data.get("category", "General")),
             "favorite": bool(data.get("favorite", False)),
             "version": int(data.get("version", 1)),
@@ -329,28 +389,119 @@ class BrushPresetManager:
             cached = cls._BITMAP_TIP_CACHE[kind] = cls._render_builtin_bitmap_tip(kind)
         return cached
 
+    _PAPER_CACHE: str | None = None
+
+    @classmethod
+    def _builtin_paper_texture(cls) -> str:
+        """Seamless 256 px drawing-paper tooth (grayscale PNG, base64).
+
+        Bright = raised fibres that catch graphite or chalk, dark = pits the
+        tool skips.  Built from wrapped value noise so the tile repeats
+        without seams, with a slight horizontal fibre direction.
+        """
+        if cls._PAPER_CACHE is not None:
+            return cls._PAPER_CACHE
+        import numpy as np
+        size = 256
+        rng = np.random.default_rng(20261003)
+        yy, xx = np.mgrid[0:size, 0:size].astype(np.float32)
+
+        def wrapped_noise(cells_x: int, cells_y: int) -> np.ndarray:
+            grid = rng.random((cells_y, cells_x), dtype=np.float32)
+            gx, gy = xx * cells_x / size, yy * cells_y / size
+            x0, y0 = gx.astype(int), gy.astype(int)
+            fx, fy = gx - x0, gy - y0
+            fx, fy = fx * fx * (3 - 2 * fx), fy * fy * (3 - 2 * fy)
+            x1, y1 = (x0 + 1) % cells_x, (y0 + 1) % cells_y
+            x0, y0 = x0 % cells_x, y0 % cells_y
+            top = grid[y0, x0] * (1 - fx) + grid[y0, x1] * fx
+            bottom = grid[y1, x0] * (1 - fx) + grid[y1, x1] * fx
+            return top * (1 - fy) + bottom * fy
+
+        tooth = (wrapped_noise(64, 85) * 0.45 + wrapped_noise(128, 128) * 0.30
+                 + wrapped_noise(32, 48) * 0.15 + wrapped_noise(8, 8) * 0.10)
+        tooth = (tooth - tooth.min()) / max(1e-6, float(tooth.max() - tooth.min()))
+        value = np.clip(0.18 + 1.05 * tooth, 0.0, 1.0) ** 0.8
+        gray = np.ascontiguousarray((value * 255.0 + 0.5).astype(np.uint8)).tobytes()
+        image = QImage(gray, size, size, size, QImage.Format.Format_Grayscale8)
+        cls._PAPER_CACHE = base64.b64encode(cls._png_bytes(image)).decode("ascii")
+        return cls._PAPER_CACHE
+
     @classmethod
     def _render_builtin_bitmap_tip(cls, kind: str) -> str:
+        """Render a natural-media tip from seeded value noise.
+
+        The previous generator hashed pixel coordinates linearly, which gave
+        visible diagonal moiré (Spray), barcode stripes (Dry Brush) and
+        grain that averaged away to nothing once the tip was scaled down.
+        """
+        import numpy as np
+
         size = 128
-        image = QImage(size, size, QImage.Format.Format_RGBA8888)
-        seed = int(hashlib.sha256(kind.encode("utf-8")).hexdigest()[:8], 16)
-        for y in range(size):
-            for x in range(size):
-                dx, dy = (x - 63.5) / 63.5, (y - 63.5) / 63.5
-                radius = math.sqrt(dx * dx + dy * dy)
-                noise = ((x * 1103515245 + y * 12345 + seed) & 255) / 255.0
-                if kind == "bristle":
-                    alpha = max(0.0, 1.0 - abs(dx) * 1.8) * (1.0 if int((x + seed) / 7) % 3 else 0.18)
-                elif kind == "speckle":
-                    alpha = 1.0 if radius < 1.0 and noise > 0.72 else 0.0
-                elif kind == "watercolor":
-                    alpha = max(0.0, 1.0 - radius) * (0.72 + noise * 0.28)
-                elif kind == "charcoal":
-                    alpha = max(0.0, 1.0 - radius * .85) * (.35 + noise * .65)
-                else:  # chalk and pencil: dry, granular centre.
-                    alpha = max(0.0, 1.0 - radius) * (0.20 + noise * .80)
-                value = max(0, min(255, round(alpha * 255)))
-                image.setPixelColor(x, y, QColor(value, value, value, value))
+        rng = np.random.default_rng(int(hashlib.sha256(kind.encode("utf-8")).hexdigest()[:8], 16))
+        yy, xx = np.mgrid[0:size, 0:size].astype(np.float32)
+        dx, dy = (xx - 63.5) / 63.5, (yy - 63.5) / 63.5
+        radius = np.sqrt(dx * dx + dy * dy)
+
+        def noise(cell: int) -> np.ndarray:
+            # Smooth value noise: bicubic-like upsampling of a coarse grid.
+            n = size // cell + 2
+            grid = rng.random((n, n), dtype=np.float32)
+            gx, gy = xx / cell, yy / cell
+            x0, y0 = gx.astype(int), gy.astype(int)
+            fx, fy = gx - x0, gy - y0
+            fx, fy = fx * fx * (3 - 2 * fx), fy * fy * (3 - 2 * fy)
+            top = grid[y0, x0] * (1 - fx) + grid[y0, x0 + 1] * fx
+            bottom = grid[y0 + 1, x0] * (1 - fx) + grid[y0 + 1, x0 + 1] * fx
+            return top * (1 - fy) + bottom * fy
+
+        def disc(edge: float) -> np.ndarray:
+            # 1 inside, smooth falloff over the outer ``edge`` fraction.
+            return np.clip((1.0 - radius) / max(edge, 1e-3), 0.0, 1.0)
+
+        if kind == "bristle":
+            # Individual hairs of varied width/strength inside a flat ferrule.
+            alpha = np.zeros((size, size), np.float32)
+            for _ in range(26):
+                cx = rng.uniform(8, 120)
+                width = rng.uniform(1.2, 3.6)
+                strength = rng.uniform(0.45, 1.0)
+                length = rng.uniform(0.70, 1.0)
+                hair = np.exp(-((xx - cx) / width) ** 2)
+                taper = np.clip((length - np.abs(dy)) / 0.25, 0.0, 1.0)
+                alpha = np.maximum(alpha, hair * taper * strength)
+            alpha *= np.clip((1.0 - np.abs(dx)) / 0.12, 0, 1)
+            alpha *= 0.75 + 0.25 * noise(8)
+        elif kind == "speckle":
+            # Discrete round droplets of varied size: reads as spray or
+            # stippling instead of a noise square.
+            alpha = np.zeros((size, size), np.float32)
+            for _ in range(70):
+                r = 0.92 * math.sqrt(rng.random())
+                a = rng.uniform(0, 2 * math.pi)
+                cx, cy = 63.5 + r * 63.5 * math.cos(a), 63.5 + r * 63.5 * math.sin(a)
+                dot = rng.uniform(1.4, 4.2)
+                d = np.sqrt((xx - cx) ** 2 + (yy - cy) ** 2)
+                alpha = np.maximum(alpha, np.clip(dot - d + 0.5, 0, 1) * rng.uniform(0.6, 1.0))
+        elif kind == "watercolor":
+            # Pigment pools at the edge of a wash (edge darkening).
+            rim = np.exp(-((radius - 0.86) / 0.10) ** 2)
+            body = 0.55 + 0.20 * noise(24) + 0.10 * noise(9)
+            alpha = disc(0.10) * np.clip(body + 0.45 * rim, 0, 1)
+        elif kind == "charcoal":
+            grain = noise(3) * 0.6 + noise(10) * 0.4
+            alpha = disc(0.55) * np.clip((grain - 0.30) * 2.2, 0, 1)
+        elif kind == "chalk":
+            grain = noise(4) * 0.7 + noise(14) * 0.3
+            alpha = disc(0.18) * np.clip((grain - 0.22) * 2.4, 0, 1)
+        else:  # pencil: graphite grain on a nearly solid lead.
+            grain = noise(3) * 0.55 + noise(7) * 0.45
+            alpha = disc(0.35) * (0.45 + 0.55 * grain)
+
+        value = np.clip(alpha * 255.0 + 0.5, 0, 255).astype(np.uint8)
+        buffer = np.ascontiguousarray(np.stack([value, value, value, value], axis=-1)).tobytes()
+        # ``buffer`` outlives the QImage view: the PNG is encoded right here.
+        image = QImage(buffer, size, size, size * 4, QImage.Format.Format_RGBA8888)
         return base64.b64encode(cls._png_bytes(image)).decode("ascii")
 
     @staticmethod
@@ -492,248 +643,31 @@ class BrushPresetManager:
     # BUILTIN PRESETS
     # ========================================================
 
-    def create_builtin_presets(self):
-        presets = {
-            "Pencil": {
-                "size": 8.0,
-                "opacity": 0.75,
-                "flow": 0.65,
-                "hardness": 0.55,
-                "spacing": 0.12,
-                "roundness": 0.9,
-                "angle": 0.0,
-                "scatter": 0.01,
-                "sizeJitter": 0.10,
-                "rotationJitter": 2.0,
-
-                "textureStrength": 0.25,
-                "textureScale": 1.4,
-                "textureRandomScale": 0.10,
-                "textureRandomOffset": 0.10,
-                "textureBrightness": 0.0,
-                "textureContrast": 1.1,
-                "textureMirror": True,
-                "textureAffectOpacity": True,
-
-                "dirtyColor": False,
-                "hueJitter": 0.0,
-                "saturationJitter": 0.02,
-                "brightnessJitter": 0.05,
-
-                "strokeGradient": False,
-                "linearGradient": True,
-                "radialGradient": False,
-                "gradientAmount": 0.0,
-
-                "blendMode": 0,
-                "paintMix": 1.0,
-
-                "wetMix": False,
-                "sampleCanvas": True,
-                "wetness": 0.0,
-                "pickup": 0.0,
-                "dilution": 0.0,
-                "smudge": 0.0,
-                "paintPersistence": 1.0,
-                "colorCarry": 1.0,
-
-                "pressureSize": True,
-                "pressureOpacity": False,
-                "pressureFlow": False,
-
-                "minimumSize": 0.01,
-                "minimumOpacity": 0.0,
-                "minimumFlow": 0.0,
-
-                "eraser": False,
-
-                "color": [30, 30, 30, 255],
-                "gradientColor": [255, 255, 255, 255],
-            },
-
-            "Ink": {
-                "size": 12.0,
-                "opacity": 1.0,
-                "flow": 1.0,
-                "hardness": 0.95,
-                "spacing": 0.08,
-                "roundness": 1.0,
-                "angle": 0.0,
-                "scatter": 0.0,
-                "sizeJitter": 0.03,
-                "rotationJitter": 0.0,
-
-                "textureStrength": 0.08,
-                "textureScale": 1.0,
-                "textureRandomScale": 0.03,
-                "textureRandomOffset": 0.03,
-                "textureBrightness": 0.0,
-                "textureContrast": 1.15,
-                "textureMirror": False,
-                "textureAffectOpacity": True,
-
-                "dirtyColor": False,
-                "hueJitter": 0.0,
-                "saturationJitter": 0.0,
-                "brightnessJitter": 0.02,
-
-                "strokeGradient": False,
-                "linearGradient": True,
-                "radialGradient": False,
-                "gradientAmount": 0.0,
-
-                "blendMode": 0,
-                "paintMix": 1.0,
-
-                "wetMix": False,
-                "sampleCanvas": True,
-                "wetness": 0.0,
-                "pickup": 0.0,
-                "dilution": 0.0,
-                "smudge": 0.0,
-                "paintPersistence": 1.0,
-                "colorCarry": 1.0,
-
-                "pressureSize": True,
-                "pressureOpacity": True,
-                "pressureFlow": False,
-
-                "minimumSize": 0.02,
-                "minimumOpacity": 0.0,
-                "minimumFlow": 0.0,
-
-                "eraser": False,
-
-                "color": [10, 10, 10, 255],
-                "gradientColor": [255, 255, 255, 255],
-            },
-
-            "Paint": {
-                "size": 70.0,
-                "opacity": 0.85,
-                "flow": 0.70,
-                "hardness": 0.35,
-                "spacing": 0.18,
-                "roundness": 0.95,
-                "angle": 0.0,
-                "scatter": 0.03,
-                "sizeJitter": 0.08,
-                "rotationJitter": 8.0,
-
-                "textureStrength": 0.30,
-                "textureScale": 1.2,
-                "textureRandomScale": 0.15,
-                "textureRandomOffset": 0.12,
-                "textureBrightness": 0.0,
-                "textureContrast": 0.9,
-                "textureMirror": True,
-                "textureAffectOpacity": True,
-
-                "dirtyColor": True,
-                "hueJitter": 5.0,
-                "saturationJitter": 0.08,
-                "brightnessJitter": 0.06,
-
-                "strokeGradient": False,
-                "linearGradient": True,
-                "radialGradient": False,
-                "gradientAmount": 0.0,
-
-                "blendMode": 0,
-                "paintMix": 1.0,
-
-                "wetMix": True,
-                "sampleCanvas": True,
-                "wetness": 0.45,
-                "pickup": 0.30,
-                "dilution": 0.20,
-                "smudge": 0.15,
-                "paintPersistence": 0.75,
-                "colorCarry": 0.85,
-
-                "pressureSize": True,
-                "pressureOpacity": True,
-                "pressureFlow": True,
-
-                "minimumSize": 0.05,
-                "minimumOpacity": 0.15,
-                "minimumFlow": 0.10,
-
-                "eraser": False,
-
-                "color": [210, 80, 70, 255],
-                "gradientColor": [255, 210, 80, 255],
-            },
-
-            "Charcoal": {
-                "size": 90.0,
-                "opacity": 0.62,
-                "flow": 0.55,
-                "hardness": 0.22,
-                "spacing": 0.25,
-                "roundness": 0.75,
-                "angle": 15.0,
-                "scatter": 0.12,
-                "sizeJitter": 0.18,
-                "rotationJitter": 25.0,
-
-                "textureStrength": 0.65,
-                "textureScale": 1.7,
-                "textureRandomScale": 0.25,
-                "textureRandomOffset": 0.25,
-                "textureBrightness": 0.05,
-                "textureContrast": 1.4,
-                "textureMirror": True,
-                "textureAffectOpacity": True,
-
-                "dirtyColor": True,
-                "hueJitter": 1.0,
-                "saturationJitter": 0.04,
-                "brightnessJitter": 0.10,
-
-                "strokeGradient": False,
-                "linearGradient": True,
-                "radialGradient": False,
-                "gradientAmount": 0.0,
-
-                "blendMode": 0,
-                "paintMix": 1.0,
-
-                "wetMix": False,
-                "sampleCanvas": True,
-                "wetness": 0.0,
-                "pickup": 0.0,
-                "dilution": 0.0,
-                "smudge": 0.05,
-                "paintPersistence": 1.0,
-                "colorCarry": 1.0,
-
-                "pressureSize": True,
-                "pressureOpacity": True,
-                "pressureFlow": False,
-
-                "minimumSize": 0.03,
-                "minimumOpacity": 0.0,
-                "minimumFlow": 0.0,
-
-                "eraser": False,
-
-                "color": [45, 42, 40, 255],
-                "gradientColor": [180, 175, 165, 255],
-            },
-        }
-
-        for name, settings in presets.items():
-            if name == "Charcoal":
+    def _migrate_english_builtins(self) -> None:
+        """Rename factory presets installed under English names (≤ 26.4.0)."""
+        for english in (*self.FRENCH_NAMES, *self.LEGACY_PRESETS):
+            french = self.ALIASES.get(english, english)
+            if french == english:
                 continue
-            path = self.preset_path(name)
+            old_path = self.directory / f"{english}.json"
+            if not old_path.is_file():
+                continue
+            try:
+                data = json.loads(old_path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                continue
+            if not (data.get("builtIn") or data.get("_legacy_builtin")):
+                continue  # a user preset that happens to use the name: keep it
+            try:
+                if data.get("builtIn") and english in self.FRENCH_NAMES and not self.preset_path(french).exists():
+                    data["name"] = french
+                    self._atomic_json_write(self.preset_path(french), data)
+                old_path.unlink()
+            except OSError:
+                continue
 
-            if not path.exists():
-                self.save(
-                    name,
-                    settings
-                )
-
+    def create_builtin_presets(self):
+        self._migrate_english_builtins()
         # Clean, ready-to-paint defaults requested for the first-run brush pack.
         pack = {
             "Charcoal": {},
@@ -818,6 +752,56 @@ class BrushPresetManager:
             "Concept Block": dict(angle=0., sizeJitter=.05, textureStrength=.10, textureScale=2., pressureFlow=False),
         }.items():
             pack[name].update(tuning)
+        # Revision 3 — tuned against rendered stroke sheets.  Each entry fixes
+        # something that looked or behaved wrong in revision 2.
+        for name, tuning in {
+            # Blending tools move existing paint instead of laying down colour.
+            "Blender": dict(opacity=1., flow=.70, hardness=0., spacing=.04, smudgeTool=True,
+                            wetMix=True, wetness=1., pickup=.80, smudge=.55, paintPersistence=0.,
+                            pressureSize=True, pressureFlow=True, minimumFlow=.10),
+            # Flat marker: constant tone, no dark build-up at stroke ends.
+            "Marker": dict(opacity=.85, flow=1., hardness=.90, pressureOpacity=False,
+                           pressureSize=False, minimumOpacity=1.),
+            # A blocking brush, not a 150 px wall.
+            "Concept Block": dict(size=60., hardness=.90, spacing=.05, pressureSize=False,
+                                  pressureOpacity=True, minimumOpacity=.35),
+            # Bristle tips follow the stroke so hairs drag lengthwise.
+            "Dry Brush": dict(size=45., roundness=1., spacing=.035, scatter=.02, sizeJitter=.06,
+                              rotationJitter=3., directionFollow=1., textureStrength=.35,
+                              wetMix=False, wetness=0., pickup=0., pressureSize=True,
+                              pressureOpacity=True, pressureFlow=False, minimumOpacity=.20),
+            "Oil Flat": dict(roundness=1., directionFollow=1., spacing=.035, textureStrength=.12),
+            "Spray": dict(size=90., opacity=1., flow=.45, spacing=.18, scatter=.45, sizeJitter=.30,
+                          rotationJitter=180., brightnessJitter=0., saturationJitter=0.,
+                          pressureFlow=True, pressureSize=False),
+            # Clean round dots: the speckle tip shrank each dot to dust.
+            "Stipple": dict(size=10., hardness=.90, spacing=1.6, scatter=1.2, sizeJitter=.35,
+                            rotationJitter=0., brightnessJitter=0., saturationJitter=0.,
+                            pressureSize=True, pressureFlow=False, minimumSize=.60,
+                            _csbr_bitmap_tip_png=""),
+            "Watercolor": dict(opacity=.55, flow=.35, spacing=.04, textureStrength=.20),
+            # blendMode 1 is Multiply in CreativeCore: the "glow" darkened.
+            "Glow": dict(blendMode=2, flow=.25),
+            "Smudge": dict(opacity=1., flow=1., hardness=.60, smudgeTool=True, smudge=.65, pickup=.75,
+                           wetness=1., paintPersistence=0., pressureFlow=True, minimumFlow=.15),
+            "Pencil HB": dict(spacing=.08, textureStrength=.18),
+            "Pencil 2B": dict(spacing=.08, textureStrength=.25),
+            "Charcoal": dict(spacing=.06, textureStrength=.35),
+            "Chalk": dict(spacing=.07, textureStrength=.30),
+        }.items():
+            pack[name].update(tuning)
+        # Revision 4 — paper grain fixed to the canvas for dry media, so the
+        # tooth no longer repeats inside every dab.
+        paper = self._builtin_paper_texture()
+        for name, strength, scale in (
+            ("Pencil HB", .55, .5), ("Pencil 2B", .65, .5), ("Pencil 4H", .45, .5),
+            ("Col Erase", .55, .5), ("Charcoal", .80, .75), ("Chalk", .75, .75),
+            ("Conte", .65, .6), ("Eraser Pencil", .40, .5),
+        ):
+            pack[name].update(textureCanvasSpace=True, textureStrength=strength,
+                              textureScale=scale, textureRandomScale=0., textureRandomOffset=0.,
+                              textureContrast=1.0, textureBrightness=0., textureMirror=False,
+                              textureAffectOpacity=True, _csbr_texture_png=paper)
         # Keep the historical names as compatibility aliases.  Existing
         # documents and scripts can still request ``Ink``/``Pencil`` while
         # the newer curated presets remain available beside them.
@@ -846,13 +830,15 @@ class BrushPresetManager:
             "colorCarry": 1.0, "pressureSize": False,
             "pressureOpacity": False, "pressureFlow": False,
             "minimumSize": 0.01, "minimumOpacity": 0.0,
-            "minimumFlow": 0.0, "eraser": False,
+            "minimumFlow": 0.0, "eraser": False, "smudgeTool": False, "directionFollow": 0.0,
+            "textureCanvasSpace": False, "_csbr_texture_png": "",
             "color": [30, 30, 30, 255], "gradientColor": [255, 255, 255, 255],
         }
         tips = {"Pencil HB": "pencil", "Pencil 2B": "pencil", "Col Erase": "pencil",
+                "Eraser Pencil": "pencil",
                 "Charcoal": "charcoal", "Chalk": "chalk", "Conte": "chalk",
                 "Dry Brush": "bristle", "Oil Flat": "bristle", "Watercolor": "watercolor",
-                "Spray": "speckle", "Stipple": "speckle"}
+                "Spray": "speckle"}
         for name, tip_kind in tips.items():
             if name in pack:
                 pack[name]["_csbr_bitmap_tip_png"] = self._builtin_bitmap_tip(tip_kind)
@@ -864,10 +850,10 @@ class BrushPresetManager:
                     continue
                 settings = {**common, **values}
                 data = {
-                    **settings, "name": name, "format": "CreativeSystemBrushPreset",
+                    **settings, "name": self.canonical(name), "format": "CreativeSystemBrushPreset",
                     "version": self.FORMAT_VERSION, "category": self.BUILTIN_CATEGORIES.get(name, "07_Utility"),
                     "favorite": name in self.DEFAULT_FAVORITES, "builtIn": True,
-                    "builtinRevision": 2,
+                    "builtinRevision": 4,
                 }
                 self._atomic_json_write(path, data)
         finally:
@@ -879,11 +865,7 @@ class BrushPresetManager:
             if path.name == self.CATEGORY_FILE:
                 continue
             data = self.load(path.stem)
-            name = path.stem
-            if name in self.LEGACY_PRESETS and data is not None:
-                data["_legacy_builtin"] = True
-                self._atomic_json_write(path, data)
-                continue
+            name = self.ENGLISH_NAMES.get(path.stem, path.stem)
             # Built-ins are installed by the application, unlike a copied or
             # imported user preset.  Upgrade only those known factory presets
             # to the complete revision; custom brushes remain untouched.
@@ -892,16 +874,16 @@ class BrushPresetManager:
             except (TypeError, ValueError):
                 builtin_revision = 0
             if (data and data.get("builtIn") is True and name in pack
-                    and builtin_revision < 2):
+                    and builtin_revision < 4):
                 settings = {**common, **pack[name]}
                 data = {
-                    **settings, "name": name,
+                    **settings, "name": self.canonical(name),
                     "format": "CreativeSystemBrushPreset",
                     "version": self.FORMAT_VERSION,
                     "category": self.BUILTIN_CATEGORIES.get(name, "07_Utility"),
                     "favorite": name in self.DEFAULT_FAVORITES,
                     "builtIn": True,
-                    "builtinRevision": 2,
+                    "builtinRevision": 4,
                 }
                 self._atomic_json_write(self.preset_path(name), data)
             if not data or name not in self.BUILTIN_CATEGORIES:

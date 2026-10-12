@@ -1,0 +1,93 @@
+{
+  "date": "2026-10-01",
+  "python": "3.14.7",
+  "platform": "Linux-7.2.7-1-garuda-x86_64-with-glibc2.44",
+  "before": {
+    "scope": "CPU GPU preparation with native tiles; excludes GL drawing and input latency",
+    "document": [
+      4096,
+      4096
+    ],
+    "layers": 3,
+    "resident_tiles_per_layer": 4096,
+    "visible_tiles": 192,
+    "viewport_bounded": false,
+    "scenarios": {
+      "cold": {
+        "median_ms": 643.4829,
+        "max_ms": 729.0946,
+        "frames": 5,
+        "revision_reads": 15,
+        "pixel_tile_reads": 61440
+      },
+      "idle": {
+        "median_ms": 6.1555,
+        "max_ms": 24.2365,
+        "frames": 30,
+        "revision_reads": 90,
+        "pixel_tile_reads": 0
+      },
+      "single_tile_edit": {
+        "median_ms": 8.54,
+        "max_ms": 10.9482,
+        "frames": 30,
+        "revision_reads": 90,
+        "pixel_tile_reads": 30
+      },
+      "pan": {
+        "median_ms": 6.3246,
+        "max_ms": 8.1587,
+        "frames": 30,
+        "revision_reads": 90,
+        "pixel_tile_reads": 0
+      }
+    }
+  },
+  "after": {
+    "scope": "CPU GPU preparation with native tiles; excludes GL drawing and input latency",
+    "document": [
+      4096,
+      4096
+    ],
+    "layers": 3,
+    "resident_tiles_per_layer": 4096,
+    "visible_tiles": 192,
+    "viewport_bounded": true,
+    "scenarios": {
+      "cold": {
+        "median_ms": 36.2991,
+        "max_ms": 41.5652,
+        "frames": 5,
+        "revision_reads": 15,
+        "pixel_tile_reads": 2880
+      },
+      "idle": {
+        "median_ms": 0.1659,
+        "max_ms": 0.2727,
+        "frames": 30,
+        "revision_reads": 0,
+        "pixel_tile_reads": 0
+      },
+      "single_tile_edit": {
+        "median_ms": 2.0403,
+        "max_ms": 2.6653,
+        "frames": 30,
+        "revision_reads": 30,
+        "pixel_tile_reads": 30
+      },
+      "pan": {
+        "median_ms": 2.2708,
+        "max_ms": 2.7733,
+        "frames": 30,
+        "revision_reads": 0,
+        "pixel_tile_reads": 1044
+      }
+    }
+  },
+  "median_speedups": {
+    "cold": 17.73,
+    "idle": 37.1,
+    "single_tile_edit": 4.19,
+    "pan": 2.79
+  }
+}

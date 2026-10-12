@@ -51,26 +51,6 @@ def line(x0: int, y0: int, x1: int, y1: int) -> list[tuple[int, int]]:
             y0 += sy
 
 
-def pixel_perfect(points: Sequence[tuple[int, int]]) -> list[tuple[int, int]]:
-    """Supprime les « coins en L » d'un tracé à main levée (style Aseprite).
-
-    Un point est retiré quand il touche orthogonalement le précédent ET le
-    suivant, alors que ceux-ci se touchent en diagonale.
-    """
-    out: list[tuple[int, int]] = []
-    for point in points:
-        if out and out[-1] == point:
-            continue
-        out.append(point)
-        if len(out) >= 3:
-            (ax, ay), (bx, by), (cx, cy) = out[-3], out[-2], out[-1]
-            ortho_ab = abs(ax - bx) + abs(ay - by) == 1
-            ortho_bc = abs(bx - cx) + abs(by - cy) == 1
-            diagonal = abs(ax - cx) == 1 and abs(ay - cy) == 1
-            if ortho_ab and ortho_bc and diagonal:
-                del out[-2]
-    return out
-
 
 def stamp(size: int, shape: str = "square") -> list[tuple[int, int]]:
     """Décalages d'une pointe de ``size`` pixels (carrée ou ronde pixel)."""
@@ -127,9 +107,6 @@ def dither_on(x: int, y: int, density: float) -> bool:
         return False
     return BAYER4[y % 4][x % 4] < density * 16
 
-
-def checker_on(x: int, y: int) -> bool:
-    return (x + y) % 2 == 0
 
 
 # ── palettes ─────────────────────────────────────────────────

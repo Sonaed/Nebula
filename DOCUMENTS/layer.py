@@ -3,6 +3,37 @@ from uuid import uuid4
 from DOCUMENTS.tile_store import TileStore, TILE_SIZE
 
 
+
+def mask_store_coverage(store) -> QImage | None:
+    """Full-size coverage of a sparse mask store (absent tiles = revealed)."""
+    if store is None:
+        return None
+    image = QImage(store.width, store.height, QImage.Format.Format_ARGB32)
+    image.fill(QColor(255, 255, 255, 255))
+    painter = QPainter(image)
+    painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_Source)
+    for tx, ty in store.occupied_keys:
+        painter.drawImage(store.tile_rect(tx, ty).topLeft(), store.tile(tx, ty))
+    painter.end()
+    return image
+
+
+def mask_store_grayscale(store, fmt=QImage.Format.Format_RGBA8888) -> QImage | None:
+    """Opaque grey view of a sparse mask store: black hides, white reveals."""
+    if store is None:
+        return None
+    image = QImage(store.width, store.height, fmt)
+    image.fill(QColor(255, 255, 255, 255))
+    painter = QPainter(image)
+    for tx, ty in store.occupied_keys:
+        rect = store.tile_rect(tx, ty)
+        # coverage alpha a over black -> grey level a
+        painter.fillRect(rect, QColor(0, 0, 0, 255))
+        painter.drawImage(rect.topLeft(), store.tile(tx, ty))
+    painter.end()
+    return image
+
+
 class Layer:
 
     def __init__(
@@ -38,6 +69,10 @@ class Layer:
         # of operations. The sampled/source layer is never mutated.
         self.retouch_operations: list[dict] = []
         self.transform_state: dict | None = None
+        # Complex transforms are committed to pixels for now, while this log
+        # preserves their editable intent for reopening, audit and future GPU
+        # preview/re-edit sessions.
+        self.transform_operations: list[dict] = []
         self._transform_cache: tuple | None = None
 
         # =========================
@@ -52,6 +87,10 @@ class Layer:
         # When True the mask is kept but not applied during projection,
         # equivalent to Photoshop's Shift-click mask disable.
         self.mask_disabled: bool = False
+        self.mask_linked: bool = True
+        # Vector masks are stored as serializable paths; rasterization remains
+        # tile-local in the compositor that consumes them.
+        self.vector_mask: list[dict] = []
         self._image_cache: QImage | None = None
         self._image_cache_key: int | None = None
         self._cache_dirty = False
@@ -84,33 +123,11 @@ class Layer:
         full coverage (Photoshop's white), so every full-document consumer must
         go through this instead of materialize().
         """
-        store = self.alpha_mask_store
-        if store is None:
-            return None
-        image = QImage(store.width, store.height, QImage.Format.Format_ARGB32)
-        image.fill(QColor(255, 255, 255, 255))
-        painter = QPainter(image)
-        painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_Source)
-        for tx, ty in store.occupied_keys:
-            painter.drawImage(store.tile_rect(tx, ty).topLeft(), store.tile(tx, ty))
-        painter.end()
-        return image
+        return mask_store_coverage(self.alpha_mask_store)
 
     def alpha_mask_grayscale(self, fmt=QImage.Format.Format_RGBA8888) -> QImage | None:
         """Photoshop-style view of the mask: opaque grey, black hides, white reveals."""
-        store = self.alpha_mask_store
-        if store is None:
-            return None
-        image = QImage(store.width, store.height, fmt)
-        image.fill(QColor(255, 255, 255, 255))
-        painter = QPainter(image)
-        for tx, ty in store.occupied_keys:
-            rect = store.tile_rect(tx, ty)
-            # coverage alpha a over black -> grey level a
-            painter.fillRect(rect, QColor(0, 0, 0, 255))
-            painter.drawImage(rect.topLeft(), store.tile(tx, ty))
-        painter.end()
-        return image
+        return mask_store_grayscale(self.alpha_mask_store, fmt)
 
     @property
     def alpha_mask(self) -> QImage | None:
@@ -187,9 +204,6 @@ class Layer:
             self._image_cache_key = None
             self._cache_dirty = False
         return changed
-
-    def release_image_cache(self) -> None:
-        self.commit_image_cache(release=True)
 
     def discard_image_cache(self) -> None:
         """Drop the compatibility image after authoritative tile edits."""

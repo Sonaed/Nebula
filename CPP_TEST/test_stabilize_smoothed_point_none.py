@@ -92,6 +92,8 @@ def _run_stabilize_block(smoothed_point_attr_present: bool, smoothed_point_value
         cpp_brush_library=SimpleNamespace(cs_brush_smooth_point=_fake_smooth_point),
         cpp_brush=object(),
     )
+    fake_self._cpp_smooth_native_point = lambda point: FakeQPointF(
+        point.x() + 1.0, point.y() + 1.0)
     if smoothed_point_attr_present:
         fake_self._cpp_smoothed_point = smoothed_point_value
 

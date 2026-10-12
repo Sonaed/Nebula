@@ -5,11 +5,17 @@ from unittest.mock import patch
 
 from PySide6.QtCore import QPoint, QPointF, QRectF, QSize, Qt
 from PySide6.QtGui import QColor, QImage, QPainter, QPainterPath
+from PySide6.QtWidgets import QApplication
 
 from DOCUMENTS.selection import (SelectionMask, SelectionOperation,
                                  _native_selection_library)
 from CORE.native_bridge import native_selection_combine
 from TOOLS.selection_tools import SelectionTools
+from CANVAS.canvas import Canvas
+from DOCUMENTS.document import Document
+
+
+APP = QApplication.instance() or QApplication([])
 
 
 def _qt_shape_reference(tool, size, points):
@@ -78,14 +84,17 @@ class SelectionTests(unittest.TestCase):
         self.assertTrue(selection.contains(2, 2)); self.assertFalse(selection.contains(70, 2)); self.assertTrue(selection.contains(120, 120))
         self.assertEqual(selection.occupied_tiles(), {(0, 0), (1, 1)})
 
-    def test_sparse_tile_store_is_authoritative_after_edit(self) -> None:
+    def test_sparse_tiles_are_published_lazily_without_losing_pixels(self) -> None:
         selection = SelectionMask(256, 128)
         candidate = QImage(256, 128, QImage.Format.Format_ARGB32)
         candidate.fill(0)
         candidate.setPixelColor(200, 70, QColor("white"))
         selection.combine(candidate, SelectionOperation.REPLACE)
-        self.assertIsNone(selection._image)
+        self.assertTrue(selection._tiles_dirty)
+        self.assertEqual(selection._tile_store.occupied_keys, set())
         self.assertEqual(selection.occupied_tiles(), {(3, 1)})
+        self.assertFalse(selection._tiles_dirty)
+        selection._image = None  # Simulate releasing the dense cache after saving.
         self.assertTrue(selection.contains(200, 70))
 
     def test_selection_bridge_accepts_enum_operations(self) -> None:
@@ -127,6 +136,21 @@ class SelectionTests(unittest.TestCase):
         mask = SelectionTools.magic_wand(image, QPoint(0, 1), 0)
         self.assertTrue(mask.pixelColor(1, 1).alpha() > 0)
         self.assertEqual(mask.pixelColor(3, 1).alpha(), 0)
+
+    def test_magic_wand_empty_sparse_tile_uses_exact_transparent_shortcut(self) -> None:
+        canvas = Canvas()
+        try:
+            canvas.set_document(Document(512, 384, 72, None))
+            layer = canvas.get_active_layer()
+            # A resident tile elsewhere must not prevent the known-empty tile
+            # shortcut at the clicked position.
+            layer.image.setPixelColor(300, 20, QColor("red"))
+            layer.commit_image_cache()
+            canvas.select_magic_wand_at(QPointF(10, 10), Qt.KeyboardModifier.NoModifier)
+            self.assertEqual(canvas.document.selection.bounds(), canvas.document.selection.image.rect())
+            self.assertEqual(canvas.tile_history.index, 1)
+        finally:
+            canvas.close()
 
     def test_load_layer_alpha_as_selection(self) -> None:
         image = QImage(5, 4, QImage.Format.Format_ARGB32)

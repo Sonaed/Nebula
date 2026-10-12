@@ -128,7 +128,8 @@ class LargeDocumentIOTests(unittest.TestCase):
         from types import SimpleNamespace
         from CORE.application import CreativeSystem
         document = Document(8, 8)
-        fake = SimpleNamespace(canvas=SimpleNamespace(document=document),
+        fake = SimpleNamespace(canvas=SimpleNamespace(document=document,
+                                                    tile_history=SimpleNamespace(index=3)),
             _remember_file_directory=lambda path: None,
             _remember_recent_document=lambda path: None,
             update_window_title=lambda: None)
@@ -139,6 +140,7 @@ class LargeDocumentIOTests(unittest.TestCase):
                 CreativeSystem.save_file_as(fake)
                 save.assert_called_once_with(document, path)
                 self.assertEqual(fake.current_file, path)
+                self.assertEqual(fake._last_saved_history_index, 3)
 
     def test_gpu_cache_hit_refreshes_eviction_order(self):
         from types import SimpleNamespace

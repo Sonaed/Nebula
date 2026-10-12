@@ -1,0 +1,43 @@
+Sat Oct  3 20:27:13 2026    /tmp/nebula-editor-after.prof
+
+         7453590 function calls (7285647 primitive calls) in 13.833 seconds
+
+   Ordered by: cumulative time
+   List reduced from 2383 to 35 due to restriction <35>
+
+   ncalls  tottime  percall  cumtime  percall filename:lineno(function)
+    255/1    0.014    0.000   13.836   13.836 {built-in method builtins.exec}
+        1    0.002    0.002   13.836   13.836 benchmark_editor_actions.py:1(<module>)
+        1    0.007    0.007   13.439   13.439 benchmark_editor_actions.py:23(main)
+      281    0.001    0.000    8.443    0.030 benchmark_editor_actions.py:47(timed)
+       12    0.000    0.000    7.982    0.665 benchmark_editor_actions.py:70(action)
+        2    0.000    0.000    3.698    1.849 canvas.py:2499(select_magic_wand_at)
+       12    0.737    0.061    3.638    0.303 tile_store.py:504(write_image_at)
+   106402    1.743    0.000    2.470    0.000 native_bridge.py:648(_image_call)
+    64555    0.332    0.000    2.055    0.000 tile_store.py:291(tile)
+        1    0.002    0.002    1.989    1.989 benchmark_editor_actions.py:98(<lambda>)
+        1    0.000    0.000    1.711    1.711 benchmark_editor_actions.py:96(<lambda>)
+        2    0.000    0.000    1.672    0.836 selection_tools.py:137(magic_wand)
+       14    0.014    0.001    1.642    0.117 canvas.py:2916(commit_history_action)
+       14    0.018    0.001    1.627    0.116 tile_history.py:658(commit)
+       52    0.047    0.001    1.587    0.031 tile_history.py:756(_apply)
+        6    0.001    0.000    1.515    0.253 canvas.py:2903(apply_selection_edit)
+        1    0.000    0.000    1.396    1.396 blend_modes.py:543(composite_document)
+    64555    0.044    0.000    1.388    0.000 native_bridge.py:672(copy)
+        2    0.000    0.000    1.286    0.643 benchmark_editor_actions.py:58(stroke)
+      242    0.003    0.000    1.251    0.005 benchmark_editor_actions.py:50(event)
+        4    0.001    0.000    1.202    0.300 benchmark_editor_actions.py:101(structure)
+       16    0.010    0.001    1.072    0.067 tile_history.py:606(_capture_selection_tiles)
+        1    0.000    0.000    1.065    1.065 blend_modes.py:413(composite_document_layers)
+        1    0.000    0.000    1.065    1.065 blend_modes.py:73(composite_layers)
+        1    0.392    0.392    1.065    1.065 native_bridge.py:1492(composite_layers_native)
+    41829    0.162    0.000    1.041    0.000 tile_store.py:432(set_tile)
+        1    0.000    0.000    1.009    1.009 benchmark_editor_actions.py:109(<lambda>)
+      240    0.015    0.000    0.988    0.004 canvas.py:6252(_replay_mouse_curve)
+      238    0.001    0.000    0.965    0.004 benchmark_editor_actions.py:60(<lambda>)
+     1268    0.027    0.000    0.965    0.001 canvas.py:6701(_mouseMoveEvent_impl)
+      238    0.002    0.000    0.961    0.004 canvas.py:6227(mouseMoveEvent)
+       18    0.001    0.000    0.921    0.051 tile_store.py:538(materialize)
+    43112    0.037    0.000    0.871    0.000 tile_store.py:132(counted)
+     1284    0.001    0.000    0.843    0.001 layer.py:137(image)
+       26    0.001    0.000    0.818    0.031 canvas.py:3076(undo)

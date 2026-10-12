@@ -204,7 +204,7 @@ class MemoryManager(QObject):
     def _configure_tile_scratch(self) -> None:
         document = getattr(self.canvas, "document", None)
         layers = tuple(getattr(document, "layers", ()))
-        selection_store = getattr(getattr(document, "selection", None), "tile_store", None)
+        selection_store = getattr(getattr(document, "selection", None), "_tile_store", None)
         stores = [(str(layer.id), layer.tile_store) for layer in layers]
         if selection_store is not None:
             stores.append(("selection", selection_store))
@@ -244,9 +244,10 @@ class MemoryManager(QObject):
         document_bytes = sum(layer.tile_store.allocated_bytes()
                              + _image_bytes(getattr(layer, "_image_cache", None))
                              for layer in document.layers)
-        selection_store = getattr(document.selection, "tile_store", None)
+        selection_store = getattr(document.selection, "_tile_store", None)
         if selection_store is not None:
             document_bytes += max(0, int(selection_store.allocated_bytes()))
+            document_bytes += _image_bytes(getattr(document.selection, "_image", None))
         else:
             document_bytes += _image_bytes(document.selection.image)
         document_bytes += sum(max(0, int(group.alpha_mask_store.allocated_bytes()))
@@ -320,6 +321,18 @@ class MemoryManager(QObject):
             tile_suffix = f" · T {live['visible']}v/{live['prefetch']}p"
         self.label.setText(f"RAM {process_mb:.0f}/{limit_mb:.0f} MB · GPU {gpu_mb:.0f} MB{tile_suffix}")
         over_budget = snapshot.process_bytes > snapshot.limit_bytes
+        # Live RAM/GPU/tile counters are diagnostics: keep the status bar
+        # clean and show them only when they matter (over budget) or when the
+        # user asked for them (Préférences ▸ Interface ▸ diagnostics).
+        try:
+            from PySide6.QtCore import QSettings
+            show_always = QSettings("CreativeSystem", "CreativeSystem").value(
+                "interface/show_diagnostics", False, bool)
+        except Exception:
+            show_always = False
+        self.label.setVisible(bool(show_always or over_budget))
+        if over_budget and not show_always:
+            self.label.setText(f"Mémoire élevée : {process_mb:.0f}/{limit_mb:.0f} MB")
         self.label.setProperty("warning", over_budget)
         self.label.style().unpolish(self.label)
         self.label.style().polish(self.label)

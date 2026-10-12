@@ -3,7 +3,6 @@ from PySide6.QtWidgets import (
     QWidget,
     QVBoxLayout,
     QHBoxLayout,
-    QLayout,
     QPushButton,
     QLabel,
     QSlider,
@@ -13,15 +12,7 @@ from PySide6.QtWidgets import (
 )
 
 from PySide6.QtCore import Qt, QSettings
-from PySide6.QtCore import QPointF
-from PySide6.QtGui import (
-    QPainter,
-    QBrush,
-    QColor,
-    QPaintEvent,
-    QImage,
-    QRadialGradient,
-)
+from PySide6.QtGui import QPainter, QColor, QPaintEvent
 
 from CANVAS.canvas import Canvas
 from TOOLS.brush_preset_manager import BrushPresetManager
@@ -87,220 +78,18 @@ class BrushPreview(QFrame):
         self,
         event: QPaintEvent
     ) -> None:
-
-        painter = QPainter(
-            self
-        )
-
-        painter.setRenderHint(
-            QPainter.RenderHint.Antialiasing
-        )
-
-        painter.fillRect(
-            self.rect(),
-            QColor(
-                21,
-                23,
-                26
-            )
-        )
-
-        preview_diameter = max(
-            4.0,
-            min(
-                self.preview_size,
-                70.0
-            )
-        )
-
-        radius = (
-            preview_diameter
-            / 2.0
-        )
-
-        hardness = (
-            self.preview_hardness
-        )
-
-        center_x = (
-            self.width()
-            / 2.0
-        )
-
-        center_y = (
-            self.height()
-            / 2.0
-        )
-
-        painter.setPen(
-            Qt.PenStyle.NoPen
-        )
-
-        # A compact stroke preview communicates spacing/opacity/flow much
-        # better than a static dab while remaining cheap (the image is tiny).
-        if self.preview_settings:
-            image = QImage(180, 64, QImage.Format.Format_RGBA8888)
-            image.fill(QColor(0, 0, 0, 0))
-            settings = self.preview_settings
-            color = QColor(*settings.get("color", [220, 220, 220, 255]))
-            preview_painter = QPainter(image)
-            preview_painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-            size = max(2.0, min(64.0, float(settings.get("size", 20.0))))
-            opacity = max(0.0, min(1.0, float(settings.get("opacity", 1.0))))
-            flow = max(0.0, min(1.0, float(settings.get("flow", 1.0))))
-            hardness = max(0.0, min(1.0, float(settings.get("hardness", 0.8))))
-            spacing = max(0.05, min(1.0, float(settings.get("spacing", 0.15))))
-            steps = max(2, int(144.0 / max(1.0, size * spacing)))
-            for index in range(steps + 1):
-                t = index / steps
-                center = QPointF(18.0 + 144.0 * t, 32.0)
-                radius = size * (0.72 + 0.28 * t) * 0.5
-                gradient = QRadialGradient(center, max(1.0, radius))
-                solid = QColor(color)
-                solid.setAlphaF(opacity * flow)
-                transparent = QColor(solid)
-                transparent.setAlpha(0)
-                gradient.setColorAt(0.0, solid)
-                gradient.setColorAt(hardness, solid)
-                gradient.setColorAt(1.0, transparent)
-                preview_painter.setPen(Qt.PenStyle.NoPen)
-                preview_painter.setBrush(gradient)
-                preview_painter.drawEllipse(center, radius, radius)
-            preview_painter.end()
-            target = self.rect().adjusted(4, 4, -4, -4)
-            painter.drawImage(target, image)
-            painter.end()
-            return
-
-        if hardness < 0.95:
-
-            steps = 18
-
-            for index in range(
-                steps,
-                0,
-                -1
-            ):
-
-                factor = (
-                    index
-                    / steps
-                )
-
-                current_radius = (
-                    radius
-                    * factor
-                )
-
-                distance_from_center = (
-                    1.0
-                    - factor
-                )
-
-                alpha = int(
-                    255
-                    * max(
-                        0.0,
-                        1.0
-                        - (
-                            distance_from_center
-                            / max(
-                                1.0 - hardness,
-                                0.01
-                            )
-                        )
-                    )
-                )
-
-                alpha = max(
-                    0,
-                    min(
-                        255,
-                        alpha
-                    )
-                )
-
-                painter.setBrush(
-                    QBrush(
-                        QColor(
-                            225,
-                            225,
-                            225,
-                            alpha
-                        )
-                    )
-                )
-
-                x = int(
-                    round(
-                        center_x
-                        - current_radius
-                    )
-                )
-
-                y = int(
-                    round(
-                        center_y
-                        - current_radius
-                    )
-                )
-
-                diameter = int(
-                    round(
-                        current_radius
-                        * 2.0
-                    )
-                )
-
-                painter.drawEllipse(
-                    x,
-                    y,
-                    diameter,
-                    diameter
-                )
-
-        else:
-
-            painter.setBrush(
-                QBrush(
-                    QColor(
-                        230,
-                        230,
-                        230
-                    )
-                )
-            )
-
-            x = int(
-                round(
-                    center_x
-                    - radius
-                )
-            )
-
-            y = int(
-                round(
-                    center_y
-                    - radius
-                )
-            )
-
-            diameter = int(
-                round(
-                    radius
-                    * 2.0
-                )
-            )
-
-            painter.drawEllipse(
-                x,
-                y,
-                diameter,
-                diameter
-            )
-
+        # Same renderer as the preset list: the real tip, light ink on the
+        # panel background (the old preview drew black on near-black).
+        from UI.docks.brush_presets_dock import BrushPresetsDock
+        super().paintEvent(event)
+        settings = dict(self.preview_settings) or {"size": self.preview_size,
+                                                   "hardness": self.preview_hardness}
+        image = BrushPresetsDock._render_thumbnail(settings, "preview")
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
+        target = self.rect().adjusted(8, 6, -8, -6)
+        painter.drawImage(target, image)
         painter.end()
-
 
 class ToolsDock(QDockWidget):
 

@@ -3,10 +3,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 import numpy as np
-from PySide6.QtCore import QPoint, QPointF, QRectF, Qt
+from PySide6.QtCore import QPoint, QPointF, QRect, QRectF, Qt
 from PySide6.QtGui import QColor, QImage, QPainter, QPainterPath
 from CORE.native_bridge import (load_creative_core, native_magic_wand,
-                                fill_image_native, native_selection_shape_mask)
+                                fill_image_native, native_selection_shape_mask,
+                                native_selection_bounds, copy_image_rect_native)
 
 
 @dataclass
@@ -47,8 +48,31 @@ def feather_mask(mask: QImage, radius: int) -> None:
     if radius == 0:
         return
     from DOCUMENTS.selection import _native_filters
-    _native_filters().selection_feather(mask.bits(), mask.width(), mask.height(), radius,
-                                        stride=mask.bytesPerLine())
+    _edit_region(mask, radius, lambda image: _native_filters().selection_feather(
+        image.bits(), image.width(), image.height(), radius, stride=image.bytesPerLine()))
+
+
+def _edit_region(mask, margin, operation):
+    if not isinstance(mask, QImage):
+        operation(mask)  # Native-wiring test doubles.
+        return
+    values = native_selection_bounds(mask)
+    if values is None:
+        raise RuntimeError('CreativeCore is required to measure mask bounds')
+    bounds = QRect(*values)
+    if bounds.isEmpty():
+        return
+    region = bounds.adjusted(-margin,-margin,margin,margin).intersected(mask.rect())
+    local = mask.copy(region)
+    operation(local)
+    if not copy_image_rect_native(local,mask,local.rect(),region.x(),region.y()):
+        raise RuntimeError('Could not apply selection edge processing')
+
+
+# Keep the exact former float32 rounding without full-canvas float workspaces.
+_AA_LUT = np.array([np.rint((np.float32(.5)*h + np.float32(.5)*
+    (np.arange(10,dtype=np.float32)/np.float32(9)))*np.float32(255)).astype(np.uint8)
+    for h in (0,1)])
 
 
 def antialias_mask(mask: QImage) -> None:
@@ -58,13 +82,14 @@ def antialias_mask(mask: QImage) -> None:
     coverage from their 3x3 neighbourhood. The edge is softened symmetrically,
     so the selection neither grows nor shrinks.
     """
-    alpha = _alpha_view(mask)
-    hard = (alpha >= 128).astype(np.float32)
-    padded = np.pad(hard, 1, mode="edge")
-    h, w = hard.shape
-    box = sum(padded[dy:dy + h, dx:dx + w] for dy in range(3) for dx in range(3)) / 9.0
-    soft = 0.5 * hard + 0.5 * box
-    alpha[:, :] = np.clip(np.rint(soft * 255.0), 0, 255).astype(np.uint8)
+    def apply(image):
+        alpha = _alpha_view(image)
+        hard = (alpha >= 128).astype(np.uint8)
+        padded = np.pad(hard, 1, mode='edge')
+        h,w = hard.shape
+        counts = sum(padded[dy:dy+h,dx:dx+w] for dy in range(3) for dx in range(3))
+        alpha[:,:] = _AA_LUT[hard,counts]
+    _edit_region(mask,1,apply)
 
 
 class SelectionTools:
@@ -73,6 +98,25 @@ class SelectionTools:
     def __init__(self, cpp_library=None) -> None:
         self.cpp_library = cpp_library or load_creative_core()
         self.options = SelectionOptions()
+
+    @staticmethod
+    def shape_region(tool: str, size, points, anti_alias=True, feather=0):
+        """Return (mask, document origin) including all antialias/feather support."""
+        if tool not in SelectionTools.SHAPE_TOOLS:
+            raise ValueError(f'Outil de sélection inconnu : {tool}')
+        if not points:
+            return _new_mask(QRect(0,0,1,1).size()), QPoint()
+        import math
+        margin=max(0,int(feather)) + (2 if anti_alias and tool!='select_rectangle' else 1)
+        left=math.floor(min(p.x() for p in points))-margin
+        top=math.floor(min(p.y() for p in points))-margin
+        right=math.ceil(max(p.x() for p in points))+margin
+        bottom=math.ceil(max(p.y() for p in points))+margin
+        region=QRect(QPoint(left,top),QPoint(right,bottom)).intersected(QRect(QPoint(),size))
+        if region.isEmpty():
+            return _new_mask(QRect(0,0,1,1).size()),QPoint(-2,-2)
+        local=[QPointF(p)-QPointF(region.topLeft()) for p in points]
+        return SelectionTools.shape_mask(tool,region.size(),local,anti_alias,feather),region.topLeft()
 
     @staticmethod
     def shape_mask(tool: str, size, points: list[QPoint | QPointF],
@@ -87,32 +131,6 @@ class SelectionTools:
             raise RuntimeError("CreativeCore is required for shape selection")
         if anti_alias and tool != "select_rectangle":
             antialias_mask(mask)
-        feather_mask(mask, feather)
-        return mask
-        painter = QPainter(mask)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing,
-                              bool(anti_alias) and tool != "select_rectangle")
-        painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(QColor(255, 255, 255, 255))
-        if tool in ("select_rectangle", "select_ellipse"):
-            first, last = QPointF(points[0]), QPointF(points[-1])
-            bounds = QRectF(first, last).normalized()
-            if tool == "select_rectangle":
-                # Snap to whole pixels: a marquee never has soft edges.
-                bounds = QRectF(round(bounds.left()), round(bounds.top()),
-                                round(bounds.right()) - round(bounds.left()),
-                                round(bounds.bottom()) - round(bounds.top()))
-                painter.drawRect(bounds)
-            else:
-                painter.drawEllipse(bounds)
-        elif len(points) >= 3:
-            path = QPainterPath(QPointF(points[0]))
-            for point in points[1:]:
-                path.lineTo(QPointF(point))
-            path.closeSubpath()
-            path.setFillRule(Qt.FillRule.WindingFill)
-            painter.drawPath(path)
-        painter.end()
         feather_mask(mask, feather)
         return mask
 

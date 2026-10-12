@@ -29,11 +29,31 @@ class LayerGroup:
     alpha_mask_store: TileStore | None = field(default=None, repr=False, compare=False)
     mask_disabled: bool = False
 
-    def ensure_alpha_mask(self, width: int, height: int) -> TileStore:
+    def ensure_alpha_mask(self, width: int | None = None, height: int | None = None) -> TileStore:
+        """Create the sparse mask store on first use (size needed only then)."""
         if self.alpha_mask_store is None:
-            self.alpha_mask_store = TileStore(width, height, TILE_SIZE,
+            if width is None or height is None:
+                raise ValueError("A new group mask needs the document size")
+            self.alpha_mask_store = TileStore(int(width), int(height), TILE_SIZE,
                                               QImage.Format.Format_ARGB32)
         return self.alpha_mask_store
+
+    def set_alpha_mask(self, image: QImage | None) -> None:
+        """Remove the mask (None) or replace it with a full-size coverage image."""
+        if image is None or image.isNull():
+            if self.alpha_mask_store is not None:
+                self.alpha_mask_store.close()
+            self.alpha_mask_store = None
+            return
+        self.ensure_alpha_mask(image.width(), image.height()).write_image(image)
+
+    def alpha_mask_coverage(self) -> QImage | None:
+        from DOCUMENTS.layer import mask_store_coverage
+        return mask_store_coverage(self.alpha_mask_store)
+
+    def alpha_mask_grayscale(self, fmt=QImage.Format.Format_RGBA8888) -> QImage | None:
+        from DOCUMENTS.layer import mask_store_grayscale
+        return mask_store_grayscale(self.alpha_mask_store, fmt)
 
     def cached_tile(self, key: tuple[int, int], signature: tuple) -> QImage | None:
         entry = self._tile_cache.get(key)

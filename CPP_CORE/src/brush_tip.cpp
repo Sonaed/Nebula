@@ -150,7 +150,16 @@ void BrushTip::draw(
 
             float brushAlpha;
 
-            if (distance <= hardness)
+            // Largeur d'un pixel dans l'espace normalisé du dab.  Quand la
+            // zone de fondu (1 - hardness) est plus fine qu'un pixel, le
+            // contour est porté uniquement par edgeCoverage : sinon le profil
+            // tombait à zéro pile sur le rayon et coupait la moitié
+            // extérieure de l'anticrénelage (pointe dure ~0,5 px trop fine,
+            // bord extérieur crénelé).
+            const float pixelWidth = 1.0f / std::max(radius * roundness, 0.5f);
+            const float profileDistance = std::min(distance, 1.0f);
+
+            if (profileDistance <= hardness || (1.0f - hardness) <= pixelWidth)
             {
                 brushAlpha = 1.0f;
             }
@@ -165,7 +174,7 @@ void BrushTip::draw(
 
                 float falloff =
                     1.0f -
-                    (distance -
+                    (profileDistance -
                      hardness) /
                     range;
 
@@ -191,17 +200,16 @@ void BrushTip::draw(
                     continue;
             }
 
-            const float u =
-                (normalizedX * 0.5f +
-                 0.5f) *
-                textureScale +
-                textureOffsetX;
+            // Canvas-space grain: the engine passes the dab centre in canvas
+            // pixels as the offset and the tile size in pixels as the scale,
+            // so the grain stays put on the page from dab to dab.
+            const float u = settings.textureCanvasSpace
+                ? (localX + textureOffsetX) / textureScale
+                : (normalizedX * 0.5f + 0.5f) * textureScale + textureOffsetX;
 
-            const float v =
-                (normalizedY * 0.5f +
-                 0.5f) *
-                textureScale +
-                textureOffsetY;
+            const float v = settings.textureCanvasSpace
+                ? (localY + textureOffsetY) / textureScale
+                : (normalizedY * 0.5f + 0.5f) * textureScale + textureOffsetY;
 
             const float textureValue =
                 BrushTexture::sample(
@@ -289,7 +297,8 @@ void BrushTip::draw(
                 // grayscale render of that same shape, not paint color).
             }
 
-            if (settings.textureAffectOpacity)
+            // Canvas-space grain is applied by the stroke buffer instead.
+            if (settings.textureAffectOpacity && !settings.textureCanvasSpace)
             {
                 finalAlpha *=
                     finalTexture;

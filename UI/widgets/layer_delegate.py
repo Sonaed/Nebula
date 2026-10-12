@@ -48,8 +48,25 @@ class LayerItemDelegate(QStyledItemDelegate):
             painter.setPen(Qt.PenStyle.NoPen)
             painter.setBrush(QColor(COLORS["folder"]) if visible else QColor(COLORS["text_disabled"]))
             painter.drawRoundedRect(QRect(rect.left() + 48 + depth * 16, rect.center().y() - 8, 18, 14), 2, 2)
+            text_left = rect.left() + 74 + depth * 16
+            if folder.get("has_mask"):
+                # Folder mask: same box as a layer mask, clickable to paint it.
+                mask_rect = QRect(rect.left() + 72 + depth * 16, rect.top() + 5, 36, 36)
+                painter.fillRect(mask_rect, QColor(COLORS["text"]))
+                mask = index.data(Qt.ItemDataRole.UserRole + 3)
+                if mask is not None:
+                    painter.drawPixmap(mask_rect, mask)
+                if folder.get("mask_disabled"):
+                    painter.setPen(QPen(QColor(COLORS["danger"]), 2))
+                    painter.drawLine(mask_rect.topLeft(), mask_rect.bottomRight())
+                    painter.drawLine(mask_rect.topRight(), mask_rect.bottomLeft())
+                painter.setBrush(Qt.BrushStyle.NoBrush)
+                painter.setPen(QPen(QColor(COLORS["accent"]), 2) if folder.get("mask_selected")
+                               else QPen(QColor(COLORS["text_secondary"]), 1))
+                painter.drawRect(mask_rect)
+                text_left = mask_rect.right() + 7
             painter.setPen(QColor(COLORS["text_bright"] if visible else COLORS["text_disabled"]))
-            painter.drawText(QRect(rect.left() + 74 + depth * 16, rect.top(), rect.width() - 79, rect.height()),
+            painter.drawText(QRect(text_left, rect.top(), rect.right() - text_left - 4, rect.height()),
                              Qt.AlignmentFlag.AlignVCenter, str(index.data(Qt.ItemDataRole.DisplayRole)))
             painter.restore()
             return

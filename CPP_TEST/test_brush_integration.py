@@ -29,6 +29,51 @@ class BrushIntegrationTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.canvas.close()
 
+    def test_embedded_texture_reaches_native_engine_and_clears_with_plain_preset(self) -> None:
+        import base64
+        from pathlib import Path
+        from TOOLS.brush_preset_manager import BrushPresetManager
+        with tempfile.TemporaryDirectory() as directory:
+            texture = QImage(32, 32, QImage.Format.Format_RGB32)
+            texture.fill(QColor('black'))
+            data = BrushPresetManager._png_bytes(texture)
+            manager = BrushPresetManager(directory, create_builtins=False)
+            manager.save('Procedural', {'size': 32, 'hardness': 1, 'opacity': 1, 'flow': 1,
+                'textureStrength': 1, 'textureAffectOpacity': True,
+                '_csbr_texture_png': base64.b64encode(data).decode(),
+                '_procedural_texture': {'version': 1}, '_procedural_texture_role': 'grain'})
+            manager.save('Plain', {'size': 32, 'hardness': 1, 'textureStrength': 1})
+            canvas = self.canvas
+            canvas.brush_preset_manager = manager
+            self.assertTrue(canvas.load_cpp_brush_preset('Procedural'))
+            self.assertEqual(canvas._cpp_texture_png, data)
+            self.assertEqual(canvas.get_cpp_brush_settings()['_procedural_texture_role'], 'grain')
+            image = QImage(64, 64, QImage.Format.Format_RGBA8888)
+            image.fill(Qt.GlobalColor.transparent)
+            canvas._cpp_draw_segment(image, QPoint(32,32), QPoint(32,32), 1, 1)
+            self.assertEqual(image.pixelColor(32,32).alpha(), 0)
+            self.assertTrue(canvas.load_cpp_brush_preset('Plain'))
+            self.assertIsNone(canvas._cpp_texture_png)
+            self.assertNotIn('_csbr_texture_png', canvas.get_cpp_brush_settings())
+            self.assertNotIn('_procedural_texture', canvas.get_cpp_brush_settings())
+            canvas._cpp_end_stroke()
+            canvas._cpp_draw_segment(image, QPoint(32,32), QPoint(32,32), 1, 1)
+            self.assertGreater(image.pixelColor(32,32).alpha(), 200)
+            canvas._cpp_end_stroke()
+            # Manual texture replacement must update the canonical embedded asset.
+            texture.fill(QColor('white'))
+            path = Path(directory) / 'replacement.png'
+            texture.save(str(path))
+            self.assertTrue(canvas.load_brush_texture(str(path)))
+            self.assertNotEqual(canvas._brush_texture_png, data)
+            canvas.clear_brush_texture()
+            self.assertNotIn('_csbr_texture_png', canvas.get_cpp_brush_settings())
+
+    def test_pixel_preset_keeps_its_hard_edge_setting(self) -> None:
+        """Preset-only settings must survive the canonical brush state."""
+        self.assertTrue(self.canvas.load_cpp_brush_preset("Pixel"))
+        self.assertFalse(self.canvas.get_cpp_brush_settings()["antialiasing"])
+
     def test_canvas_requires_native_brush_engine(self) -> None:
         with patch("CANVAS.canvas.load_creative_core", return_value=None):
             with self.assertRaisesRegex(RuntimeError, "BrushEngine"):
@@ -86,10 +131,13 @@ class BrushIntegrationTests(unittest.TestCase):
         with patch.object(self.canvas, "_cpp_draw_segment", side_effect=capture):
             self._send_press_move_release()
 
-        self.assertEqual(len(calls), 1)
+        # The move is replayed as short curve sub-segments (Catmull-Rom).
+        self.assertGreaterEqual(len(calls), 1)
         self.assertAlmostEqual(calls[0][0], 0.20)
-        self.assertAlmostEqual(calls[0][1], 0.80)
-        self.assertEqual(calls[0][2:], ((15.0, 16.0), (15.0, 16.0)))
+        self.assertAlmostEqual(calls[-1][1], 0.80)
+        for previous, current in zip(calls, calls[1:]):
+            self.assertAlmostEqual(previous[1], current[0])  # pressure is continuous
+        self.assertTrue(all(call[2:] == ((15.0, 16.0), (15.0, 16.0)) for call in calls))
 
     def test_async_tablet_sequence_submits_pressure_and_tilt_to_the_worker(self) -> None:
         canvas = self.canvas
@@ -118,13 +166,14 @@ class BrushIntegrationTests(unittest.TestCase):
 
         # begin est simulé (il soumet lui-même le premier point) : seul le segment
         # du TabletMove atteint cs_brush_async_submit.
-        self.assertEqual(submit.call_count, 1)
-        (handle, sx, sy, p0, tx0, ty0, ex, ey, p1, tx1, ty1), _ = submit.call_args
-        self.assertEqual(handle, sentinel)
-        self.assertAlmostEqual(p0, 0.20)
-        self.assertAlmostEqual(p1, 0.80)
-        self.assertEqual((tx0, ty0, tx1, ty1), (15.0, 16.0, 15.0, 16.0))
-        self.assertNotEqual((sx, sy), (ex, ey))
+        self.assertGreaterEqual(submit.call_count, 1)
+        segments = [call.args for call in submit.call_args_list]
+        self.assertTrue(all(segment[0] == sentinel for segment in segments))
+        self.assertAlmostEqual(segments[0][3], 0.20)
+        self.assertAlmostEqual(segments[-1][8], 0.80)
+        self.assertTrue(all(segment[4:6] == (15.0, 16.0) and segment[9:11] == (15.0, 16.0)
+                            for segment in segments))
+        self.assertNotEqual(segments[0][1:3], segments[-1][6:8])
         finish.assert_called_once_with(sentinel)
 
     def test_canonical_state_updates_cpp_and_python_fallback(self) -> None:
@@ -152,7 +201,7 @@ class BrushIntegrationTests(unittest.TestCase):
         )
         self.assertEqual(
             self.canvas.get_cpp_brush_preset_name(),
-            "Ink",
+            "Stylo encre",  # legacy "Ink" resolves to the French factory preset
         )
 
     def test_picker_samples_visible_composite(self) -> None:
@@ -560,8 +609,14 @@ class BrushIntegrationTests(unittest.TestCase):
             stabilize=True,
         )
         self.assertGreater(image.pixelColor(210, 100).alpha(), 0)
-        # The native brush paints the terminal dab as well; this is required
-        # for a stroke to end under the pointer instead of leaving a gap.
+        # A stabilizer trails the pen by design; on release the tail brings
+        # the stroke onto the lift point so it ends under the pointer
+        # instead of leaving a gap.
+        self.canvas._stroke_raw_point = QPointF(300, 100)
+        previous = self.canvas._cpp_smoothed_point
+        for point in self.canvas._stabilizer_tail_points():
+            image = self.canvas._cpp_draw_segment(image, previous, point, 1.0, 1.0)
+            previous = point
         self.assertGreater(image.pixelColor(300, 100).alpha(), 0)
         self.canvas._cpp_end_stroke()
 
